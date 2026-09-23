@@ -94,6 +94,29 @@ elseif(APPLE)
         system_posix.cpp
         threading_mac.cpp
     )
+elseif(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    # libnx backends where one exists; POSIX (newlib) for the rest.
+    target_sources(rexcore PRIVATE
+        atomic_posix.cpp
+        clock_posix.cpp
+        dbg_posix.cpp
+        dynlib_switch.cpp
+        exception_handler_switch.cpp
+        filesystem_posix.cpp
+        fiber_switch.cpp
+        keyboard_dialog_switch.cpp
+        logging_switch.cpp
+        mapped_memory_posix.cpp
+        math_gcc.cpp
+        memory_switch.cpp
+        net_switch.cpp
+        platform/console_posix.cpp
+        platform/env_posix.cpp
+        seh_posix.cpp
+        socket_posix.cpp
+        system_posix.cpp
+        threading_switch.cpp
+    )
 elseif(UNIX)
     target_sources(rexcore PRIVATE
         atomic_posix.cpp

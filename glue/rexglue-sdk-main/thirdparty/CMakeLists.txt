@@ -159,6 +159,14 @@ target_compile_options(o1heap PRIVATE -w)
 # xxHash - extremely fast non-cryptographic hash (git submodule)
 if(NOT TARGET xxHash::xxhash)
     set(XXHASH_BUILD_XXHSUM OFF CACHE BOOL "" FORCE)
+    if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+        # xxHash picks x86 dispatch from the HOST architecture
+        # (CMAKE_HOST_SYSTEM_INFORMATION OS_PLATFORM), which is wrong when
+        # cross-compiling. Without DISPATCH it builds plain xxhash.c, which
+        # selects NEON from the target's __aarch64__/__ARM_NEON macros.
+        unset(DISPATCH CACHE)
+        unset(DISPATCH)
+    endif()
     add_subdirectory(xxHash/cmake_unofficial)
 endif()
 target_compile_options(xxhash PRIVATE -w)
@@ -193,6 +201,11 @@ set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
 set(SPDLOG_INSTALL ON CACHE BOOL "" FORCE)
 add_subdirectory(spdlog)
 target_compile_options(spdlog PRIVATE -w)
+if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    # spdlog forces CMAKE_CXX_EXTENSIONS OFF in its own directory; newlib needs
+    # gnu++ to expose fileno/fwrite_unlocked (see the SDK root CMakeLists.txt).
+    set_target_properties(spdlog PROPERTIES CXX_EXTENSIONS ON)
+endif()
 
 #=============================================================================
 # snappy - Fast compression/decompression (GPU traces)

@@ -40,6 +40,10 @@
 #elif defined(__gnu_linux__)
 #define REX_PLATFORM_GNU_LINUX 1
 #define REX_PLATFORM_LINUX 1
+#elif defined(__SWITCH__)
+// Nintendo Switch homebrew (libnx + newlib). Not Linux: the Linux-only
+// paths (robust mutexes, SIGEV_THREAD_ID, ucontext) stay disabled.
+#define REX_PLATFORM_NX 1
 #else
 #error Unsupported target OS.
 #endif
@@ -64,9 +68,13 @@
 #ifndef REX_PLATFORM_LINUX
 #define REX_PLATFORM_LINUX 0
 #endif
+#ifndef REX_PLATFORM_NX
+#define REX_PLATFORM_NX 0
+#endif
 
 #define REX_PLATFORM_DARWIN (REX_PLATFORM_MAC || REX_PLATFORM_IOS)
-#define REX_PLATFORM_POSIX (REX_PLATFORM_DARWIN || REX_PLATFORM_LINUX)
+// newlib provides the POSIX surface the *_posix.cpp fallbacks rely on.
+#define REX_PLATFORM_POSIX (REX_PLATFORM_DARWIN || REX_PLATFORM_LINUX || REX_PLATFORM_NX)
 
 #if defined(__clang__)
 #define REX_COMPILER_CLANG 1

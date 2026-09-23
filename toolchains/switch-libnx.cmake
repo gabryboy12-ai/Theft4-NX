@@ -41,55 +41,31 @@ get_filename_component(_switch_repo_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE
 set(LIBNX_ROOT "${_switch_repo_root}/tools/libnx")
 
 if(EXISTS "${DEVKITA64}")
-    # ── Mode A: devkitPro toolchain ──────────────────────────────────────────
+    # ── Mode A: devkitPro's official Switch toolchain ────────────────────────
+    # $DEVKITPRO/cmake/Switch.cmake owns the cross-toolchain setup:
+    #   - devkitA64.cmake: aarch64-none-elf gcc/g++/gcc-ar/gcc-ranlib/ld/strip
+    #   - CMAKE_SYSTEM_NAME NintendoSwitch -> Platform/NintendoSwitch.cmake:
+    #       -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft
+    #       -ftls-model=local-exec -ffunction-sections -fdata-sections
+    #       -D__SWITCH__, -fPIE -specs=libnx/switch.specs, -lnx -lm,
+    #       libnx/include, CMAKE_POSITION_INDEPENDENT_CODE ON
+    #   - search prefixes: portlibs/switch and libnx (mesa-switch libvulkan.a
+    #     lives in portlibs/switch/lib), host PATH excluded
+    # None of that is repeated here.
     message(STATUS "Using devkitA64: ${DEVKITA64}")
     message(STATUS "Using devkitPro: ${DEVKITPRO}")
 
-    set(CMAKE_SYSTEM_NAME Switch)
-    set(CMAKE_SYSTEM_PROCESSOR aarch64)
-
-    set(CMAKE_C_COMPILER   "${DEVKITA64}/bin/aarch64-none-elf-gcc")
-    set(CMAKE_CXX_COMPILER "${DEVKITA64}/bin/aarch64-none-elf-g++")
-    set(CMAKE_AR           "${DEVKITA64}/bin/aarch64-none-elf-ar")
-    set(CMAKE_RANLIB       "${DEVKITA64}/bin/aarch64-none-elf-ranlib")
-    set(CMAKE_LINKER       "${DEVKITA64}/bin/aarch64-none-elf-ld")
-
-    set(CMAKE_SYSROOT "${DEVKITA64}/aarch64-none-elf")
-
-    include_directories(SYSTEM
-        "${DEVKITPRO}/libnx/include"
-        "${DEVKITA64}/aarch64-none-elf/include"
-    )
-    link_directories(
-        "${DEVKITPRO}/libnx/lib"
-        "${DEVKITA64}/aarch64-none-elf/lib"
-    )
-
-    set(_SWITCH_EXTRA_FLAGS "")
-    set(_SWITCH_TP_FLAG "-mtp=soft")
-
-    # ── Linker specs for Switch homebrew NRO ─────────────────────────────────
-    # devkitPro ships switch.specs at $DEVKITPRO/libnx/switch.specs. It pulls in:
-    #   - link.T           (Switch homebrew memory layout / aslr-friendly PIE)
-    #   - rcrt0            (_start entry point implemented by libnx)
-    #   - -lnx -lm -lc -lsysbase (libnx + newlib + BSD system-call shims)
-    # Without these the link fails with undefined `_start`, missing libnx
-    # symbols (svcGetInfo, nxlinkStdio, romfsInit, etc.), and the resulting
-    # ELF cannot be wrapped into an NRO by elf2nro.
-    set(_SWITCH_SPECS "${DEVKITPRO}/libnx/switch.specs")
-    if(NOT EXISTS "${_SWITCH_SPECS}")
-        message(WARNING
-            "Switch (Mode A): ${_SWITCH_SPECS} not found. "
-            "Install libnx via `dkp-pacman -S libnx` or set DEVKITPRO correctly. "
-            "Link will fail without switch.specs.")
+    # devkitPro's files re-derive DEVKITPRO from the environment.
+    if(NOT DEFINED ENV{DEVKITPRO})
+        set(ENV{DEVKITPRO} "${DEVKITPRO}")
     endif()
+    include("${DEVKITPRO}/cmake/Switch.cmake")
 
-    # -specs must be on the linker command line (gcc driver passes it through).
-    # -Wl,-Map emits a map file next to the ELF for debugging symbol layout.
-    # -fPIE is already in SWITCH_C_FLAGS below; repeat at link so the driver
-    # forwards -pie to ld (homebrew NROs are position-independent ELFs).
-    set(CMAKE_EXE_LINKER_FLAGS_INIT
-        "-specs=${_SWITCH_SPECS} -fPIE -Wl,-Map,LibertyRecomp.map")
+    # Platform/NintendoSwitch.cmake assigns CMAKE_<LANG>_FLAGS_INIT and
+    # CMAKE_EXE_LINKER_FLAGS_INIT after this file runs, so Theft4's own flags
+    # are appended from a rules override that CMake evaluates after it.
+    set(CMAKE_USER_MAKE_RULES_OVERRIDE
+        "${CMAKE_CURRENT_LIST_DIR}/switch-libnx-rules.cmake")
 else()
     # ── Mode B: Clang cross-compile (no devkitPro) — REMOVED ─────────────────
     # Building Switch homebrew without devkitPro is not viable:
@@ -129,25 +105,16 @@ else()
     )
 endif()
 
-# Compile flags for Switch homebrew
-# -D_GNU_SOURCE enables POSIX visibility in newlib (fileno, isatty, fwrite_unlocked, etc.)
-# Without it, -std=c++23 hides these functions.
-# -DSPDLOG_NO_TZ_OFFSET: newlib's struct tm lacks tm_gmtoff.
-set(SWITCH_C_FLAGS   "-D__SWITCH__ -D_GNU_SOURCE -DSPDLOG_NO_TZ_OFFSET -march=armv8-a+crc+crypto -mtune=cortex-a57 ${_SWITCH_TP_FLAG} -fPIE ${_SWITCH_EXTRA_FLAGS}")
-set(SWITCH_CXX_FLAGS "${SWITCH_C_FLAGS}")
-
-set(CMAKE_C_FLAGS_INIT   "${SWITCH_C_FLAGS}")
-set(CMAKE_CXX_FLAGS_INIT "${SWITCH_CXX_FLAGS}")
+# Compile flags for Switch homebrew: -march/-mtune/-mtp/-D__SWITCH__/-fPIE come
+# from Platform/NintendoSwitch.cmake; -D_GNU_SOURCE and -DSPDLOG_NO_TZ_OFFSET
+# are appended in switch-libnx-rules.cmake.
 
 # newlib requires GNU extensions for POSIX visibility (__POSIX_VISIBLE, __MISC_VISIBLE).
 # Without this, -std=c++23 hides fileno, isatty, fwrite_unlocked, etc.
 set(CMAKE_CXX_EXTENSIONS ON)
 
-# Prevent CMake from finding host (macOS/Linux) libraries
-set(CMAKE_FIND_ROOT_PATH "${DEVKITPRO}" "${DEVKITPRO}/libnx")
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+# Host libraries are kept out by devkitPro's search setup (portlibs/switch and
+# libnx prefixes, CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH OFF).
 
 # Switch uses Vulkan via deko3d or SDL2's libnx backend
 set(LIBERTY_RECOMP_VULKAN ON CACHE BOOL "Use Vulkan/deko3d renderer" FORCE)

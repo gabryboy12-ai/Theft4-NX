@@ -29,6 +29,17 @@ option(REXGLUE_HEADLESS_XMA_DECODER
     "Include the real XMA decoder in a headless runtime" OFF)
 option(REXGLUE_HEADLESS_INPUT
     "Include XAM input exports for an injected lightweight backend" OFF)
+# Switch has no SDL3 backend: build the headless runtime, which never adds
+# thirdparty/sdl3 nor the SDL-backed ui/input/audio/graphics/codegen targets.
+# Render-audio, XMA decoder and input follow the iOS core-only shell.
+if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    set(REXGLUE_CORE_ONLY ON CACHE BOOL "" FORCE)
+    set(REXGLUE_RUNTIME_ONLY ON CACHE BOOL "" FORCE)
+    set(REXGLUE_HEADLESS_KERNEL ON CACHE BOOL "" FORCE)
+    set(REXGLUE_HEADLESS_RENDER_AUDIO ON CACHE BOOL "" FORCE)
+    set(REXGLUE_HEADLESS_XMA_DECODER ON CACHE BOOL "" FORCE)
+    set(REXGLUE_HEADLESS_INPUT ON CACHE BOOL "" FORCE)
+endif()
 if(REXGLUE_HEADLESS_KERNEL AND NOT (REXGLUE_CORE_ONLY AND REXGLUE_RUNTIME_ONLY))
     message(FATAL_ERROR "REXGLUE_HEADLESS_KERNEL requires CORE_ONLY and RUNTIME_ONLY")
 endif()
@@ -114,12 +125,15 @@ endif()
 
 # Enforce the Clang family. CMake reports Apple's supported Clang toolchain as
 # AppleClang even when the configured compiler executable is clang++.
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$")
-    message(FATAL_ERROR "ReXGlue requires Clang compiler. Please set CMAKE_CXX_COMPILER to clang++")
-endif()
+# The Switch (devkitA64) port builds with GCC, so the Clang gate is skipped there.
+if(NOT LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$")
+        message(FATAL_ERROR "ReXGlue requires Clang compiler. Please set CMAKE_CXX_COMPILER to clang++")
+    endif()
 
-if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "18.0")
-    message(FATAL_ERROR "ReXGlue requires Clang 18 or newer (found ${CMAKE_CXX_COMPILER_VERSION})")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "18.0")
+        message(FATAL_ERROR "ReXGlue requires Clang 18 or newer (found ${CMAKE_CXX_COMPILER_VERSION})")
+    endif()
 endif()
 
 # Enforce x64 architecture
@@ -130,7 +144,13 @@ endif()
 # Set C++23 standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    # gnu++23: strict -std=c++23 defines __STRICT_ANSI__, and newlib then
+    # hides POSIX APIs (fileno, isatty, fwrite_unlocked, ...).
+    set(CMAKE_CXX_EXTENSIONS ON)
+else()
+    set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(CMAKE_OBJCXX_STANDARD 23)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
@@ -153,9 +173,15 @@ if(NOT WIN32)
 endif()
 
 # Global compile options
+# GCC has no -ffp-model; these flags are its closest match to Clang's strict model.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(REX_FP_MODEL_OPTIONS -ffp-contract=off -frounding-math -ftrapping-math)
+else()
+    set(REX_FP_MODEL_OPTIONS -ffp-model=strict)
+endif()
 add_compile_options(
     -fno-strict-aliasing
-    -ffp-model=strict
+    ${REX_FP_MODEL_OPTIONS}
     $<$<CONFIG:DEBUG>:-g>
     $<$<CONFIG:DEBUG>:-O0>
     $<$<CONFIG:RELEASE>:-O3>
@@ -206,6 +232,12 @@ elseif(APPLE)
         set(REX_PLATFORM "mac-${REX_TARGET_PROCESSOR}")
     endif()
     add_compile_definitions(REX_PLATFORM_MAC=1)
+elseif(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    # Nintendo Switch homebrew (devkitA64 + libnx). The *_switch.cpp backends
+    # are guarded by REX_PLATFORM_NX; logging_switch.cpp also accepts
+    # REX_PLATFORM_SWITCH.
+    set(REX_PLATFORM "switch-${REX_TARGET_PROCESSOR}")
+    add_compile_definitions(REX_PLATFORM_NX=1 REX_PLATFORM_SWITCH=1)
 else()
     message(FATAL_ERROR "Unsupported platform. ReXGlue supports Windows, Linux, and macOS only.")
 endif()

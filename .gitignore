@@ -570,7 +570,7 @@ xex_hash.txt
 
 # ── Cross-platform build artifacts ──────────────────────────────────────────
 # Game payload — never commit game files; populate tools/local_game_payload/ locally
-tools/local_game_payload/default.xex
+tools/local_game_payload/
 tools/local_game_payload/common.rpf
 tools/local_game_payload/xbox360.rpf
 tools/local_game_payload/audio.rpf
