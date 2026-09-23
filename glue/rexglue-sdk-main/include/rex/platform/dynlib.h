@@ -78,6 +78,14 @@ inline constexpr const char* kVulkanLoader = "libvulkan.1.dylib";
 inline constexpr const char* kRenderDoc = "librenderdoc.dylib";
 inline constexpr const char* kSpirvToolsSdkPath = "lib/libSPIRV-Tools-shared.dylib";
 
+#elif REX_PLATFORM_NX
+
+// Switch homebrew has no dynamic loader (see dynlib_switch.cpp); everything is
+// linked statically, so optional plugins are absent as on iOS.
+inline constexpr const char* kVulkanLoader = nullptr;
+inline constexpr const char* kRenderDoc = nullptr;
+inline constexpr const char* kSpirvToolsSdkPath = nullptr;
+
 #else
 #error No library names provided for the target platform.
 #endif

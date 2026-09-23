@@ -19,6 +19,12 @@
 #include <cstdint>
 #endif
 
+#if REX_PLATFORM_NX
+// newlib has no <ucontext.h>; the Switch backend uses setjmp/longjmp.
+#include <csetjmp>
+#include <cstdint>
+#endif
+
 #if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
 #if REX_PLATFORM_MAC && !defined(_XOPEN_SOURCE)
 // Darwin hides the deprecated ucontext APIs unless _XOPEN_SOURCE is defined
@@ -62,6 +68,15 @@ struct Fiber {
   void* handle_ = nullptr;
   bool is_thread_fiber_ = false;
 #elif REX_PLATFORM_IOS
+  jmp_buf context_{};
+  void* stack_ = nullptr;
+  size_t stack_size_ = 0;
+  void (*entry_)(void*) = nullptr;
+  void* arg_ = nullptr;
+  bool is_thread_fiber_ = false;
+  bool started_ = false;
+  [[noreturn]] static void Trampoline();
+#elif REX_PLATFORM_NX
   jmp_buf context_{};
   void* stack_ = nullptr;
   size_t stack_size_ = 0;

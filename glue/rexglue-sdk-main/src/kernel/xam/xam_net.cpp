@@ -57,6 +57,13 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
+#elif REX_PLATFORM_NX
+// libnx provides the BSD socket headers; it has no <netinet/ip.h>, and nothing
+// here needs it.
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #endif
 
 namespace rex {

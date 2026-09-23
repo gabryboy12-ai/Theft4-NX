@@ -96,6 +96,8 @@ elseif(APPLE)
     )
 elseif(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
     # libnx backends where one exists; POSIX (newlib) for the rest.
+    # keyboard_dialog_switch.cpp is not built: it implements
+    # rex/kernel/xam/keyboard_dialog.h, which the current SDK no longer has.
     target_sources(rexcore PRIVATE
         atomic_posix.cpp
         clock_posix.cpp
@@ -104,7 +106,6 @@ elseif(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
         exception_handler_switch.cpp
         filesystem_posix.cpp
         fiber_switch.cpp
-        keyboard_dialog_switch.cpp
         logging_switch.cpp
         mapped_memory_posix.cpp
         math_gcc.cpp

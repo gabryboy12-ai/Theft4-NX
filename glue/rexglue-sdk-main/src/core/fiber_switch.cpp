@@ -20,22 +20,13 @@
 #include <cassert>
 #include <csetjmp>
 #include <cstdlib>
-#include <cstring>
-
-// Verify our jmpbuf_ storage is large enough for the platform jmp_buf.
-static_assert(sizeof(jmp_buf) <= 256, "jmp_buf exceeds Fiber::jmpbuf_ storage");
 
 namespace rex::thread {
 
 thread_local Fiber* Fiber::tls_current_ = nullptr;
 
-// Reinterpret the raw char[] storage as a jmp_buf. Called only from Fiber
-// member functions, so private-member access is fine.
-#define FIBER_JMP_BUF(f) (*reinterpret_cast<jmp_buf*>((f)->jmpbuf_))
-
 Fiber* Fiber::ConvertCurrentThread() {
   auto* f = new Fiber();
-  std::memset(f->jmpbuf_, 0, sizeof(f->jmpbuf_));
   f->is_thread_fiber_ = true;
   f->started_ = true;  // thread fiber is already running
   tls_current_ = f;
@@ -45,13 +36,14 @@ Fiber* Fiber::ConvertCurrentThread() {
 Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
   // Minimum 64 KiB, aligned to 16 bytes for AArch64 calling convention.
   if (stack_size < 65536) stack_size = 65536;
+  // aligned_alloc requires a size that is a multiple of the alignment.
+  stack_size = (stack_size + 15) & ~size_t(15);
 
-  void* stack = nullptr;
-  if (posix_memalign(&stack, 16, stack_size) != 0) stack = nullptr;
+  // newlib declares posix_memalign but libnx/newlib does not provide it.
+  void* stack = std::aligned_alloc(16, stack_size);
   if (!stack) return nullptr;
 
   auto* f = new Fiber();
-  std::memset(f->jmpbuf_, 0, sizeof(f->jmpbuf_));
   f->stack_ = stack;
   f->stack_size_ = stack_size;
   f->entry_ = entry;
@@ -80,10 +72,10 @@ void Fiber::SwitchTo(Fiber* target) {
   tls_current_ = target;
 
   // Save current context. setjmp returns 0 on direct call, non-zero on longjmp.
-  if (setjmp(FIBER_JMP_BUF(from)) == 0) {
+  if (setjmp(from->context_) == 0) {
     if (target->started_) {
       // Target has been running before — resume it.
-      longjmp(FIBER_JMP_BUF(target), 1);
+      longjmp(target->context_, 1);
     } else {
       // First switch into this fiber — pivot SP to the fiber's stack, then
       // call the trampoline. The trampoline never returns.
@@ -120,7 +112,5 @@ void Fiber::Destroy() {
 }
 
 }  // namespace rex::thread
-
-#undef FIBER_JMP_BUF
 
 #endif  // REX_PLATFORM_NX

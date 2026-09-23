@@ -1,26 +1,33 @@
 # Switch port — 01: prima build dell'SDK con GCC (devkitA64)
 
-Data: 2026-09-23 · Passo di **misura**. Sono stati corretti solo problemi di configurazione (CMake, toolchain e flag); nessun errore di codice è stato toccato.
+Aggiornato: 2026-09-24 · Ramo `switch-port`.
+
+- **Run 1 e 2** (2026-09-23): solo misura, con correzioni limitate alla configurazione.
+- **Run 3** (questo aggiornamento): prime correzioni di codice, tutte dentro rami `REX_PLATFORM_NX` o `switch`.
 
 ## Sintesi
 
-| | Run 1 | Run 2 (questo rapporto) |
-|---|---|---|
-| Errori totali | 86 | **3157** (1388 build + 1769 target sbloccati) |
-| Errori distinti (file, riga, messaggio) | 86 | **341** |
-| Cause distinte | 1 (`-ffp-model=strict`) | **8** |
-| Oggetti tentati | 86 | **340** |
-| Oggetti compilati senza errori | 0 | **97** |
-| `*_switch.cpp` compilati puliti | 0 / 8 | **4 / 8** (≈ 81% delle righe) |
+| | Run 1 | Run 2 | **Run 3** |
+|---|---|---|---|
+| Errori totali | 86 | 3157 | **97** |
+| Errori distinti (file, riga, messaggio) | 86 | 341 | **92** |
+| Cause distinte | 1 | 8 | **5** (2 rinviate per scelta, 1 dell'ambiente) |
+| Oggetti tentati | 86 | 340 | **339** |
+| Oggetti compilati senza errori | 0 | 97 | **331** (97,6%) |
+| Oggetti falliti | 86 | 243 | **8** |
+| `*_switch.cpp` puliti | 0 / 8 | 4 / 8 | **7 / 7** (keyboard_dialog escluso) |
+| `*_posix.cpp` di fallback puliti | 0 / 11 | 7 / 11 | **9 / 11** (seh e mapped_memory rinviati) |
+| FFmpeg (libavutil + libavcodec) | 79 errori | 2888 errori | **0** (159/159 oggetti, NEON compreso) |
 
-In breve:
+Dei 97 errori rimasti:
 
-- **Il backend Switch è in buona parte sano.** `threading_switch.cpp`, `memory_switch.cpp`, `net_switch.cpp` e `logging_switch.cpp` (2195 righe su 2702) compilano senza errori. I 4 file che falliscono hanno 28 errori in tutto, dovuti a disallineamenti con l'API attuale dell'SDK e di libnx.
-- **Tutto il codice comune di `rexcore` compila** (29 file su 29). I fallback POSIX compilano in 7 casi su 11.
-- **Il 91% degli errori (2888) viene da FFmpeg,** e la causa è una sola: `thirdparty/FFmpeg/config.h` non ha una configurazione per Horizon.
-- **In `rexruntime`, 73 dei 77 file che falliscono non hanno errori nel proprio sorgente.** Falliscono per l'`#error` di `include/rex/platform/dynlib.h:82`, che non ha un ramo per NX e viene incluso da `kernel_state.h`, `ppc/function.h` e `hook.h`. In un caso si aggiunge anche `timegm` in `stfs_xbox.h`.
+| Quota | Errori | Causa | Stato |
+|---|---|---|---|
+| 91% | **88** | symlink di libmspack non materializzati | problema dell'ambiente Windows, non della Switch; bloccato perché mancano i privilegi per creare symlink (vedi "mspack") |
+| | **5** | `seh_posix.cpp` (4) e `mapped_memory_posix.cpp` (1) | rinviati per scelta, analisi sotto |
+| | **4** | `timegm` ×2, `endian.h` ×1, `netinet/ip.h` ×1 | fuori dal perimetro di questo passo |
 
-"Compila" qui significa soltanto che il file supera il compilatore: il link non è stato provato.
+Tolti i symlink di mspack, **il codice compila tranne 9 errori in 6 file.** "Compila" significa che il file supera il compilatore: il link non è stato provato.
 
 ## Ambiente
 
@@ -38,9 +45,10 @@ File in `out/build/switch-sdk/`:
 |---|---|
 | `configure.log` | configurazione |
 | `build.log` | build ufficiale `make -k -j4` |
-| `build-blocked.log` | secondo passaggio sui target bloccati (vedi sotto) |
-| `build-run1.log` | build del run 1 (86 errori) |
+| `build-blocked.log` | secondo passaggio sui target bloccati |
 | `errors-build.tsv`, `errors-build-blocked.tsv` | errori estratti: file, riga, fatal, messaggio |
+
+I log dei run 1 e 2 non sono nella cartella di build, perché viene ricreata da zero a ogni run. I numeri sono riportati in questo documento.
 
 Comandi:
 
@@ -51,177 +59,237 @@ cmake -S glue/rexglue-sdk-main -B out/build/switch-sdk -G "Unix Makefiles" \
       -DCMAKE_BUILD_TYPE=Release
 make -C out/build/switch-sdk -k -j4 > out/build/switch-sdk/build.log 2>&1
 
-# Secondo passaggio: make -k non avvia i target che dipendono da un target
-# fallito (rexcore), quindi i loro oggetti vengono compilati direttamente.
+# make -k non avvia i target che dipendono da un target fallito (rexcore):
+# i loro oggetti vengono compilati direttamente.
 for d in src/filesystem/CMakeFiles/rexfilesystem.dir src/system/CMakeFiles/rexruntime.dir \
          src/audio/CMakeFiles/rexaudio.dir thirdparty/CMakeFiles/libavcodec.dir; do
   make -k -j4 -f $d/build.make $d/build
 done > build-blocked.log 2>&1
 ```
 
-Il secondo passaggio chiude con 4 messaggi "No rule to make target … needed by `librexruntime.a`". Sono un effetto dell'invocazione diretta (manca la fase di archivio), non errori di compilazione, e sono esclusi dai conteggi.
+Nel run 3 `libavcodec` viene costruito già dalla build principale, perché ora `libavutil` compila. Il secondo passaggio lo trova aggiornato. I messaggi "No rule to make target … `librexruntime.a`" vengono dall'invocazione diretta (manca la fase di archivio) e sono esclusi dai conteggi.
 
-## Modifiche di configurazione
+## Modifiche
 
-Le altre piattaforme non passano da nessuno di questi rami.
+### Configurazione (run 1–2, commit `d650112e`)
 
-| File | Modifica | Run |
-|---|---|---|
-| `glue/rexglue-sdk-main/CMakeLists.txt` | Controllo "Clang ≥ 18" saltato solo se `LIBERTY_RECOMP_TARGET_PLATFORM` = `switch` | 1 |
-| `glue/rexglue-sdk-main/CMakeLists.txt` | Su Switch forza la modalità headless: `CORE_ONLY`, `RUNTIME_ONLY`, `HEADLESS_KERNEL`, `HEADLESS_RENDER_AUDIO`, `HEADLESS_XMA_DECODER`, `HEADLESS_INPUT` | 1 |
-| `glue/rexglue-sdk-main/CMakeLists.txt` | Ramo piattaforma `switch`: `REX_PLATFORM=switch-aarch64`, `REX_PLATFORM_NX=1`, `REX_PLATFORM_SWITCH=1` | 1 |
-| `glue/rexglue-sdk-main/src/core/CMakeLists.txt` | Ramo `switch`: `*_switch.cpp` dove esistono, `*_posix.cpp` per il resto | 1 |
-| `glue/rexglue-sdk-main/include/rex/platform.h` | `__SWITCH__` → `REX_PLATFORM_NX 1`; `REX_PLATFORM_POSIX` comprende NX; `REX_PLATFORM_LINUX` resta 0 | 1 |
-| `toolchains/switch-libnx.cmake` + `switch-libnx-rules.cmake` (nuovo) | Mode A usa il `Switch.cmake` ufficiale; i flag di Theft4 vengono aggiunti tramite rules override | 1 |
-| `glue/rexglue-sdk-main/CMakeLists.txt` | **GCC:** `-ffp-contract=off -frounding-math -ftrapping-math` al posto di `-ffp-model=strict`. Condizionale sul compilatore; Clang non cambia | **2** |
-| `glue/rexglue-sdk-main/CMakeLists.txt` | **Switch:** `CMAKE_CXX_EXTENSIONS ON` → `-std=gnu++23` (altrove resta OFF) | **2** |
-| `glue/rexglue-sdk-main/thirdparty/CMakeLists.txt` | **Switch:** `CXX_EXTENSIONS ON` sul target `spdlog`, perché il suo `CMakeLists` lo forza a OFF | **2** |
-| `glue/rexglue-sdk-main/thirdparty/CMakeLists.txt` | **Switch:** `unset(DISPATCH)` prima di xxHash (vedi sotto) | **2** |
+| File | Modifica |
+|---|---|
+| `glue/rexglue-sdk-main/CMakeLists.txt` | Controllo "Clang ≥ 18" saltato su `switch`. Modalità headless forzata su `switch`. Ramo piattaforma `switch` (`REX_PLATFORM_NX=1`). Flag FP GCC al posto di `-ffp-model=strict`. `CMAKE_CXX_EXTENSIONS ON` su `switch` |
+| `glue/rexglue-sdk-main/src/core/CMakeLists.txt` | Ramo `switch`: `*_switch.cpp` più fallback `*_posix.cpp` |
+| `glue/rexglue-sdk-main/include/rex/platform.h` | `__SWITCH__` → `REX_PLATFORM_NX`; NX fa parte di POSIX, non di Linux |
+| `glue/rexglue-sdk-main/thirdparty/CMakeLists.txt` | spdlog `CXX_EXTENSIONS ON`; niente dispatch x86 per xxHash (su `switch`) |
+| `toolchains/switch-libnx.cmake`, `toolchains/switch-libnx-rules.cmake` | Toolchain ufficiale devkitPro più i flag di Theft4 |
+| `.gitignore` | Ignora tutta la cartella `tools/local_game_payload/` |
 
-**Nota su xxHash.** `thirdparty/xxHash/cmake_unofficial/CMakeLists.txt:75` usa `CMAKE_HOST_SYSTEM_INFORMATION(... OS_PLATFORM)`, cioè l'architettura dell'**host**. Per questo stampa `Architecture: x86_64` anche in cross-compile. Il valore serve solo ad attivare il dispatch x86 (`xxh_x86dispatch.c`) quando è definito `DISPATCH`. Su Switch `DISPATCH` ora viene tolto sempre, e xxHash compila il semplice `xxhash.c`, che sceglie il percorso SIMD dalle macro del target. Verifica con gli stessi flag: `XXH_VECTOR = 4 = XXH_NEON`. Il messaggio "Architecture: x86_64" resta nel log perché viene dal sottomodulo, che non è stato modificato.
+### Codice (run 3)
 
-Flag effettivi verificati in `flags.make`: rexcore e spdlog `-std=gnu++23`; `-ffp-contract=off -frounding-math -ftrapping-math`; `-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -D__SWITCH__ -D_GNU_SOURCE -DSPDLOG_NO_TZ_OFFSET`.
+| File | Modifica |
+|---|---|
+| `include/rex/platform/dynlib.h` | Ramo `REX_PLATFORM_NX` in `lib_names`, tutto a `nullptr` come per iOS: su Switch non c'è caricamento dinamico |
+| `include/rex/thread/fiber.h` | Ramo `REX_PLATFORM_NX`, con `<csetjmp>` e gli stessi membri del backend iOS (`jmp_buf context_`, `stack_`, `stack_size_`, `entry_`, `arg_`, `is_thread_fiber_`, `started_`, `Trampoline()`) |
+| `src/core/fiber_switch.cpp` | Usa `context_` al posto del vecchio buffer `jmpbuf_`. `std::aligned_alloc` al posto di `posix_memalign`, che newlib dichiara ma libnx non fornisce (link fallito nella prova) |
+| `src/core/dynlib_switch.cpp` | `handle_` a `nullptr` (`kInvalidDynamicLibraryHandle` non esiste più). `Load(path, SymbolResolution)` come nell'header attuale |
+| `src/core/exception_handler_switch.cpp` | `ThreadExceptionDump` non ha `fpsr`/`fpcr`: i valori vengono letti con `mrs` sul thread che ha generato l'eccezione (dettagli sotto) |
+| `src/core/CMakeLists.txt` | `keyboard_dialog_switch.cpp` escluso dalla build Switch (dettagli sotto) |
+| `src/kernel/xam/xam_net.cpp` | Ramo `REX_PLATFORM_NX` per gli header socket BSD di libnx (`arpa/inet.h`, `netdb.h`, `netinet/in.h`, `sys/socket.h`), senza `netinet/ip.h` |
+| `src/core/socket_posix.cpp` | `case ESHUTDOWN` escluso su NX: newlib lo definisce solo con `__LINUX_ERRNO_EXTENSIONS__` |
+| `src/core/filesystem_posix.cpp` | Su NX `fseeko`/`ftello`/`ftruncate` con `off_t` al posto delle API LFS64, più `static_assert(sizeof(off_t) == 8)` |
+| `thirdparty/ffmpeg-overlay/horizon/config.h` (nuovo) | Configurazione FFmpeg per Horizon aarch64 (vedi "FFmpeg") |
+| `thirdparty/CMakeLists.txt` | Su `switch`, `ffmpeg-overlay/horizon` viene messo davanti nell'include path di `libavutil`/`libavcodec` |
 
-## Numeri per target
+**`exception_handler_switch.cpp`.** `ThreadContext` contiene sì `fpcr`/`fpsr`, ma si ottiene solo con `svcGetThreadContext3` su un thread sospeso: dal thread che ha generato l'eccezione non si può. `__libnx_exception_handler` gira proprio su quel thread, e prima di `FillThreadContext` esegue solo operazioni intere, quindi i registri FP attivi hanno ancora i valori del momento dell'eccezione.
 
-| Target | Oggetti | Puliti | Falliti | Errori | Note |
+**`keyboard_dialog_switch.cpp`.** L'header `rex/kernel/xam/keyboard_dialog.h` è stato rimosso nel commit `a1d3a84d` ("Replace vendored RexGlue with Graine SDK"). Oggi `XamShowKeyboardUI_entry` (`src/kernel/xam/xam_ui.cpp:402`) non passa da nessuna astrazione di piattaforma. Il file è escluso invece di ricreare l'API; anche i gemelli android, ios e ps4 sono orfani.
+
+## FFmpeg
+
+### Come lo costruisce l'SDK
+
+- `thirdparty/FFmpeg` è un **sottomodulo git**, un fork `wmarti/FFmpeg` al commit `0604b46` ("Add multi-platform config dispatch and premake wiring"). Non viene lanciato nessuno script `configure`: i `config_<os>_<arch>.h` sono **pregenerati** e committati nel fork, e `FFmpeg/config.h` sceglie quello giusto in base alle macro del compilatore (Windows, macOS, Linux, Android; per il resto `#error "no config"`).
+- `thirdparty/CMakeLists.txt` compila con elenchi di sorgenti fissi solo `libavutil` e `libavcodec`, ed esclude avformat, swresample e swscale.
+- Su aarch64 aggiunge gli `.S` NEON e `HAVE_NEON=1 HAVE_ARMV8=1 HAVE_INLINE_ASM=1`.
+- Gli elenchi di codec, parser e bsf vengono da `thirdparty/ffmpeg-overlay/{codec,parser,bsf}_list.c`. Questa cartella appartiene al **repo principale**, non al sottomodulo.
+- Per questo `config.h` per Horizon è stato messo in `ffmpeg-overlay/horizon/`, e non dentro il sottomodulo. Un commit nel sottomodulo esisterebbe solo in locale e renderebbe il repo principale non clonabile.
+
+### Cosa usa il runtime
+
+Solo il decoder **`AV_CODEC_ID_XMAFRAMES`** (`src/audio/xma_context.cpp`), che si appoggia a wmapro. Le API usate sono:
+
+- `avcodec_find_decoder`, `avcodec_alloc_context3`, `avcodec_open2`, `avcodec_send_packet`, `avcodec_receive_frame`, `avcodec_free_context`, `avcodec_is_open`;
+- `av_packet_alloc/unref/free`, `av_frame_alloc/unref/free`;
+- `av_strerror`, `av_log_set_callback`.
+
+Nessun parser, nessun bsf oltre `null`, nessun encoder. Il config Linux aarch64 abilita già solo `CONFIG_WMAPRO_DECODER`, `CONFIG_XMAFRAMES_DECODER` e `CONFIG_NULL_BSF` (`--disable-everything --enable-decoder=xmaframes`), quindi l'elenco dei componenti non è cambiato.
+
+### Configurazione Horizon
+
+`ffmpeg-overlay/horizon/config.h` è `config_linux_aarch64.h` con queste differenze, ciascuna verificata compilando e linkando una prova con devkitA64 e `switch.specs -lnx -lm`:
+
+| Voce | Linux | Horizon | Motivo |
+|---|---|---|---|
+| `HAVE_ASM_TYPES_H`, `HAVE_LINUX_PERF_EVENT_H`, `HAVE_SYS_UN_H`, `HAVE_TERMIOS_H` | 1 | 0 | header assenti |
+| `HAVE_MMAP`, `HAVE_MPROTECT` | 1 | 0 | `sys/mman.h` assente |
+| `HAVE_SCHED_GETAFFINITY`, `HAVE_SETRLIMIT` | 1 | 0 | non dichiarate |
+| `HAVE_ARC4RANDOM`, `HAVE_GETRUSAGE`, `HAVE_POSIX_MEMALIGN`, `HAVE_SYSCONF` | 1 | 0 | dichiarate ma non linkabili |
+| `HAVE_STRUCT_RUSAGE_RU_MAXRSS` | 1 | 0 | segue `getrusage` |
+| `HAVE_MALLOC_H` | 0 | 1 | serve a `mem.c` per `memalign`, che è linkabile |
+| `OS_NAME`, `CC_IDENT`, `SLIBSUF`, `FFMPEG_CONFIGURATION` | linux | horizon | solo informativi |
+
+Le funzioni matematiche (`cbrt`, `round`, `trunc`, `hypot`, `erf` e le altre) esistono tutte in newlib e restano a 1. Proprio queste avevano generato i 1704 conflitti di `libm.h` nel run 2. Effetti pratici: senza `sysconf`/`sched_getaffinity`, `av_cpu_count()` restituisce 1, cosa irrilevante per il solo decoder XMA; l'allocazione allineata usa `memalign`.
+
+**NEON:** i 7 `.S` (libavutil `float_dsp_neon`; libavcodec `fft_neon`, `mdct_neon`, `simple_idct_neon`, `videodsp`, `neon`, `mpegaudiodsp_neon`) si assemblano senza errori con GCC, quindi non è stato necessario disattivarli. Resta da verificare al link che i riferimenti `movrel` funzionino in un eseguibile PIE statico.
+
+**Risultato:** `libavutil` 79/79 e `libavcodec` 80/80 compilano. Nel run 2 gli errori erano 2888.
+
+## mspack: bloccato
+
+I 16 file di `thirdparty/libmspack/cabextract/mspack/` sono **symlink git** (mode `120000`) verso `../../libmspack/mspack/`, per esempio `lzxd.c`, `lzx.h`, `mspack.h`, `system.h`. Su questo checkout `core.symlinks=false`, quindi sul disco sono file di testo con il solo percorso.
+
+Prima di cambiare `core.symlinks` ho verificato che Windows permetta di creare symlink:
+
+- `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock` non esiste, quindi **la Developer Mode non è attiva**;
+- `New-Item -ItemType SymbolicLink` fallisce con "Per questa operazione sono necessari privilegi di amministratore".
+
+Come da istruzioni non ho copiato i file a mano e non ho cambiato `core.symlinks`. Le strade possibili sono:
+
+1. attivare la Developer Mode (Impostazioni → Sistema → Per sviluppatori);
+2. oppure eseguire la shell come amministratore.
+
+Poi:
+
+```sh
+git -C glue/rexglue-sdk-main/thirdparty/libmspack config core.symlinks true
+git -C glue/rexglue-sdk-main/thirdparty/libmspack checkout -- cabextract/mspack
+```
+
+Il problema non è specifico della Switch: colpisce qualunque build fatta da questo checkout Windows.
+
+## Numeri per target (run 3)
+
+| Target | Oggetti | Puliti | Falliti | Errori | Causa |
 |---|---|---|---|---|---|
 | `o1heap`, `aes128`, `tiny-aes`, `xxhash` | 1 ciascuno | 1 | 0 | 0 | |
 | `fmt` | 2 | 2 | 0 | 0 | |
 | `spdlog` | 6 | 6 | 0 | 0 | |
+| `libavutil` | 79 | 79 | 0 | 0 | |
+| `libavcodec` | 80 | 80 | 0 | 0 | |
 | `mspack` | 1 | 0 | 1 | 1 | symlink |
-| `libavutil` (FFmpeg) | 79 | 2 | 77 | 1347 | config.h |
-| `rexcore` | 48 | 40 | 8 | 40 | |
-| `rexfilesystem` * | 15 | 14 | 1 | 1 | `timegm` (`stfs_xbox.h`) |
-| `rexruntime` (system + kernel) * | 101 | 24 | 77 | 225 | 73 file falliti solo per errori negli header, quasi sempre `dynlib.h` |
-| `rexaudio` (XMA) * | 4 | 2 | 2 | 2 | `dynlib.h` |
-| `libavcodec` (FFmpeg) * | 80 | 3 | 77 | 1541 | config.h |
-| **Totale** | **340** | **97** | **243** | **3157** | |
+| `rexcore` | 47 | 45 | 2 | 5 | `seh_posix` (4), `mapped_memory_posix` (1), rinviati |
+| `rexfilesystem` * | 15 | 14 | 1 | 1 | `timegm` in `stfs_xbox.h` |
+| `rexruntime` * | 101 | 97 | 4 | 90 | `lzx.cpp` 86 + `lzx.h` 1 (symlink), `content_manager.cpp` 1 (`timegm`), `xsocket.cpp` 1 (`netinet/ip.h`), `xboxkrnl_crypt.cpp` 1 (`endian.h`) |
+| `rexaudio` (XMA) * | 4 | 4 | 0 | 0 | |
+| **Totale** | **339** | **331** | **8** | **97** | |
 
-\* Target compilati nel secondo passaggio (`build-blocked.log`).
+\* Target compilati nel secondo passaggio (`build-blocked.log`). Gli oggetti di `rexcore` scendono da 48 a 47 perché `keyboard_dialog_switch.cpp` è stato escluso.
 
-## Errori raggruppati per causa
+## Errori per causa: confronto fra i run
 
-"Grezzi" conta ogni occorrenza. Un errore in un header incluso da 70 file conta 70 volte.
+| # | Causa | Run 1 | Run 2 | **Run 3** | Note run 3 |
+|---|---|---|---|---|---|
+| A | Estensioni / flag solo-Clang | 86 | 0 | **0** | |
+| B | API POSIX mancanti in newlib/libnx | — | 12 | **6** | LFS64 ed `ESHUTDOWN` corretti. Restano `timegm` ×2 e i segnali di `seh_posix` ×4 (rinviato) |
+| C | Header di sistema mancanti | — | 3 | **3** | `sys/mman.h` (rinviato), `netinet/ip.h` (`xsocket.cpp`), `endian.h` (`crypto/sha256.cpp`) |
+| D1 | FFmpeg senza config Horizon | — | 2888 | **0** | config Horizon |
+| D2 | Symlink di libmspack | — | 88 | **88** | bloccato: servono privilegi per i symlink |
+| E | `*_switch.cpp` | — | 28 | **0** | allineati all'API; keyboard_dialog escluso |
+| F | Codice comune senza ramo NX | — | 138 | **0** | `dynlib.h` e `xam_net.cpp` corretti |
+| | **Totale** | **86** | **3157** | **97** | |
 
-| # | Causa | Grezzi | Distinti | Difficoltà |
-|---|---|---|---|---|
-| A | Estensioni / flag solo-Clang | **0** (run 1: 86) | 0 | risolto |
-| B | API POSIX mancanti in newlib/libnx | 12 | 11 | media |
-| C | Header di sistema mancanti | 3 | 3 | media |
-| D1 | Terze parti: FFmpeg senza config per Horizon | 2888 | 158 | media |
-| D2 | Terze parti: symlink di libmspack non materializzati | 88 | 84 | bassa |
-| E | Errori nei `*_switch.cpp` | 28 | 25 | bassa–media |
-| F | Altro: codice comune senza ramo NX | 138 | 60 | bassa |
-| | Terze parti SDL3 / glslang / spirv-tools | — | — | escluse (headless) |
-| | **Totale** | **3157** | **341** | |
+## Errori per origine del codice (run 3)
 
-### A. Flag solo-Clang: risolto
-
-I 86 errori del run 1 erano tutti `-ffp-model=strict`. Con i flag equivalenti di GCC sono scomparsi, e non sono emersi altri flag o estensioni solo-Clang.
-
-### B. API POSIX mancanti in newlib/libnx: difficoltà media
-
-| File | Mancante |
-|---|---|
-| `src/core/filesystem_posix.cpp:90,94,105` | API LFS64: `off64_t`, `fseeko64`, `ftello64`, `ftruncate64`. newlib ha `off_t` a 64 bit e `fseeko`/`ftello`/`ftruncate` |
-| `src/core/seh_posix.cpp:64,109,111` | `siginfo_t::si_addr`, `sigaction::sa_sigaction`, `SA_SIGINFO`, `SA_NODEFER`. newlib/Horizon non hanno segnali POSIX reali |
-| `src/core/socket_posix.cpp:93` | `ESHUTDOWN` |
-| `include/rex/filesystem/devices/stfs_xbox.h:46` | `timegm` |
-
-**Approccio consigliato.** Per LFS64 e `ESHUTDOWN` bastano alias sotto `REX_PLATFORM_NX`. `timegm` va implementata a mano: sono poche righe, oppure `mktime` con TZ=UTC, visto che newlib non ha `tm_gmtoff`. Per `seh_posix.cpp` non ha senso adattare i segnali: su Horizon le eccezioni arrivano tramite `__libnx_exception_handler`, che `exception_handler_switch.cpp` già implementa. La soluzione giusta è un `seh_switch.cpp`, oppure escludere il file su Switch.
-
-### C. Header di sistema mancanti: difficoltà media
-
-| File | Header | Note |
-|---|---|---|
-| `src/core/mapped_memory_posix.cpp:15` | `sys/mman.h` | errore fatal, quindi il resto del file non è stato analizzato. Horizon non ha `mmap`/`shm_open`: serve un `mapped_memory_switch.cpp` basato su `virtmem`/`svcMapPhysicalMemory`, lo stesso modello di `memory_switch.cpp` |
-| `src/system/xsocket.cpp:30` | `netinet/ip.h` | libnx ha `arpa/inet.h`, `netinet/in.h`, `netdb.h` e `sys/socket.h`, ma non `netinet/ip.h`. Probabilmente basta non includerlo su NX |
-| `thirdparty/crypto/sha256.cpp:18` | `endian.h` | newlib ha solo `machine/endian.h`; serve un ramo per `__SWITCH__` accanto a quelli esistenti |
-
-### D1. FFmpeg senza config per Horizon: difficoltà media, 1 causa per 2888 errori
-
-`thirdparty/FFmpeg/config.h` sceglie un `config_<os>_<arch>.h` fra Windows, macOS, Linux e Android, e per tutto il resto esegue `#error "no config"`. Questo `#error` compare 1010 volte. Senza config, tutte le macro `HAVE_*`, `ARCH_*` e `CONFIG_*` sono indefinite, e da lì nascono gli altri errori:
-
-- `libavutil/libm.h`, 1704 occorrenze: definizioni `static` di `cbrt`, `round`, `trunc`, `hypot`, `erf` e così via, in conflitto con quelle di `math.h` di newlib, perché `HAVE_CBRT` e simili valgono 0;
-- `ARCH_AARCH64`/`ARCH_X86` e `HAVE_VFP` non dichiarati;
-- `close`/`read` implicite, perché manca `HAVE_UNISTD_H`;
-- effetti a catena in `idctdsp`, `pthread_frame`, `float_dsp`.
-
-**Approccio consigliato.** Aggiungere un `config_horizon_aarch64.h`, partendo da `config_linux_aarch64.h`, e un ramo `defined(__SWITCH__)` in `config.h`. Poi disattivare quello che newlib/libnx non hanno (`HAVE_MMAP`, `HAVE_SYSCTL`, `HAVE_SYSCONF` da verificare) e tenere `HAVE_PTHREADS`, perché libnx fornisce pthread. Serve solo il decoder XMA/WMA, quindi l'elenco dei codec può restare quello di Linux. Mi aspetto che quasi tutti i 2888 errori scompaiano insieme.
-
-### D2. Symlink di libmspack non materializzati: difficoltà bassa, non specifico della Switch
-
-`thirdparty/libmspack/cabextract/mspack/lzxd.c` e `lzx.h` sono **symlink git** (mode `120000`). In questo checkout `core.symlinks=false`, quindi sul disco sono file di testo che contengono solo il percorso (`../../libmspack/mspack/lzxd.c`). Il risultato:
-
-- `lzxd.c:1` → "expected identifier or '(' before '.' token";
-- `lzx.h:1`, poi a catena 86 errori in `src/system/lzx.cpp`, che non trova più `mspack_system`, `lzxd_init` e così via.
-
-**Approccio consigliato.** È un problema dell'ambiente di build su un host Windows, non della Switch. La soluzione è abilitare i symlink (`git config core.symlinks true` con la Developer Mode di Windows, poi `git checkout` dei file), oppure puntare le sorgenti CMake a `libmspack/libmspack/mspack/`.
-
-### E. Errori nei `*_switch.cpp`: difficoltà bassa–media
-
-| File | Righe | Esito | Errori | Causa |
-|---|---|---|---|---|
-| `threading_switch.cpp` | 1362 | **pulito** | 0 | |
-| `memory_switch.cpp` | 658 | **pulito** | 0 | |
-| `net_switch.cpp` | 93 | **pulito** | 0 | |
-| `logging_switch.cpp` | 82 | **pulito** | 0 | |
-| `fiber_switch.cpp` | 126 | fallito | 21 | Usa membri di `Fiber` (`jmpbuf_`, `stack_`, `stack_size_`, `entry_`, `arg_`, `started_`, `is_thread_fiber_`, `Trampoline()`) che `include/rex/thread/fiber.h` dichiara solo per iOS (con `context_` al posto di `jmpbuf_`) e per Linux/Mac. Manca il ramo NX nell'header comune |
-| `dynlib_switch.cpp` | 53 | fallito | 4 (+1 dall'header) | `kInvalidDynamicLibraryHandle` non esiste più. `Load(path)` non corrisponde più alla firma attuale `Load(path, SymbolResolution mode)`. `dynlib.h:82` produce `#error` perché `lib_names` non ha un ramo NX |
-| `exception_handler_switch.cpp` | 233 | fallito | 2 | Legge `fpsr`/`fpcr` da `ThreadExceptionDump`; nella libnx attuale quei campi stanno solo in `ThreadContext` |
-| `keyboard_dialog_switch.cpp` | 95 | fallito | 1 fatal | `rex/kernel/xam/keyboard_dialog.h` non esiste nell'SDK: l'API keyboard dialog non c'è più. Essendo un errore fatal, il resto del file non è stato analizzato |
-
-**Lettura.** I due file più grandi e più delicati, threading e memory, compilano senza errori. Gli errori rimasti sono tutti disallineamenti di API: l'SDK è andato avanti dopo che i file Switch erano stati scritti, e libnx ha spostato due campi. Non ci sono problemi di progetto. Il costo stimato è basso per dynlib ed exception_handler e medio per fiber, perché richiede di aggiungere il ramo NX in `fiber.h`. Per keyboard_dialog prima va deciso se l'API deve tornare.
-
-### F. Codice comune senza ramo NX: difficoltà bassa
-
-| Punto | Grezzi | Effetto |
-|---|---|---|
-| `include/rex/platform/dynlib.h:82` `#error No library names provided for the target platform.` | 79 | La catena `lib_names` (`kVulkanLoader`, `kRenderDoc`, `kSpirvToolsSdkPath`) ha rami per Win, Android, Linux, iOS e Mac, ma non per NX. L'header è incluso da `kernel_state.h`, `ppc/function.h` e `hook.h`, quindi fallisce quasi tutto `rexruntime`. Le 79 occorrenze sono 76 in rexruntime, 2 in rexaudio e 1 in `dynlib_switch.cpp`. **73 dei 77 file falliti di rexruntime non hanno errori nel proprio sorgente.** Gli altri 4 sono `xam_net.cpp`, `lzx.cpp`, `xsocket.cpp` e `xboxkrnl_crypt.cpp`; quest'ultimo include `thirdparty/crypto/sha256.cpp`, che non trova `endian.h`. La soluzione è un ramo NX con `nullptr`, come per iOS |
-| `src/kernel/xam/xam_net.cpp` (+ 2 `static_assert` in `include/rex/assert.h`) | 59 | Gli header socket sono inclusi solo con `#elif REX_PLATFORM_LINUX \|\| REX_PLATFORM_DARWIN`. Su NX `in_addr`, `htonl`, `getaddrinfo` e simili non sono dichiarati, e `XNADDR`/`XNDNS` risultano di dimensione sbagliata. libnx fornisce questi header, tranne `netinet/ip.h` |
-
-## Errori per origine del codice
-
-Serve a capire quanto del backend Switch esistente è sano.
-
-| Origine | File tentati | File puliti | Errori grezzi | Distinti |
-|---|---|---|---|---|
-| `*_switch.cpp` (backend Switch) | 8 | **4** | 28 | 25 |
-| `*_posix.cpp` (fallback usati su Switch) | 11 | **7** | 11 | 11 |
-| Codice comune SDK (src/, include/) | 29 in rexcore + 120 negli altri target | 29 + 40 | 227 | 144 |
-| Terze parti | 172 | 17 | 2891 | 161 |
-
-Nel dettaglio:
-
-- **Fallback POSIX puliti (7):** atomic, clock, dbg, math_gcc, console, env, system.
-- **Fallback POSIX falliti (4):** filesystem (LFS64), seh (segnali), socket (`ESHUTDOWN`), mapped_memory (`sys/mman.h`).
-- **Codice comune:** in `rexcore` compila tutto, 29 file su 29, compresi xenos e i formati texture. Dei 227 errori comuni, 86 derivano dai symlink di mspack (`lzx.cpp`), 79 da `dynlib.h` e 59 da `xam_net.cpp`. Solo 3 non rientrano in queste tre cause: `timegm` ×2 e `netinet/ip.h`.
-
-## I 10 file con più errori
-
-| # | File | Errori grezzi | Causa |
+| Origine | File tentati | File puliti | Errori |
 |---|---|---|---|
-| 1 | `thirdparty/FFmpeg/libavutil/libm.h` | 1704 | D1 (header, contato per ogni file che lo include) |
-| 2 | `thirdparty/FFmpeg/config.h` | 1010 | D1 `#error "no config"` |
-| 3 | `src/system/lzx.cpp` | 86 | D2 symlink mspack |
-| 4 | `include/rex/platform/dynlib.h` | 79 | F ramo NX mancante |
-| 5 | `src/kernel/xam/xam_net.cpp` | 57 | F include socket solo Linux/Darwin |
-| 6 | `thirdparty/FFmpeg/libavcodec/pthread_frame.c` | 27 | D1 |
-| 7 | `thirdparty/FFmpeg/libavcodec/idctdsp.c` | 25 | D1 |
-| 8 | `src/core/fiber_switch.cpp` | 21 | E |
-| 9 | `thirdparty/FFmpeg/libavcodec/idctdsp.h` | 20 | D1 |
-| 10 | `thirdparty/FFmpeg/libavcodec/pthread_slice.c` | 12 | D1 |
+| `*_switch.cpp` | 7 | **7** | 0 |
+| `*_posix.cpp` di fallback | 11 | **9** | 5 (seh 4, mapped_memory 1: entrambi rinviati) |
+| Codice comune SDK (29 in rexcore + 120 negli altri target) | 149 | **144** | 89 (`lzx.cpp` 86 per i symlink, `timegm` 2, `netinet/ip.h` 1) |
+| Terze parti | 172 | **171** | 3 (mspack 2, `crypto/sha256.cpp` 1 tramite `xboxkrnl_crypt.cpp`) |
 
-In tutto ci sono 50 file distinti con almeno un errore. Per il run 1 vedi `build-run1.log`: 86 file, 1 errore ciascuno, tutti `-ffp-model=strict`.
+Il backend Switch esistente, 7 file e circa 2600 righe, **compila per intero**.
 
-## Warning
+## I 10 file con più errori (run 3)
 
-In totale 14, nessuno bloccante:
+Tutti i file con errori sono 8.
 
-- 6 × `unused parameter 'one_reg'`, più altri parametri e funzioni inutilizzati: `removeCallback` e `signal_handler`, che su NX non vengono chiamati;
-- 1 × `operation on 'filetime' may be undefined [-Wsequence-point]`, da controllare;
-- 1 × `-fno-char8_t is valid for C++ but not for C`, perché il flag globale arriva anche ai file C.
+| # | File | Errori | Causa |
+|---|---|---|---|
+| 1 | `src/system/lzx.cpp` | 86 | D2 symlink mspack |
+| 2 | `src/core/seh_posix.cpp` | 4 | B segnali POSIX (rinviato) |
+| 3 | `include/rex/filesystem/devices/stfs_xbox.h` | 2 | B `timegm` (incluso da `stfs_container_device.cpp` e `content_manager.cpp`) |
+| 4 | `thirdparty/libmspack/cabextract/mspack/lzxd.c` | 1 | D2 |
+| 5 | `thirdparty/libmspack/cabextract/mspack/lzx.h` | 1 | D2 |
+| 6 | `thirdparty/crypto/sha256.cpp` | 1 | C `endian.h` |
+| 7 | `src/system/xsocket.cpp` | 1 | C `netinet/ip.h` |
+| 8 | `src/core/mapped_memory_posix.cpp` | 1 | C `sys/mman.h` (rinviato) |
+
+## Errori rimasti fuori perimetro: difficoltà e approccio
+
+| Errore | Difficoltà | Approccio consigliato |
+|---|---|---|
+| `timegm` (`stfs_xbox.h:46`) | bassa | Ramo NX con un'implementazione `days_from_civil` di poche righe. Non conviene `mktime` più TZ, perché newlib non ha `tm_gmtoff` |
+| `netinet/ip.h` (`xsocket.cpp:30`) | bassa | Stesso ramo NX usato per `xam_net.cpp`, senza `netinet/ip.h` |
+| `endian.h` (`thirdparty/crypto/sha256.cpp:18`) | bassa | Ramo `__SWITCH__` con `<machine/endian.h>`, oppure le macro `__BYTE_ORDER__` già usate nel ramo Apple dello stesso file |
+| symlink mspack | bassa | Developer Mode o shell da amministratore, poi `core.symlinks=true` e checkout del sottomodulo |
+
+## mapped_memory: analisi (non implementato)
+
+`rex::memory::MappedMemory` (`include/rex/memory/mapped_memory.h`) offre `Open(path, Mode{kRead,kReadWrite}, offset, length)`, `Slice`, `Remap`, `Flush` e `Close(truncate)`. `mapped_memory_posix.cpp` lo implementa con `open` più `mmap(MAP_SHARED)` sul file e `ftruncate64` alla chiusura. Esiste anche `ChunkedMappedMemoryWriter`.
+
+**Chi lo usa** (esclusa la grafica, che non fa parte della build Switch):
+
+| Chiamante | Modalità | Tipo | File mappato |
+|---|---|---|---|
+| `DiscImageDevice::Initialize` (`src/filesystem/devices/disc_image_device.cpp:56`) | `kRead` | file, **tutto il file** | immagine disco GDFX/ISO (fino a ~7-8 GB) |
+| `DiscImageEntry::OpenMapped` (`disc_image_entry.cpp:40`) | solo `kRead`: rifiuta le altre modalità | slice non proprietario della mappatura del disco | voce dentro l'ISO |
+| `HostPathEntry::OpenMapped` (`host_path_entry.cpp:69`) | passa la modalità del chiamante | file, con offset e lunghezza | file sul filesystem host |
+| `UserModule` (`src/system/user_module.cpp:68`), tramite `OpenMapped` | `kRead` | file | **XEX del gioco** (default.xex) |
+| `vfs_dump.cpp:84`, tramite `OpenMapped` | `kRead` | file | strumento di dump del VFS |
+| `StfsContainerDevice` (`stfs_container_device.cpp:864`) | `kRead` | file, 4 byte | lettura del magic STFS/SVOD |
+| `trace_reader.cpp` (grafica, esclusa) | `kRead` | file | trace GPU |
+
+Riepilogo:
+
+- **Sempre in sola lettura.** Nessun chiamante usa `kReadWrite`, e `ChunkedMappedMemoryWriter` non ha chiamanti.
+- **Sempre su file,** mai memoria anonima. La memoria guest (le viste da 4,5 GB) è un'altra cosa: la gestisce `memory_switch.cpp`, che compila.
+- **Implicazione per la Switch.** Horizon non ha `mmap` su file, quindi un `mapped_memory_switch.cpp` dovrà leggere il file in un buffer (`fread` in un'allocazione allineata). Per XEX, magic STFS e file host è semplice. Il problema vero è `DiscImageDevice`, che mappa l'**intera ISO**: su Switch va evitato (usare i file estratti con `HostPathDevice`/RomFS) oppure riscritto per leggere su richiesta.
+
+## seh_posix: analisi (non implementato)
+
+**Cosa fa.** Offre il supporto runtime delle macro `SEH_TRY`/`SEH_CATCH` (`include/rex/platform/exceptions.h`), che il codegen emette nel codice ricompilato per i blocchi `__try/__except` dello Xbox 360 (`src/codegen/function_graph.cpp:677`):
+
+- `seh_initialize()` installa un handler `sigaction(SA_SIGINFO)` per SIGSEGV, SIGBUS, SIGFPE e SIGILL;
+- l'handler, se il thread è dentro una regione SEH (`seh_active()`), **lancia un'eccezione C++** `SehException(code, si_addr)` dal contesto del segnale;
+- `seh_rethrow()` ri-solleva il segnale.
+
+`SehGuard` usa `seh_active()` per ogni `SEH_TRY`. `runtime.cpp:115` chiama `initialize_seh()` e `xthread.cpp:441` chiama `initialize_seh_thread()`.
+
+**`exception_handler_switch.cpp` copre la stessa funzione? No.**
+
+| | `seh_posix.cpp` | `exception_handler_switch.cpp` |
+|---|---|---|
+| Scopo | trasformare un fault dentro `SEH_TRY` in una `SehException` C++, catturata da `SEH_CATCH` | gestore di access violation dell'host: gira gli handler installati (MMIO, write-watch), riscrive i registri e riprende l'esecuzione, altrimenti `svcBreak` |
+| Meccanismo | segnali POSIX più unwind C++ dal frame del segnale | `__libnx_exception_handler` |
+| Simboli esportati | `seh_initialize`, `seh_active`, `seh_thread_state`, `seh_filter`, `seh_rethrow` | `ExceptionHandler::Install/Uninstall` |
+
+**Si può semplicemente escludere? No.** Senza `seh_posix.cpp` mancano al link `seh_initialize()` e `seh_active()`, chiamate da `runtime.cpp`, `xthread.cpp` e ogni `SehGuard`.
+
+Nei sorgenti presenti nel repo non compare nessun `SEH_TRY` (0 occorrenze in `LibertyRecompLib` e `gta4-recomp`). Il codice ricompilato però viene generato dal XEX e potrebbe contenerne; va verificato sul codice generato.
+
+**Approccio consigliato:** un `seh_switch.cpp` minimo al posto di `seh_posix.cpp`, con lo stato thread-local, `seh_initialize()` vuota e `seh_rethrow()` che chiama `svcBreak`. Un fault dentro `SEH_TRY` diventerebbe fatale: è lo stesso comportamento di oggi con `exception_handler_switch.cpp`, e non esiste un modo sicuro per lanciare un'eccezione C++ da `__libnx_exception_handler`. Se in seguito il codice generato mostrasse blocchi `__except` necessari al gioco, bisognerà convertire il fault in un `longjmp` verso il blocco catch dentro l'handler libnx.
+
+## Warning (run 3)
+
+In totale 579 righe, 230 distinte, nessuna bloccante. Sono aumentate perché ora compila tutto `rexruntime`. Le principali:
+
+| Warning | Occorrenze | Note |
+|---|---|---|
+| `-Wunused-parameter` | 451 | quasi tutti negli stub del kernel HLE |
+| `-Wmissing-field-initializers` | 35 | |
+| `-Wimplicit-fallthrough` | 25 | |
+| `-Wunused-variable`, `-Wunknown-pragmas` | 11 ciascuno | |
+| `-Wtype-limits` | 8 | |
+| `-Wsign-compare`, `-Wreorder`, `-Wclass-memaccess` | 6 ciascuno | |
+| `-fno-char8_t` sui file C | | il flag globale arriva anche ai file C |
 
 ## Censimento SDL3
 
@@ -299,12 +367,14 @@ Target compilati (13): `rexcore`, `rexfilesystem`, `rexruntime`, `rexaudio` (XMA
 
 ## Punti aperti
 
-1. **`LibertyRecomp/CMakeLists.txt:4` controlla solo `CMAKE_SYSTEM_NAME STREQUAL "Switch"`** per decidere se scaricare zlib con FetchContent. Con il toolchain ufficiale il nome è `NintendoSwitch`, quindi quel ramo non scatta più su Switch. Gli altri controlli dello stesso file usano anche `LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch"` e non sono toccati. Non modificato.
-2. **Backend Switch di input e audio** (`src/input/switch/`, `src/audio/switch/`) orfani: da collegare quando si decide su SDL3.
-3. **`mapped_memory_posix.cpp` richiede `sys/mman.h`,** che non esiste su Horizon. Serve un backend `mapped_memory_switch.cpp`. Non corretto: fa parte del conteggio.
-4. **`seh_posix.cpp` presuppone i segnali POSIX:** su NX va sostituito, non adattato (vedi B).
-5. **L'API keyboard dialog non esiste più nell'SDK:** `keyboard_dialog_switch.cpp` (e i gemelli android/ios/ps4) sono residui di una versione precedente.
-6. **I symlink git non sono materializzati** in questo checkout Windows (`core.symlinks=false`). Colpisce libmspack e forse altri sottomoduli, per qualunque piattaforma costruita da questo checkout.
-7. **Artefatti nel sorgente:** l'SDK scrive gli archivi `.a` in `glue/rexglue-sdk-main/out/switch-aarch64/` (`CMAKE_ARCHIVE_OUTPUT_DIRECTORY = ${REXGLUE_ROOT}/out/${REX_PLATFORM}`), non nella cartella di build. La cartella è ignorata da git (`glue/rexglue-sdk-main/.gitignore:33`).
-8. **Il preset `switch-base` in `CMakePresets.json` usa il generatore Ninja,** che su questa macchina non è installato.
-9. **`-fno-char8_t` arriva anche ai file C:** è innocuo, ma produce un warning.
+1. **mspack/symlink:** servono la Developer Mode o una shell da amministratore, poi `core.symlinks=true` e il checkout di `cabextract/mspack` (vedi "mspack"). Colpisce qualunque build fatta da questo checkout Windows.
+2. **`mapped_memory_switch.cpp` da scrivere:** lettura in un buffer, in sola lettura. `DiscImageDevice` (mappatura dell'intera ISO) va evitato su Switch.
+3. **`seh_switch.cpp` minimo da scrivere al posto di `seh_posix.cpp`,** che non si può escludere senza sostituirlo. Va verificato se il codice ricompilato di GTA IV contiene `SEH_TRY`.
+4. **Errori fuori perimetro da correggere:** `timegm` (`stfs_xbox.h`), `netinet/ip.h` (`xsocket.cpp`), `endian.h` (`thirdparty/crypto/sha256.cpp`).
+5. **`LibertyRecomp/CMakeLists.txt:4` controlla solo `CMAKE_SYSTEM_NAME STREQUAL "Switch"`** per decidere se scaricare zlib con FetchContent. Con il toolchain ufficiale il nome è `NintendoSwitch`, quindi quel ramo non scatta più su Switch. Gli altri controlli dello stesso file usano anche `LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch"`. Non modificato.
+6. **Backend Switch di input e audio** (`src/input/switch/`, `src/audio/switch/`) orfani: da collegare quando si decide su SDL3.
+7. **API keyboard dialog rimossa dall'SDK** (commit `a1d3a84d`): `keyboard_dialog_switch.cpp` è escluso, e i gemelli android, ios e ps4 sono orfani.
+8. **Link non ancora provato.** In particolare vanno verificati i riferimenti `movrel` degli `.S` NEON di FFmpeg in un eseguibile PIE statico, e i simboli newlib dichiarati ma non forniti. `posix_memalign`, `sysconf`, `getrusage` e `arc4random` sono già stati esclusi dal config FFmpeg, e `fiber_switch.cpp` non usa più `posix_memalign`.
+9. **Artefatti nel sorgente:** l'SDK scrive gli archivi `.a` in `glue/rexglue-sdk-main/out/switch-aarch64/` (`CMAKE_ARCHIVE_OUTPUT_DIRECTORY = ${REXGLUE_ROOT}/out/${REX_PLATFORM}`), non nella cartella di build. La cartella è ignorata da git (`glue/rexglue-sdk-main/.gitignore:33`).
+10. **Il preset `switch-base` in `CMakePresets.json` usa il generatore Ninja,** che su questa macchina non è installato.
+11. **Il messaggio "Architecture: x86_64" di xxHash** resta nel log di configurazione: viene dal sottomodulo, ma non ha più effetto (dispatch disattivato su `switch`, percorso NEON verificato).

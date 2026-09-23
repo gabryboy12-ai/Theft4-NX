@@ -86,6 +86,18 @@ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
   return fopen(path.c_str(), std::string(mode).c_str());
 }
 
+#if REX_PLATFORM_NX
+// newlib has no LFS64 API; on aarch64 off_t is already 64-bit.
+static_assert(sizeof(off_t) == 8, "Switch off_t must be 64-bit");
+
+bool Seek(FILE* file, int64_t offset, int origin) {
+  return fseeko(file, off_t(offset), origin) == 0;
+}
+
+int64_t Tell(FILE* file) {
+  return int64_t(ftello(file));
+}
+#else
 bool Seek(FILE* file, int64_t offset, int origin) {
   return fseeko64(file, off64_t(offset), origin) == 0;
 }
@@ -93,6 +105,7 @@ bool Seek(FILE* file, int64_t offset, int origin) {
 int64_t Tell(FILE* file) {
   return int64_t(ftello64(file));
 }
+#endif
 
 bool TruncateStdioFile(FILE* file, uint64_t length) {
   if (fflush(file)) {
@@ -102,9 +115,15 @@ bool TruncateStdioFile(FILE* file, uint64_t length) {
   if (position < 0) {
     return false;
   }
+#if REX_PLATFORM_NX
+  if (ftruncate(fileno(file), off_t(length))) {
+    return false;
+  }
+#else
   if (ftruncate64(fileno(file), off64_t(length))) {
     return false;
   }
+#endif
   if (uint64_t(position) > length) {
     if (!Seek(file, 0, SEEK_END)) {
       return false;

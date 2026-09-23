@@ -720,6 +720,13 @@ endif()
 
 target_include_directories(libavcodec BEFORE PRIVATE "${FFMPEG_OVERLAY_BUILD_DIR}")
 
+# FFmpeg/config.h has no Horizon branch; on Switch a config.h derived from the
+# Linux aarch64 one is found first on the include path.
+if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    target_include_directories(libavutil BEFORE PRIVATE "${FFMPEG_OVERLAY_SRC_DIR}/horizon")
+    target_include_directories(libavcodec BEFORE PRIVATE "${FFMPEG_OVERLAY_SRC_DIR}/horizon")
+endif()
+
 target_include_directories(libavcodec
     PUBLIC
         $<BUILD_INTERFACE:${FFMPEG_DIR}>

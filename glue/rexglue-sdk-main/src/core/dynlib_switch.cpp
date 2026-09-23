@@ -17,28 +17,28 @@ DynamicLibrary::~DynamicLibrary() { Close(); }
 
 DynamicLibrary::DynamicLibrary(DynamicLibrary&& other) noexcept
     : handle_(other.handle_) {
-  other.handle_ = kInvalidDynamicLibraryHandle;
+  other.handle_ = nullptr;
 }
 
 DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
   if (this != &other) {
     Close();
     handle_ = other.handle_;
-    other.handle_ = kInvalidDynamicLibraryHandle;
+    other.handle_ = nullptr;
   }
   return *this;
 }
 
-bool DynamicLibrary::Load(const std::filesystem::path& path) {
+bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution /*mode*/) {
   REXLOG_WARN(
       "DynamicLibrary::Load('{}') called on Switch — dynamic loading is not "
       "supported; link this code statically.",
       path.string());
-  handle_ = kInvalidDynamicLibraryHandle;
+  handle_ = nullptr;
   return false;
 }
 
-void DynamicLibrary::Close() { handle_ = kInvalidDynamicLibraryHandle; }
+void DynamicLibrary::Close() { handle_ = nullptr; }
 
 void* DynamicLibrary::GetRawSymbol(const char* name) const {
   REXLOG_WARN(

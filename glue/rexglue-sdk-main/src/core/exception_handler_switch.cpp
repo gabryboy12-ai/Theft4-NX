@@ -78,8 +78,17 @@ void FillThreadContext(HostThreadContext& tc, const ThreadExceptionDump* ctx) {
   tc.sp    = ctx->sp.x;
   tc.pc    = ctx->pc.x;
   tc.pstate = ctx->pstate;
-  tc.fpsr = ctx->fpsr;
-  tc.fpcr = ctx->fpcr;
+  // ThreadExceptionDump carries no FP control/status registers (libnx keeps
+  // fpcr/fpsr only in ThreadContext, which svcGetThreadContext3 can fill for
+  // a suspended thread but not for the faulting one). This handler runs on
+  // the faulting thread and does no FP work before this point, so the live
+  // registers still hold the values at the fault.
+  uint64_t fpsr = 0;
+  uint64_t fpcr = 0;
+  __asm__ volatile("mrs %0, fpsr" : "=r"(fpsr));
+  __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+  tc.fpsr = static_cast<uint32_t>(fpsr);
+  tc.fpcr = static_cast<uint32_t>(fpcr);
   for (uint32_t i = 0; i < 32; ++i) {
     std::memcpy(&tc.v[i], &ctx->fpu_gprs[i].v, sizeof(tc.v[i]));
   }

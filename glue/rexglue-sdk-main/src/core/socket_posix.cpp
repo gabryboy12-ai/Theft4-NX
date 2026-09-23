@@ -90,8 +90,10 @@ uint32_t socket_last_error() {
       return 10056;  // WSAEISCONN
     case ENOTCONN:
       return 10057;  // WSAENOTCONN
+#if !REX_PLATFORM_NX  // newlib defines ESHUTDOWN only with __LINUX_ERRNO_EXTENSIONS__
     case ESHUTDOWN:
       return 10058;  // WSAESHUTDOWN
+#endif
 #ifdef ETOOMANYREFS
     case ETOOMANYREFS:
       return 10059;  // WSAETOOMANYREFS
