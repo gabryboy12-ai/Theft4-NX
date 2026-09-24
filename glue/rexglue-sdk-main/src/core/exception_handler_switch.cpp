@@ -30,6 +30,7 @@
 #include <rex/assert.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/platform/seh.h>
 #include <rex/system/mmio_handler.h>
 
 extern "C" {
@@ -146,6 +147,17 @@ inline void SigSafeWriteLabelHex(const char* label, uint64_t value) {
   (void)::write(STDERR_FILENO, buf, w);
 }
 
+// A fault that no handler claimed while SehGuard is active on this thread.
+// seh_switch.cpp cannot turn it into an SehException yet, so say so
+// explicitly before the panic instead of reporting a plain crash.
+void ReportUnsupportedSehFault(uint64_t fault_addr, uint64_t fault_pc) {
+  static const char kMessage[] = "[rex] fault inside SEH_TRY, not yet supported on Switch\n";
+  svcOutputDebugString(kMessage, sizeof(kMessage) - 1);
+  SigSafeWriteCStr(kMessage);
+  SigSafeWriteLabelHex("address", fault_addr);
+  SigSafeWriteLabelHex("pc", fault_pc);
+}
+
 }  // namespace
 
 void ExceptionHandler::Install(Handler fn, void* data) {
@@ -183,6 +195,9 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
 
   if (!IsAccessViolation(ctx->error_desc)) {
     // Signal-safe only: spdlog / fmt::format are not async-safe.
+    if (rex::platform::seh_active()) {
+      ReportUnsupportedSehFault(fault_addr, fault_pc);
+    }
     SigSafeWriteCStr("[rex] Switch exception (non-AV)\n");
     SigSafeWriteLabelHex("error_desc", static_cast<uint64_t>(ctx->error_desc));
     SigSafeWriteLabelHex("pc", fault_pc);
@@ -231,6 +246,9 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
   }
 
   // Signal-safe only: spdlog / fmt::format are not async-safe.
+  if (rex::platform::seh_active()) {
+    ReportUnsupportedSehFault(fault_addr, fault_pc);
+  }
   SigSafeWriteCStr("[rex] Unhandled Switch access violation\n");
   SigSafeWriteLabelHex("pc", fault_pc);
   SigSafeWriteLabelHex("far", fault_addr);

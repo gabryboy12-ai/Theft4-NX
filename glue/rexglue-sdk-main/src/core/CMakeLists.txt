@@ -107,13 +107,13 @@ elseif(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
         filesystem_posix.cpp
         fiber_switch.cpp
         logging_switch.cpp
-        mapped_memory_posix.cpp
+        mapped_memory_switch.cpp
         math_gcc.cpp
         memory_switch.cpp
         net_switch.cpp
         platform/console_posix.cpp
         platform/env_posix.cpp
-        seh_posix.cpp
+        seh_switch.cpp
         socket_posix.cpp
         system_posix.cpp
         threading_switch.cpp

@@ -28,6 +28,27 @@ namespace rex::filesystem {
 using rex::system::XContentType;
 using rex::system::XLanguage;
 
+#if REX_PLATFORM_NX
+// newlib has no timegm(). Seconds since 1970-01-01 UTC for a broken-down UTC
+// time, using Howard Hinnant's days_from_civil. Fields are expected to be in
+// range (the FAT decoder below never normalises).
+inline time_t nx_timegm(const struct tm* tm) {
+  int64_t y = int64_t(tm->tm_year) + 1900;
+  const int64_t m = int64_t(tm->tm_mon) + 1;
+  if (m < 1 || m > 12) {
+    return time_t(-1);
+  }
+  y -= m <= 2;
+  const int64_t era = (y >= 0 ? y : y - 399) / 400;
+  const int64_t yoe = y - era * 400;
+  const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + tm->tm_mday - 1;
+  const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  const int64_t days = era * 146097 + doe - 719468;
+  return time_t(days * 86400 + int64_t(tm->tm_hour) * 3600 + int64_t(tm->tm_min) * 60 +
+                tm->tm_sec);
+}
+#endif  // REX_PLATFORM_NX
+
 // Convert FAT timestamp to 100-nanosecond intervals since January 1, 1601 (UTC)
 inline uint64_t decode_fat_timestamp(const uint32_t date, const uint32_t time) {
   struct tm tm = {};
@@ -42,6 +63,8 @@ inline uint64_t decode_fat_timestamp(const uint32_t date, const uint32_t time) {
 
 #if REX_PLATFORM_WIN32
   time_t timet = _mkgmtime(&tm);
+#elif REX_PLATFORM_NX
+  time_t timet = nx_timegm(&tm);
 #else
   time_t timet = timegm(&tm);
 #endif

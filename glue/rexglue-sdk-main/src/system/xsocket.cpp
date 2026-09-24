@@ -24,6 +24,12 @@
 #include <WinSock2.h>
 
 #include <WS2tcpip.h>
+#elif REX_PLATFORM_NX
+// libnx has no <netinet/ip.h>; this file only needs sockaddr_in, htons/htonl
+// and the IPPROTO_* constants, all from <netinet/in.h> / <arpa/inet.h>.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
