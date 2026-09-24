@@ -642,7 +642,14 @@ class PosixCondition<Thread> : public PosixConditionBase {
     WaitStarted();
     std::unique_lock<std::mutex> lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
+#if REX_PLATFORM_NX
+      // libnx has no pthread_setname_np (declared, not implemented) and
+      // Horizon threads carry no user-visible name. The name is kept in
+      // Thread::name_ by PosixThread::set_name.
+      (void)name;
+#else
       pthread_setname_np(thread_, std::string(name).c_str());
+#endif
 #if REX_PLATFORM_ANDROID
       SetAndroidPreApi26Name(name);
 #endif
@@ -1348,7 +1355,15 @@ void Thread::Exit(int exit_code) {
 }
 
 void set_current_thread_name(const std::string_view name) {
+#if REX_PLATFORM_NX
+  // No pthread_setname_np in libnx: keep the name in the SDK thread object
+  // (Thread::name_, used for logging/debugging) when there is one.
+  if (current_thread_) {
+    current_thread_->Thread::set_name(std::string(name));
+  }
+#else
   pthread_setname_np(pthread_self(), std::string(name).c_str());
+#endif
 #if REX_PLATFORM_ANDROID
   if (!android_pthread_getname_np_ && current_thread_) {
     current_thread_->condition().SetAndroidPreApi26Name(name);

@@ -31,6 +31,12 @@
 #include <libgen.h>
 #include <pwd.h>
 
+#if REX_PLATFORM_NX
+#include <errno.h>
+
+#include <mutex>
+#endif
+
 namespace rex {
 
 std::string path_to_utf8(const std::filesystem::path& path) {
@@ -63,6 +69,11 @@ std::filesystem::path GetExecutableFolder() {
 }
 
 std::filesystem::path GetUserFolder() {
+#if REX_PLATFORM_NX
+  // Horizon has no users, HOME or passwd database (libnx declares getuid and
+  // getpwuid_r but does not implement them). All user data lives on the SD.
+  return std::filesystem::path("sdmc:/switch/theft4");
+#else
   // get preferred data home
   if (auto xdg = rex::platform::env::get("XDG_DATA_HOME")) {
     return std::filesystem::path(*xdg);
@@ -80,6 +91,7 @@ std::filesystem::path GetUserFolder() {
   getpwuid_r(getuid(), &pw1, buf, sizeof(buf), &pw);
   assert(&pw1 == pw);  // sanity check
   return std::filesystem::path(pw->pw_dir) / ".local" / "share";
+#endif
 }
 
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
@@ -148,8 +160,42 @@ static uint64_t convertUnixtimeToWinFiletime(time_t unixtime) {
   return filetime;
 }
 
+#if REX_PLATFORM_NX
+// newlib/libnx have no pread/pwrite. Emulate them with lseek + read/write and
+// restore the file position afterwards. The mutex serialises these helpers
+// against each other only: any other read/write/lseek on the same fd outside
+// them can interleave and see or move the temporary position.
+static std::mutex g_nx_positional_io_mutex;
+
+static ssize_t NxPositionalIo(int fd, void* buffer, size_t length, off_t offset, bool write) {
+  std::lock_guard<std::mutex> lock(g_nx_positional_io_mutex);
+  const off_t saved = lseek(fd, 0, SEEK_CUR);
+  if (saved < 0 || lseek(fd, offset, SEEK_SET) < 0) {
+    return -1;
+  }
+  const ssize_t result = write ? ::write(fd, buffer, length) : ::read(fd, buffer, length);
+  const int saved_errno = errno;
+  lseek(fd, saved, SEEK_SET);
+  errno = saved_errno;
+  return result;
+}
+
+static ssize_t pread(int fd, void* buffer, size_t length, off_t offset) {
+  return NxPositionalIo(fd, buffer, length, offset, false);
+}
+
+static ssize_t pwrite(int fd, const void* buffer, size_t length, off_t offset) {
+  return NxPositionalIo(fd, const_cast<void*>(buffer), length, offset, true);
+}
+#endif  // REX_PLATFORM_NX
+
 bool CreateEmptyFile(const std::filesystem::path& path) {
+#if REX_PLATFORM_NX
+  // newlib/libnx have no creat(); this is its POSIX definition.
+  int file = open(path.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0774);
+#else
   int file = creat(path.c_str(), 0774);
+#endif
   if (file >= 0) {
     close(file);
     return true;

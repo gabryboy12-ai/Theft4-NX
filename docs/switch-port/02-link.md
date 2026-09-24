@@ -165,3 +165,62 @@ Limiti di questa misura:
 2. Avviarlo sull'hardware e allegare `sdmc:/switch/theft4/smoke.log`: valori di `svcGetInfo`, esito della diagnostica 3b a 2304 MiB, core effettivi dei thread.
 3. Ramo NX in `xmemory.cpp` per la dimensione del mapping e per `virtual_membase_`, visto che la vista primaria non sta a `mapping_base`.
 4. Symlink di mspack (sezione A), per riavere un albero di lavoro pulito.
+
+## Aggiornamento — run 5: Ninja, simboli risolti, primo NRO
+
+| | Run 4 | **Run 5** |
+|---|---|---|
+| Generatore | Unix Makefiles | **Ninja 1.13.2** |
+| Errori SDK | 0 | **0** (350/350 passi, 422 s da zero) |
+| Link `switch-smoke.elf` | 1 simbolo mancante | **OK** |
+| Link diagnostico `--whole-archive` | 6 simboli mancanti | **OK** (0 simboli mancanti) |
+| NRO | — | **`out/build/switch-smoke/switch-smoke.nro`** (1,2 MB) |
+
+### Ninja
+
+Il `ninja.exe` in `C:\devkitPro\tools\bin` è un binario Windows nativo. L'unico CMake installato è quello di MSYS2 (`/usr/bin/cmake`, 4.0.2), che scrive nei file di build percorsi POSIX (`/c/dev/...`). Il Ninja nativo non li risolve: il configure falliva già al test del compilatore (`testCCompiler.c … missing and no known rule to make it`).
+
+La soluzione è il pacchetto `msys/ninja` (stessa versione, 1.13.2, in `/usr/bin/ninja`), indicato esplicitamente. Il `ninja.exe` nativo non è stato toccato.
+
+```sh
+export DEVKITPRO=/opt/devkitpro
+cmake -S glue/rexglue-sdk-main -B out/build/switch-sdk -G Ninja \
+      -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja \
+      -DCMAKE_TOOLCHAIN_FILE=/c/dev/Theft4/toolchains/switch-libnx.cmake \
+      -DCMAKE_BUILD_TYPE=Release
+ninja -C out/build/switch-sdk -k 0
+```
+
+Build incrementale verificata:
+
+- senza modifiche: `ninja: no work to do.`;
+- dopo `touch src/core/clock.cpp`: 2 passi, `[1/2] Building CXX object src/core/CMakeFiles/rexcore.dir/clock.o` e `[2/2] Linking CXX static library …/librexcore.a`, poi di nuovo `no work to do`.
+
+Il problema dei `compiler_depend.make` con percorsi `C:/` visto con make non si presenta più.
+
+`switch-smoke` usa gli stessi parametri, in `out/build/switch-smoke`.
+
+### I 6 simboli: tutti dietro `REX_PLATFORM_NX`
+
+| Simbolo | Soluzione | File |
+|---|---|---|
+| `pthread_setname_np` ×2 | Niente nel thread: il nome resta in `Thread::name_`, il campo che l'SDK usa per log e debug. `PosixThread::set_name` lo salvava già. `set_current_thread_name` lo salva in `current_thread_`, se esiste | `threading_switch.cpp` |
+| `pread`/`pwrite` | Helper `static` locali: `lseek(SEEK_CUR)` per salvare la posizione, `lseek(offset)`, `read`/`write`, ripristino della posizione e di `errno`, tutto sotto un `std::mutex` | `filesystem_posix.cpp` |
+| `creat` | `open(path, O_CREAT \| O_WRONLY \| O_TRUNC, 0774)` | `filesystem_posix.cpp` |
+| `getuid`/`getpwuid_r` | Non implementati. L'unico chiamante è `GetUserFolder()` (fallback passwd quando mancano `XDG_DATA_HOME` e `HOME`); su NX restituisce `sdmc:/switch/theft4` | `filesystem_posix.cpp` |
+
+**Limite di `pread`/`pwrite` su NX:** non sono atomici rispetto ad altre letture, scritture o `lseek` sullo stesso fd fatte **fuori** da questi helper. Il mutex serializza solo gli helper tra loro. Un `read()`/`write()` diretto sullo stesso descrittore, in un altro thread, può vedere la posizione temporanea o spostarla durante l'operazione. Nell'SDK li usa solo `PosixFileHandle::Read/Write`, che non usa mai la posizione corrente, quindi oggi il caso non si presenta. Il mutex è unico per tutti i file: l'I/O posizionale su file diversi viene serializzato.
+
+### Link
+
+- Link normale del target: `switch-smoke.elf` (26,5 MB con simboli di debug) → `switch-smoke.nro` (1,2 MB) con `nx_create_nro`.
+- Link diagnostico: stessa riga del run 4 (`--whole-archive` su `rexruntime`, `rexcore`, `mspack`, `aes128`, `tiny-aes` e `o1heap`, più `--no-gc-sections`) → `whole-archive-probe.elf` (131 MB, 10 862 simboli di testo), **nessun simbolo mancante e nessuna definizione duplicata**. Log vuoto in `out/build/switch-smoke/whole-archive-link.log`.
+
+### switch-smoke
+
+In più rispetto al run 4:
+
+- **passo 2**: per le 8 SVC di memoria rilevanti in [03-memory.md](03-memory.md), stampa se sono abilitate per il processo (`envIsSyscallHinted`);
+- **passo 3**: prima del percorso del runtime, una **prenotazione virtuale pura di `0x120200000` byte** (`virtmemFindAslr` + `virtmemAddReservation`, senza memoria né SVC). Stampa l'intervallo ottenuto e se la regione alias è abbastanza grande da contenerla, poi la rilascia.
+
+La diagnostica 3b a 2304 MiB resta. L'NRO non è ancora stato eseguito sull'hardware.

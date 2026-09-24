@@ -111,6 +111,48 @@ void StepAddressSpace() {
     }
     SMOKE_INFO("  %-20s %s", item.name, Hex(value).c_str());
   }
+
+  // Memory SVCs a Horizon guest-memory design could rely on
+  // (docs/switch-port/03-memory.md). "hinted" means the loader reports the
+  // syscall as available to this process.
+  struct Svc {
+    const char* name;
+    unsigned id;
+  };
+  static const Svc kSvcs[] = {
+      {"svcMapMemory", 0x04},          {"svcMapSharedMemory", 0x13},
+      {"svcCreateTransferMemory", 0x15}, {"svcMapPhysicalMemory", 0x2C},
+      {"svcCreateCodeMemory", 0x4B},   {"svcControlCodeMemory", 0x4C},
+      {"svcCreateSharedMemory", 0x50}, {"svcMapTransferMemory", 0x51},
+  };
+  SMOKE_INFO("  syscall hints:");
+  for (const Svc& svc : kSvcs) {
+    SMOKE_INFO("    %-24s (0x%02x) %s", svc.name, svc.id,
+               envIsSyscallHinted(svc.id) ? "hinted" : "NOT hinted");
+  }
+}
+
+// Pure virtual reservation (libnx virtmem bookkeeping only, no backing, no
+// SVC) of the runtime mapping size, to learn whether the address space fits it.
+void StepVirtualReservation(size_t size) {
+  SMOKE_INFO("  virtmem-only reservation of %s bytes (no backing)", Hex(size).c_str());
+  virtmemLock();
+  void* base = virtmemFindAslr(size, 0x200000);
+  VirtmemReservation* reservation = base ? virtmemAddReservation(base, size) : nullptr;
+  virtmemUnlock();
+  if (!base || !reservation) {
+    Fail("virtmem reservation", "virtmemFindAslr/virtmemAddReservation failed for " + Hex(size));
+    return;
+  }
+  u64 alias_start = 0, alias_size = 0;
+  svcGetInfo(&alias_start, InfoType_AliasRegionAddress, CUR_PROCESS_HANDLE, 0);
+  svcGetInfo(&alias_size, InfoType_AliasRegionSize, CUR_PROCESS_HANDLE, 0);
+  SMOKE_INFO("  ok: ASLR range %p-%p; alias region size %s %s the mapping size", base,
+             static_cast<void*>(static_cast<uint8_t*>(base) + size - 1), Hex(alias_size).c_str(),
+             alias_size >= size ? ">=" : "<");
+  virtmemLock();
+  virtmemRemoveReservation(reservation);
+  virtmemUnlock();
 }
 
 // ── 3. Guest memory ─────────────────────────────────────────────────────────
@@ -243,6 +285,7 @@ void StepGuestMemory() {
   const size_t runtime_size =
       (size_t(0x120000000ull) + granularity + granularity - 1) & ~(granularity - 1);
   SMOKE_INFO("step 3 guest memory (runtime path, granularity %s)", Hex(granularity).c_str());
+  StepVirtualReservation(runtime_size);
   if (ReserveAndProbe("guest memory", runtime_size)) {
     SMOKE_INFO("  runtime-size reservation ok");
     return;
