@@ -183,3 +183,49 @@ Ordine suggerito:
 2. nuova API di piattaforma per prenotare lo spazio guest (addio al ciclo `1 << n` su NX);
 3. traduzione in `TranslateVirtual`/`HostToGuestVirtual` e macro codegen;
 4. commit su richiesta e misura della memoria in gioco.
+
+## 6. Test sulla console: `switch-smoke` T1–T6
+
+Dopo i passi 1–4 e il verdetto `SMOKE OK/FAIL`, `switch-smoke.nro` esegue sei sonde (`tools/switch-smoke/probes.cpp`). Sono **misure**, non test con esito positivo o negativo, e non cambiano il verdetto.
+
+**Log resistente ai crash.** Ogni riga di `smoke.log` scritta dallo smoke segue questi passi:
+
+1. flush del logger SDK;
+2. `open(O_APPEND)`, `write`, `fsync`, `close` su un descrittore separato.
+
+Ogni sonda scrive `Tn BEGIN` prima di iniziare e una riga `Tn about to …` prima di ogni SVC o accesso a memoria che può terminare il processo. Dopo un crash, l'ultima riga del log indica l'operazione tentata. Ogni SVC è registrata con il result code nel formato `rc=0x… (2xxx-yyyy)`.
+
+**Sicurezza delle sonde:**
+
+- una SVC che il loader non segnala come disponibile (`envIsSyscallHinted`) **non viene chiamata**: una SVC non permessa solleva un'eccezione invece di restituire un errore;
+- la memoria viene letta o scritta solo dopo che `svcQueryMemory` ne mostra il permesso.
+
+Limite: `fsync` sul descrittore separato forza i dati di quel descrittore. Le righe interne dell'SDK (spdlog, stesso file in append) vengono flushate subito prima, ma non passano da un `fsync` proprio.
+
+| Sonda | Domanda | Cosa fa | Come leggerla |
+|---|---|---|---|
+| T1 | `svcMapProcessCodeMemory` crea un alias RW? | Buffer heap `src` da 64 KiB, `dst` nella regione codice (`virtmemFindCodeMemory`). `svcMapProcessCodeMemory(own, dst, src)`, poi `svcSetProcessMemoryPermission(dst, RW)`. Stampa tipo e permessi di `src` e `dst` dopo ogni passo. Poi scrive da una vista e rilegge dall'altra, in entrambe le direzioni se i permessi lo consentono. Infine smonta e rilegge `src` | Se `src` passa a `perm=---` dopo il mapping, è un **trasloco, non un alias**, e il progetto B non può usarlo |
+| T2 | Quali permessi hanno le viste di CodeMemory? Si può mappare due volte? | `svcCreateCodeMemory`, poi `MapOwner`/`MapSlave` provati con R, RW, R-X e RWX uno alla volta. Poi coppia owner RW + slave R-X con scrittura e rilettura, **secondo owner** RW e secondo slave sullo stesso oggetto | Solo con un secondo owner RW riuscito CodeMemory darebbe più di un alias scrivibile |
+| T3 | `svcMapPhysicalMemory` fuori o dentro la regione alias; quanto si può mappare? | Stampa la system resource del processo e il pool libero. Prova 2 MiB in ASLR (come oggi `memory_switch.cpp`). Poi, nella regione alias, ricerca binaria a blocchi da 2 MiB della dimensione massima, con probe sulle estremità e tempo per ogni `svcMapPhysicalMemory`, 512 MiB compresi | L'`rc` in ASLR conferma o smentisce il punto 4 di §4 |
+| T4 | Quale backend sceglie `jitCreate`? | Stampa gli hint coinvolti e chiama `jitCreate(0x1000)`; registra il tipo scelto | Vedi sotto |
+| T5 | Heap massimo con `svcSetHeapSize` e tempo per allocare 512 MiB | Stampa se il loader fornisce l'heap (override) e l'heap attuale. Ricerca binaria del massimo, **solo per crescita** (malloc usa l'heap attuale), poi il tempo di `svcSetHeapSize(+512 MiB)` e del primo `memset`. Ripristina la dimensione iniziale. Se la crescita non è possibile, misura `malloc` + `memset` di 512 MiB | |
+| T6 | Costo della traduzione del progetto A | 100 M letture + scritture u32 big-endian (volatili, `rev`, come `REX_LOAD/STORE_U32`) su 64 MiB. 3 modalità × 2 schemi di accesso (sequenziale, pseudo-casuale LCG) con gli stessi indirizzi | Differenza % rispetto all'accesso diretto |
+
+### T4: cosa fa `jitCreate` (libnx 4.12.0 installata)
+
+Ho verificato sul disassemblato di `jit.o` in `/opt/devkitpro/libnx/lib/libnx.a`, e coincide con `nx/source/kernel/jit.c` di libnx. **Non controlla la versione del firmware**: guarda solo gli hint delle SVC forniti dal loader.
+
+1. Se `envIsSyscallHinted(0x4B)` e `(0x4C)` → **`JitType_CodeMemory`**. Crea `svcCreateCodeMemory` su un buffer heap, poi `MapOwner` con **RW** (`perm=3`) e `MapSlave` con **R-X** (`perm=5`), ciascuno a un indirizzo di `virtmemFindCodeMemory`.
+2. Altrimenti, se `0x73`, `0x77`, `0x78` sono disponibili e `envGetOwnProcessHandle() != 0` → **`JitType_SetProcessMemoryPermission`**. `rw_addr` è il buffer sorgente stesso; il passaggio a eseguibile fa `svcMapProcessCodeMemory` + `svcSetProcessMemoryPermission(R-X)`, e quello a scrivibile smonta. Le due viste **non sono mai attive insieme**: è coerente con l'ipotesi che MapProcessCodeMemory sia un trasloco.
+3. Altrimenti restituisce `0x4759` (libnx `LibnxError_JitUnavailable`).
+
+Quale dei due scelga su questa console dipende quindi dagli hint forniti dal loader (hbl, forwarder o NSP) e non dal firmware. T4 lo stampa.
+
+### T6: codice misurato
+
+Dal disassemblato di `probes.o`:
+
+- **diretto:** un `ldr`/`str` con indirizzamento `[base, off, uxtw]`;
+- **progetto A:** `and` + `cmp` + 2 `add` + `csel`, senza salti, quindi nessun errore di predizione anche con finestre miste.
+
+Nella variante sequenziale "50% finestre" c'è un contatore in più (la finestra è `i & 1`), da considerare leggendo quel numero.

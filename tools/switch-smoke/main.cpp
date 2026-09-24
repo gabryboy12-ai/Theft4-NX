@@ -9,8 +9,14 @@
 //      mapping size, same CreateFileMappingHandle / MapFileView calls from
 //      memory_switch.cpp, then a write/read-back at both ends of the region
 //   4. four threads through rex::thread::Thread, one per core where allowed
-// The last line is "SMOKE OK" or "SMOKE FAIL at <step>: <reason>". Press + to
-// exit.
+// Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
+// followed by the exploratory probes T1-T6 in probes.cpp (alias primitives,
+// heap size, cost of the guest-memory design A). Press + to exit.
+//
+// Every smoke line is made durable before the next operation: the SDK logger
+// is flushed, then the line is appended to smoke.log through its own fd,
+// fsync'd and closed. A crash therefore leaves the last attempted operation
+// as the last line of the log.
 
 #include <atomic>
 #include <chrono>
@@ -23,7 +29,9 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <switch.h>
 
@@ -31,6 +39,8 @@
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/thread.h>
+
+#include "probes.h"
 
 namespace {
 
@@ -40,25 +50,39 @@ constexpr const char* kLogPath = "sdmc:/switch/theft4/smoke.log";
 std::string g_first_failure;
 bool g_logging_ready = false;
 
+// Appends one line to smoke.log and forces it to storage: open, write, fsync,
+// close. The SDK logger is flushed first so its lines stay in order.
+void DurableAppend(const char* line) {
+  rex::FlushLogging();
+  int fd = open(kLogPath, O_WRONLY | O_APPEND | O_CREAT, 0666);
+  if (fd < 0) {
+    return;
+  }
+  (void)write(fd, line, std::strlen(line));
+  (void)write(fd, "\n", 1);
+  fsync(fd);
+  close(fd);
+}
+
+}  // namespace
+
 void Report(bool error, const char* fmt, ...) {
+  const char* prefix = error ? "[smoke] ERROR " : "[smoke] ";
   char line[512];
+  const size_t prefix_len = std::strlen(prefix);
+  std::memcpy(line, prefix, prefix_len);
   va_list args;
   va_start(args, fmt);
-  std::vsnprintf(line, sizeof(line), fmt, args);
+  std::vsnprintf(line + prefix_len, sizeof(line) - prefix_len, fmt, args);
   va_end(args);
-  std::printf("%s\n", line);
+  std::printf("%s\n", line + std::strlen("[smoke] "));
   consoleUpdate(nullptr);
   if (g_logging_ready) {
-    if (error) {
-      REXLOG_ERROR("[smoke] {}", line);
-    } else {
-      REXLOG_INFO("[smoke] {}", line);
-    }
-    rex::FlushLogging();
+    DurableAppend(line);
   }
 }
 
-#define SMOKE_INFO(...) Report(false, __VA_ARGS__)
+namespace {
 
 void Fail(const char* step, const std::string& reason) {
   Report(true, "FAIL [%s] %s", step, reason.c_str());
@@ -79,6 +103,7 @@ void StepLogging() {
   mkdir("sdmc:/switch", 0777);
   mkdir(kLogDir, 0777);
   rex::InitLogging(kLogPath, spdlog::level::debug);
+  REXLOG_INFO("[smoke] SDK logger initialised");
   g_logging_ready = true;
   SMOKE_INFO("step 1 logging: SDK logger writing to %s", kLogPath);
 }
@@ -384,6 +409,8 @@ int main(int argc, char** argv) {
   } else {
     Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
   }
+
+  RunProbes();
   std::printf("\nPress + to exit.\n");
   consoleUpdate(nullptr);
 
