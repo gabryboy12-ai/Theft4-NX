@@ -3,10 +3,11 @@
 # as a subdirectory with the same configuration as out/build/switch-sdk and
 # links every SDK library the headless runtime uses.
 #
-#   cmake -S tools/switch-smoke -B out/build/switch-smoke -G "Unix Makefiles" \
+#   cmake -S tools/switch-smoke -B out/build/switch-smoke -G Ninja \
+#         -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja \
 #         -DCMAKE_TOOLCHAIN_FILE=/c/dev/Theft4/toolchains/switch-libnx.cmake \
 #         -DCMAKE_BUILD_TYPE=Release
-#   make -C out/build/switch-smoke -j switch-smoke_nro
+#   ninja -C out/build/switch-smoke   # -> out/build/switch-smoke/switch-smoke.nro
 
 cmake_minimum_required(VERSION 3.25)
 project(switch-smoke VERSION 0.1.0 LANGUAGES C CXX ASM)
