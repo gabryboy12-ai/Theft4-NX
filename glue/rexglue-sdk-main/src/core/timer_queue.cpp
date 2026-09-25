@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
 #include <forward_list>
 
 #include <disruptorplus/multi_threaded_claim_strategy.hpp>
@@ -18,6 +19,7 @@
 #include <disruptorplus/spin_wait_strategy.hpp>
 
 #include <rex/assert.h>
+#include <rex/platform.h>
 #include <rex/thread.h>
 #include <rex/thread/timer_queue.h>
 
@@ -54,6 +56,22 @@ class TimerQueue {
 
     // std::jthread auto-joins on destruction
   }
+
+#if REX_PLATFORM_NX
+  // What the destructor does, for NX where static destructors do not run
+  // (see kTimerQueueAtExit below): stop, kick and join the dispatch thread.
+  void Shutdown() {
+    if (!dispatch_thread_.joinable()) {
+      return;
+    }
+    dispatch_thread_.request_stop();
+    auto wait_item = std::make_shared<WaitItem>(nullptr, nullptr, this, clock::time_point::min(),
+                                                clock::duration::zero());
+    wait_item->Disarm();
+    QueueTimer(std::move(wait_item));
+    dispatch_thread_.join();
+  }
+#endif
 
   void TimerThreadMain(std::stop_token stop_token) {
     dp::sequence_t next_sequence = 0;
@@ -153,6 +171,17 @@ class TimerQueue {
 };
 
 rex::thread::TimerQueue timer_queue_;
+
+#if REX_PLATFORM_NX
+// libnx runs .init_array but never .fini_array (__libnx_exit calls __appExit
+// and returns to the loader), so the destructor above never runs. The
+// dispatch thread then outlives the module: when hbl unloads the NRO it wakes
+// from its sleep into unmapped code (Instruction Abort at exit). atexit
+// handlers do run (exit -> __call_exitprocs), so stop it there.
+namespace {
+const int kTimerQueueAtExit = std::atexit([] { timer_queue_.Shutdown(); });
+}  // namespace
+#endif
 
 void TimerQueueWaitItem::Disarm() {
   State state;

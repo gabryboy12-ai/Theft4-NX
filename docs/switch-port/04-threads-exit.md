@@ -75,3 +75,47 @@ Lo step 4 ora controlla:
 - che ogni thread fissato su un core ci abbia davvero girato (`svcGetCurrentProcessorNumber` a fine lavoro).
 
 Ogni differenza fa fallire lo step (`SMOKE FAIL at threads`).
+
+## 5. Crash all'uscita (Instruction Abort dopo il tasto +)
+
+### Crash report (run del commit `203cbc6`)
+
+PC `0xdee56a0`, LR `0xdee3a9c`, SP `0x58910e20`, ritorni `0xdeafee4 0xdeb021c 0xdf2639c 0xdee33b4 0xdedef78`. È elencato un solo modulo, `0x61600000–0x61606000`: è hbl, perché l'NRO era già stato scaricato.
+
+L'ELF di `203cbc6` è stato ricostruito dagli stessi sorgenti (`out/build/switch-smoke/switch-smoke-203cbc6.elf`). Con `crash_match.py` risulta **una sola base** coerente con tutti e 7 gli indirizzi: `0xde8d000`. Per ogni base candidata lo script controlla che:
+
+- sia allineata a pagina;
+- ogni indirizzo di ritorno cada subito dopo un `bl`/`blr`;
+- il PC cada in `.text`.
+
+Risultato di `aarch64-none-elf-addr2line`:
+
+| Indirizzo | Offset ELF | Funzione |
+|---|---|---|
+| PC `0xdee56a0` | `+0x586a0` | `svcSleepThread` (libnx `svc.s:75`), subito dopo la `svc` |
+| LR `0xdee3a9c` | `+0x56a9c` | `__syscall_nanosleep` (libnx `newlib.c:417`) |
+| `0xdeafee4` | `+0x22ee4` | `std::this_thread::sleep_for` ← `disruptorplus::spin_wait::spin_once` ← `TimerQueue::TimerThreadMain` (`timer_queue.cpp:70`) |
+| `0xdeb021c` | `+0x2321c` | lambda del thread di `TimerQueue::TimerQueue()` (`timer_queue.cpp:43`) |
+| `0xdf2639c` | `+0x9939c` | `execute_native_thread_routine` (libstdc++) |
+| `0xdee33b4` | `+0x563b4` | `__thread_entry` (libnx `newlib.c:162`) |
+| `0xdedef78` | `+0x51f78` | `_EntryWrap` (libnx `thread.c:58`) |
+
+### Il thread vivo e la causa
+
+Il thread vivo è il dispatcher di `rex::thread::TimerQueue`: un `std::jthread` avviato dal costruttore dell'oggetto statico `timer_queue_` (`timer_queue.cpp`). Esiste quindi in ogni processo che linka l'SDK. Quando non ha timer attivi aspetta con uno spin-wait che dorme 1 ms alla volta.
+
+Il distruttore di `timer_queue_` lo fermerebbe e farebbe il join, ma **su libnx non viene mai eseguito**. Verificato nel binario:
+
+- `__libnx_init` esegue `__libc_init_array`;
+- `__libnx_exit` chiama solo `__appExit` e `__nx_exit`, che torna al loader;
+- niente percorre `.fini_array`, dove GCC mette `_GLOBAL__sub_D_timer_queue.cpp`.
+
+Alla pressione di + lo smoke esce da `main`: `exit` → `__call_exitprocs` → `_exit` → `__libnx_exit` → ritorno a hbl, che scarica l'NRO. Al risveglio successivo da `svcSleepThread` il thread ritorna in codice smontato: Instruction Abort.
+
+### Correzione (solo NX, `timer_queue.cpp`)
+
+- Nuovo metodo `TimerQueue::Shutdown()`: fa quello che fa il distruttore (stop, kick, join) ed è idempotente.
+- È registrato con `std::atexit` subito dopo la costruzione di `timer_queue_`. Gli handler `atexit` girano su NX (`exit` → `__call_exitprocs`), prima che il modulo venga scaricato.
+- Il distruttore e le altre piattaforme non cambiano.
+
+Anche gli altri oggetti statici con distruttore non vengono mai distrutti su NX. Finché non tengono thread o risorse del kernel questo non causa crash, ma va tenuto presente per il runtime completo.
