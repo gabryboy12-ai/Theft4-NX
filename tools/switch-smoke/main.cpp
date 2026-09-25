@@ -8,7 +8,9 @@
 //      (design A, docs/switch-port/03-memory.md), translation of every guest
 //      window, commit on demand, aliases 0x80/0x90 and the physical views,
 //      release
-//   4. four threads through rex::thread::Thread, one per core where allowed
+//   4. four threads through rex::thread::Thread, one per core of the process
+//      core mask; each must run on its core, and logical_processor_count()
+//      must match the mask
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
 // followed by the exploratory probes T1-T9 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
@@ -327,10 +329,17 @@ void StepGuestMemoryShutdown() {
 // ── 4. Threads ──────────────────────────────────────────────────────────────
 
 void StepThreads() {
-  SMOKE_INFO("step 4 threads (logical processors reported: %u)",
-             rex::thread::logical_processor_count());
   u64 core_mask = 0;
   svcGetInfo(&core_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+  const uint32_t logical = rex::thread::logical_processor_count();
+  const uint32_t expected_logical = uint32_t(__builtin_popcountll(core_mask));
+  SMOKE_INFO("step 4 threads: logical processors %u, process core mask %s (%u cores) -> %s",
+             logical, Hex(core_mask).c_str(), expected_logical,
+             logical == expected_logical ? "ok" : "MISMATCH");
+  if (logical != expected_logical) {
+    Fail("threads", "logical_processor_count() = " + std::to_string(logical) + ", core mask has " +
+                        std::to_string(expected_logical) + " cores");
+  }
   rex::thread::EnableAffinityConfiguration();
 
   constexpr int kThreadCount = 4;
@@ -358,7 +367,12 @@ void StepThreads() {
     thread->set_name("smoke-" + std::to_string(i));
     if (core_mask & (1ull << i)) {
       thread->set_affinity_mask(1ull << i);
-      SMOKE_INFO("  thread %d -> core %d", i, i);
+      const uint64_t applied = thread->affinity_mask();
+      SMOKE_INFO("  thread %d -> core %d (affinity mask now %s)", i, i, Hex(applied).c_str());
+      if (applied != (1ull << i)) {
+        Fail("threads", "thread " + std::to_string(i) + " affinity mask " + Hex(applied) +
+                            " after set_affinity_mask(" + Hex(1ull << i) + ")");
+      }
     } else {
       SMOKE_INFO("  thread %d: core %d not in process core mask %s, default affinity", i, i,
                  Hex(core_mask).c_str());
@@ -379,6 +393,10 @@ void StepThreads() {
       Fail("threads", "thread " + std::to_string(i) + " did not finish its work");
     } else {
       SMOKE_INFO("  thread %d done on core %d", i, cores[i].load());
+      if ((core_mask & (1ull << i)) && cores[i].load() != i) {
+        Fail("threads", "thread " + std::to_string(i) + " pinned to core " + std::to_string(i) +
+                            " ran on core " + std::to_string(cores[i].load()));
+      }
     }
   }
 }

@@ -680,12 +680,27 @@ class PosixCondition<Thread> : public PosixConditionBase {
   }
 
   void set_affinity_mask(uint64_t mask) {
-    // Switch: svcSetThreadCoreMask(handle, preferred_core, affinity_mask)
-    // preferred_core -2 = auto-select from affinity set.
+    // Switch: svcSetThreadCoreMask(handle, ideal_core, affinity_mask)
+    // ideal_core -2 is IdealCoreUseProcessValue: the kernel then ignores
+    // affinity_mask and pins the thread to the process's default core (0),
+    // so pass the lowest core of the mask as the ideal core instead.
     // Must target THIS thread's handle, not the calling thread's.
-    // Mask cores 0-2 only; core 3 is OS-reserved on HOS.
+    // Only cores in the process core mask are accepted (0-2 for applications).
     WaitStarted();
-    svcSetThreadCoreMask(this->nx_handle_, -2, static_cast<u32>(mask & 0x7));
+    u64 process_mask = 0;
+    svcGetInfo(&process_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+    const u32 nx_mask = static_cast<u32>(mask & process_mask);
+    if (!nx_mask) {
+      REXSYS_WARN("set_affinity_mask: mask {:#x} has no core in the process core mask {:#x}", mask,
+                  process_mask);
+      return;
+    }
+    const s32 ideal_core = static_cast<s32>(__builtin_ctz(nx_mask));
+    const Result rc = svcSetThreadCoreMask(this->nx_handle_, ideal_core, nx_mask);
+    if (R_FAILED(rc)) {
+      REXSYS_WARN("set_affinity_mask: svcSetThreadCoreMask(ideal {}, mask {:#x}) rc={:#x}",
+                  ideal_core, nx_mask, rc);
+    }
   }
 
   int priority() {

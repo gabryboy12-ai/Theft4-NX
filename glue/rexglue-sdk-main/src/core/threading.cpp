@@ -13,6 +13,13 @@
 
 #include <rex/thread.h>
 
+#if REX_PLATFORM_NX
+extern "C" {
+#include <switch/kernel/svc.h>
+#include <switch/result.h>
+}
+#endif
+
 namespace rex::thread {
 
 // =============================================================================
@@ -22,7 +29,17 @@ namespace rex::thread {
 uint32_t logical_processor_count() {
   static uint32_t value = 0;
   if (!value) {
+#if REX_PLATFORM_NX
+    // devkitA64's libstdc++ hardware_concurrency() is `return 0`. Count the
+    // cores this process may run on (3 for applications, 4 if core 3 is
+    // granted).
+    u64 core_mask = 0;
+    if (R_SUCCEEDED(svcGetInfo(&core_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+      value = uint32_t(__builtin_popcountll(core_mask));
+    }
+#else
     value = std::thread::hardware_concurrency();
+#endif
   }
   return value;
 }
