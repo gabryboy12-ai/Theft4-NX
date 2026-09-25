@@ -1,4 +1,4 @@
-// switch-smoke probes T1-T6: open questions of the Horizon guest-memory designs
+// switch-smoke probes T1-T8: open questions of the Horizon guest-memory designs
 // (docs/switch-port/03-memory.md).
 //
 //   T1 svcMapProcessCodeMemory + svcSetProcessMemoryPermission as an RW alias
@@ -7,6 +7,9 @@
 //   T4 which backend libnx jitCreate picks on this system
 //   T5 svcSetHeapSize: maximum heap and time to add 512 MiB
 //   T6 cost of design A's address translation (microbenchmark)
+//   T7 cost of design A's translation through a 256-entry table (T6 addresses)
+//   T8 on-demand commit: 2 MiB heap blocks moved into a guest-space reservation
+//      with svcMapProcessCodeMemory, made RW, used, atomics, then unmapped
 //
 // Rules: each probe logs BEGIN before doing anything; every syscall that may
 // fault or kill the process is preceded by an "about to" line (each line is
@@ -590,6 +593,17 @@ constexpr u32 kBenchMask = 0x03FFFFFCu;  // 64 MiB, 4-byte aligned
 
 enum BenchMode { kDirect = 0, kTranslatedLow = 1, kTranslatedMixed = 2 };
 
+// T6 timings in ms, kept for the T7 comparison.
+struct BenchResults {
+  double seq_direct = 0, seq_low = 0, seq_mixed = 0;
+  double rnd_direct = 0, rnd_low = 0, rnd_mixed = 0;
+};
+BenchResults g_t6;
+
+double Pct(double ms, double direct_ms) {
+  return (ms - direct_ms) * 100.0 / direct_ms;
+}
+
 // One read + one write of a big-endian u32 per iteration, like REX_LOAD_U32 /
 // REX_STORE_U32 (volatile accesses, byte swaps). Addresses come from the same
 // generator in every mode, so all modes touch the same bytes in the same
@@ -662,13 +676,430 @@ void ProbeTranslationCost() {
   const double rnd_low = TimeBench<kTranslatedLow, true>(base, phys, "random A, all < 0xA0000000");
   const double rnd_mixed = TimeBench<kTranslatedMixed, true>(base, phys, "random A, 50% windows");
 
-  auto pct = [](double a, double direct) { return (a - direct) * 100.0 / direct; };
   SMOKE_INFO("T6 RESULT sequential: A low %+.1f%%, A mixed %+.1f%% vs direct",
-             pct(seq_low, seq_direct), pct(seq_mixed, seq_direct));
+             Pct(seq_low, seq_direct), Pct(seq_mixed, seq_direct));
   SMOKE_INFO("T6 RESULT random:     A low %+.1f%%, A mixed %+.1f%% vs direct",
-             pct(rnd_low, rnd_direct), pct(rnd_mixed, rnd_direct));
+             Pct(rnd_low, rnd_direct), Pct(rnd_mixed, rnd_direct));
+  g_t6 = {seq_direct, seq_low, seq_mixed, rnd_direct, rnd_low, rnd_mixed};
   std::free(base);
   SMOKE_INFO("T6 END");
+}
+
+// ── T7 ──────────────────────────────────────────────────────────────────────
+
+// Design A with a lookup table instead of compare + select:
+//   host = guest + table[guest >> 24]
+// Each entry is the host address of guest 0 for that 16 MiB slice, so the
+// window offsets (and the aliases) live in the table instead of in the code:
+//   default      base                              (virtual heaps, XEX 64K)
+//   0x7F         phys - 0x7F000000                 (GPU writeback -> physical 0)
+//   0x90-0x9F    base - 0x10000000                 (XEX 4K alias of 0x80-0x8F)
+//   0xA0-0xBF    phys - 0xA0000000                 (physical window)
+//   0xC0-0xDF    phys - 0xC0000000                 (physical window)
+//   0xE0-0xFF    phys - 0xE0000000 + 0x1000        (physical window, +4 KiB as
+//                                                   PhysicalHeap's host_address_offset)
+// Same address generator and the same two schemes as T6. For the benchmark
+// the 0xE0 slice is not used (the 64 MiB buffer has no room for +4 KiB).
+void FillTranslationTable(u64* table, u8* base, u8* phys) {
+  const u64 b = reinterpret_cast<u64>(base);
+  const u64 p = reinterpret_cast<u64>(phys);
+  for (u32 i = 0; i < 256; ++i) {
+    u64 entry = b;
+    if (i == 0x7F) {
+      entry = p - 0x7F000000ull;
+    } else if (i >= 0x90 && i < 0xA0) {
+      entry = b - 0x10000000ull;
+    } else if (i >= 0xA0 && i < 0xC0) {
+      entry = p - 0xA0000000ull;
+    } else if (i >= 0xC0 && i < 0xE0) {
+      entry = p - 0xC0000000ull;
+    } else if (i >= 0xE0) {
+      entry = p - 0xE0000000ull + 0x1000;
+    }
+    table[i] = entry;
+  }
+}
+
+template <bool kMixed, bool kRandom>
+__attribute__((noinline)) u64 BenchLoopTable(const u64* table, u64 iterations) {
+  u32 x = 0x12345678u;
+  u32 off = 0;
+  u64 sum = 0;
+  for (u64 i = 0; i < iterations; ++i) {
+    u32 window;
+    if constexpr (kRandom) {
+      x = x * 1664525u + 1013904223u;
+      off = x & kBenchMask;
+      window = x >> 31;
+    } else {
+      off = (off + 4) & kBenchMask;
+      window = u32(i) & 1;
+    }
+    u32 guest = kMixed ? (off | (window ? 0xA0000000u : 0u)) : off;
+    asm volatile("" : "+r"(guest));  // the window is unknown at compile time
+    u8* host = reinterpret_cast<u8*>(u64(guest) + table[guest >> 24]);
+    volatile u32* p = reinterpret_cast<volatile u32*>(host);
+    const u32 v = __builtin_bswap32(*p);
+    *p = __builtin_bswap32(v + 1);
+    sum += v;
+  }
+  return sum;
+}
+
+template <bool kMixed, bool kRandom>
+double TimeBenchTable(const u64* table, const char* name) {
+  SMOKE_INFO("T7 running %s ...", name);
+  const u64 t0 = armGetSystemTick();
+  const u64 sum = BenchLoopTable<kMixed, kRandom>(table, kBenchIterations);
+  const double ms = TicksToMs(armGetSystemTick() - t0);
+  SMOKE_INFO("T7   %-34s %9.1f ms  (%.2f ns/iter, checksum %" PRIx64 ")", name, ms,
+             ms * 1e6 / double(kBenchIterations), sum);
+  return ms;
+}
+
+void ProbeTranslationTable() {
+  SMOKE_INFO("T7 BEGIN design A table translation: 100M read+write on 64 MiB (takes ~1 min)");
+  const size_t size = 64u << 20;
+  auto* base = static_cast<u8*>(std::aligned_alloc(k2MiB, size));
+  alignas(64) static u64 table[256];
+  if (!base) {
+    SMOKE_INFO("T7 SKIP cannot allocate 64 MiB");
+    return;
+  }
+  std::memset(base, 0, size);
+  u8* phys = base;
+  asm volatile("" : "+r"(phys));
+  FillTranslationTable(table, base, phys);
+
+  // Encoding check on the real table, on a few guest addresses per window.
+  struct Check {
+    u32 guest;
+    u64 expected_offset_from;  // 0 = base, 1 = phys
+    u64 expected_offset;
+  };
+  static const Check kChecks[] = {
+      {0x00001000u, 0, 0x00001000u}, {0x7EFFFFFCu, 0, 0x7EFFFFFCu},
+      {0x7F000010u, 1, 0x00000010u}, {0x80000020u, 0, 0x80000020u},
+      {0x90000020u, 0, 0x80000020u}, {0xA0000030u, 1, 0x00000030u},
+      {0xC0000040u, 1, 0x00000040u}, {0xE0000050u, 1, 0x00001050u},
+      {0xFFFFEFFCu, 1, 0x1FFFFFFCu},
+  };
+  int bad = 0;
+  for (const Check& c : kChecks) {
+    const u64 host = u64(c.guest) + table[c.guest >> 24];
+    const u64 expected = (c.expected_offset_from ? reinterpret_cast<u64>(phys)
+                                                 : reinterpret_cast<u64>(base)) +
+                         c.expected_offset;
+    if (host != expected) {
+      SMOKE_INFO("T7 table check 0x%08X -> 0x%" PRIx64 ", expected 0x%" PRIx64 " MISMATCH",
+                 c.guest, host, expected);
+      ++bad;
+    }
+  }
+  SMOKE_INFO("T7 table encoding check: %d/%zu addresses ok", int(std::size(kChecks)) - bad,
+             std::size(kChecks));
+
+  const u64* t = table;
+  asm volatile("" : "+r"(t));
+  const double seq_direct = TimeBench<kDirect, false>(base, phys, "sequential direct (T7 run)");
+  const double seq_low = TimeBenchTable<false, false>(t, "sequential table, all < 0xA0000000");
+  const double seq_mixed = TimeBenchTable<true, false>(t, "sequential table, 50% windows");
+  const double rnd_direct = TimeBench<kDirect, true>(base, phys, "random direct (T7 run)");
+  const double rnd_low = TimeBenchTable<false, true>(t, "random table, all < 0xA0000000");
+  const double rnd_mixed = TimeBenchTable<true, true>(t, "random table, 50% windows");
+
+  SMOKE_INFO("T7 RESULT sequential: table low %+.1f%%, table mixed %+.1f%% vs direct",
+             Pct(seq_low, seq_direct), Pct(seq_mixed, seq_direct));
+  SMOKE_INFO("T7 RESULT random:     table low %+.1f%%, table mixed %+.1f%% vs direct",
+             Pct(rnd_low, rnd_direct), Pct(rnd_mixed, rnd_direct));
+  if (g_t6.seq_direct > 0) {
+    SMOKE_INFO("T7 RESULT vs T6 csel (same run): sequential low %.1f vs %.1f ms, mixed %.1f vs "
+               "%.1f ms; random low %.1f vs %.1f ms, mixed %.1f vs %.1f ms",
+               seq_low, g_t6.seq_low, seq_mixed, g_t6.seq_mixed, rnd_low, g_t6.rnd_low, rnd_mixed,
+               g_t6.rnd_mixed);
+  }
+  std::free(base);
+  SMOKE_INFO("T7 END");
+}
+
+// ── T8 ──────────────────────────────────────────────────────────────────────
+
+constexpr u64 kT8Region = 0xA0000000ull;  // guest 0x00000000-0x9FFFFFFF
+constexpr int kT8Blocks = 256;             // 256 x 2 MiB = 512 MiB
+constexpr u64 kT8Stride = kT8Region / kT8Blocks;  // 10 MiB: blocks spread over the region
+
+u64 T8Pattern(int block, u64 offset) {
+  return (u64(block) << 56) ^ (offset * 0x9E3779B97F4A7C15ull) ^ 0x5A5A0000A5A50000ull;
+}
+
+// The same exclusive-monitor sequence as a PPC lwarx/stwcx. pair emulated
+// with ldaxr/stlxr: returns the number of retries.
+u32 ExclusiveAdd32(u32* p, u32 add) {
+  u32 value, status, retries = 0;
+  for (;;) {
+    asm volatile("ldaxr %w0, [%2]\n\tadd %w0, %w0, %w3\n\tstlxr %w1, %w0, [%2]"
+                 : "=&r"(value), "=&r"(status)
+                 : "r"(p), "r"(add)
+                 : "memory");
+    if (status == 0) {
+      return retries;
+    }
+    ++retries;
+  }
+}
+
+u32 ExclusiveAdd64(u64* p, u64 add) {
+  u64 value;
+  u32 status, retries = 0;
+  for (;;) {
+    asm volatile("ldaxr %0, [%2]\n\tadd %0, %0, %3\n\tstlxr %w1, %0, [%2]"
+                 : "=&r"(value), "=&r"(status)
+                 : "r"(p), "r"(add)
+                 : "memory");
+    if (status == 0) {
+      return retries;
+    }
+    ++retries;
+  }
+}
+
+// Exclusives and compare-and-swap on the moved memory, as used by the
+// recompiled code (stwcx./stdcx. -> __sync_bool_compare_and_swap on
+// REX_RAW_ADDR) and by the kernel's Interlocked* helpers.
+void T8Atomics(u8* block) {
+  auto* w = reinterpret_cast<u32*>(block + 0x100);
+  auto* d = reinterpret_cast<u64*>(block + 0x200);
+  SMOKE_INFO("T8 about to run ldaxr/stlxr and CAS on %p", block);
+  *w = 0;
+  *d = 0;
+  u32 retries = 0;
+  for (int i = 0; i < 100000; ++i) {
+    retries += ExclusiveAdd32(w, 3);
+    retries += ExclusiveAdd64(d, 0x100000001ull);
+  }
+  const bool excl_ok = *w == 300000u && *d == 100000ull * 0x100000001ull;
+  SMOKE_INFO("T8 ldaxr/stlxr 32: 0x%08x (expected 0x%08x), 64: 0x%016" PRIx64
+             " (expected 0x%016" PRIx64 "), retries %u -> %s",
+             *w, 300000u, *d, 100000ull * 0x100000001ull, retries, excl_ok ? "ok" : "WRONG");
+
+  *w = 0x11111111u;
+  *d = 0x2222222222222222ull;
+  const bool cas32_hit = __sync_bool_compare_and_swap(w, 0x11111111u, 0x33333333u);
+  const bool cas32_miss = __sync_bool_compare_and_swap(w, 0x11111111u, 0x44444444u);
+  const bool cas64_hit =
+      __sync_bool_compare_and_swap(d, 0x2222222222222222ull, 0x5555555555555555ull);
+  const bool cas64_miss =
+      __sync_bool_compare_and_swap(d, 0x2222222222222222ull, 0x6666666666666666ull);
+  const bool cas_ok = cas32_hit && !cas32_miss && *w == 0x33333333u && cas64_hit &&
+                      !cas64_miss && *d == 0x5555555555555555ull;
+  SMOKE_INFO("T8 CAS 32: hit=%d miss=%d value 0x%08x; CAS 64: hit=%d miss=%d value 0x%016" PRIx64
+             " -> %s",
+             cas32_hit, cas32_miss, *w, cas64_hit, cas64_miss, *d, cas_ok ? "ok" : "WRONG");
+}
+
+struct T8Block {
+  u8* src = nullptr;
+  u8* dst = nullptr;
+  bool mapped = false;
+};
+
+void ProbeOnDemandCommit() {
+  const char* p = "T8";
+  SMOKE_INFO("T8 BEGIN on-demand commit with svcMapProcessCodeMemory: %d x 2 MiB in a 0x%" PRIx64
+             " reservation",
+             kT8Blocks, kT8Region);
+  if (!Hinted(p, 0x77, "svcMapProcessCodeMemory") ||
+      !Hinted(p, 0x78, "svcUnmapProcessCodeMemory") ||
+      !Hinted(p, 0x73, "svcSetProcessMemoryPermission")) {
+    return;
+  }
+  const Handle process = envGetOwnProcessHandle();
+  if (process == INVALID_HANDLE) {
+    SMOKE_INFO("T8 SKIP envGetOwnProcessHandle() returned no handle");
+    return;
+  }
+
+  // Guest space reservation: virtmem bookkeeping only, 2 MiB aligned.
+  VirtmemReservation* reservation = nullptr;
+  virtmemLock();
+  void* raw = virtmemFindCodeMemory(kT8Region + k2MiB, 0);
+  u8* region = raw ? reinterpret_cast<u8*>((reinterpret_cast<u64>(raw) + k2MiB - 1) &
+                                           ~u64(k2MiB - 1))
+                   : nullptr;
+  reservation = region ? virtmemAddReservation(region, kT8Region) : nullptr;
+  virtmemUnlock();
+  if (!reservation) {
+    SMOKE_INFO("T8 SKIP cannot reserve 0x%" PRIx64 " bytes of code address space", kT8Region);
+    return;
+  }
+  SMOKE_INFO("T8 reservation %p-%p: %s", region, region + kT8Region - 1, QueryStr(region).c_str());
+
+  std::vector<T8Block> blocks(kT8Blocks);
+  std::vector<double> map_ms(kT8Blocks, 0.0), perm_ms(kT8Blocks, 0.0);
+  int mapped = 0;
+  double total_ms = 0;
+  for (int i = 0; i < kT8Blocks; ++i) {
+    T8Block& b = blocks[i];
+    b.src = static_cast<u8*>(std::aligned_alloc(k2MiB, k2MiB));
+    b.dst = region + u64(i) * kT8Stride;
+    if (!b.src) {
+      SMOKE_INFO("T8 aligned_alloc(2 MiB) failed at block %d; stopping", i);
+      break;
+    }
+    SMOKE_INFO("T8 about to map block %d: src %p -> dst %p (+0x%" PRIx64 ")", i, b.src, b.dst,
+               u64(i) * kT8Stride);
+    const u64 t0 = armGetSystemTick();
+    Result rc = svcMapProcessCodeMemory(process, reinterpret_cast<u64>(b.dst),
+                                        reinterpret_cast<u64>(b.src), k2MiB);
+    const u64 t1 = armGetSystemTick();
+    Result rc2 = R_SUCCEEDED(rc) ? svcSetProcessMemoryPermission(
+                                       process, reinterpret_cast<u64>(b.dst), k2MiB, Perm_Rw)
+                                 : rc;
+    const u64 t2 = armGetSystemTick();
+    map_ms[i] = TicksToMs(t1 - t0);
+    perm_ms[i] = TicksToMs(t2 - t1);
+    total_ms += map_ms[i] + perm_ms[i];
+    if (R_FAILED(rc)) {
+      SMOKE_INFO("T8 block %d svcMapProcessCodeMemory %s; stopping", i, Rc(rc).c_str());
+      std::free(b.src);
+      b.src = nullptr;
+      break;
+    }
+    b.mapped = true;
+    ++mapped;
+    if (R_FAILED(rc2)) {
+      SMOKE_INFO("T8 block %d svcSetProcessMemoryPermission(RW) %s; stopping", i,
+                 Rc(rc2).c_str());
+      break;
+    }
+    SMOKE_INFO("T8 block %d map %.3f ms + RW %.3f ms", i, map_ms[i], perm_ms[i]);
+  }
+  if (mapped > 0) {
+    double min_ms = 1e9, max_ms = 0;
+    for (int i = 0; i < mapped; ++i) {
+      min_ms = std::min(min_ms, map_ms[i] + perm_ms[i]);
+      max_ms = std::max(max_ms, map_ms[i] + perm_ms[i]);
+    }
+    SMOKE_INFO("T8 RESULT map+RW: %d blocks (%d MiB) in %.2f ms; per block min %.3f avg %.3f max "
+               "%.3f ms",
+               mapped, mapped * 2, total_ms, min_ms, total_ms / mapped, max_ms);
+    SMOKE_INFO("T8 first dst %s", QueryStr(blocks[0].dst).c_str());
+    SMOKE_INFO("T8 first src %s", QueryStr(blocks[0].src).c_str());
+  }
+
+  // Distinct pattern in every block, then read everything back.
+  int usable = 0;
+  while (usable < mapped && CanWrite(blocks[usable].dst) && CanRead(blocks[usable].dst)) {
+    ++usable;
+  }
+  if (usable > 0) {
+    SMOKE_INFO("T8 about to write a distinct pattern into %d blocks", usable);
+    const u64 t0 = armGetSystemTick();
+    for (int i = 0; i < usable; ++i) {
+      auto* q = reinterpret_cast<u64*>(blocks[i].dst);
+      for (u64 k = 0; k < k2MiB / 8; ++k) {
+        q[k] = T8Pattern(i, k);
+      }
+    }
+    const double write_ms = TicksToMs(armGetSystemTick() - t0);
+    const u64 t1 = armGetSystemTick();
+    u64 bad_words = 0;
+    int bad_blocks = 0;
+    for (int i = 0; i < usable; ++i) {
+      const auto* q = reinterpret_cast<const volatile u64*>(blocks[i].dst);
+      u64 bad = 0;
+      for (u64 k = 0; k < k2MiB / 8; ++k) {
+        bad += q[k] != T8Pattern(i, k);
+      }
+      bad_words += bad;
+      bad_blocks += bad != 0;
+    }
+    const double read_ms = TicksToMs(armGetSystemTick() - t1);
+    SMOKE_INFO("T8 RESULT write %d MiB %.2f ms, read back %.2f ms: %d bad blocks, %" PRIu64
+               " bad words -> %s",
+               usable * 2, write_ms, read_ms, bad_blocks, bad_words,
+               bad_words == 0 ? "ok" : "MISMATCH");
+    T8Atomics(blocks[0].dst);
+    T8Atomics(blocks[usable - 1].dst + k2MiB - 0x1000);
+  } else if (mapped > 0) {
+    SMOKE_INFO("T8 dst not RW (%s); no write test", QueryStr(blocks[0].dst).c_str());
+  }
+
+  // Unmap: the first block alone (timed), then the rest.
+  double unmap_total = 0, unmap_first = 0;
+  int unmapped = 0, unmap_failed = 0;
+  for (int i = 0; i < mapped; ++i) {
+    T8Block& b = blocks[i];
+    if (i < 2) {
+      SMOKE_INFO("T8 about to svcUnmapProcessCodeMemory block %d (dst %p, src %p)", i, b.dst,
+                 b.src);
+    } else if (i == 2) {
+      SMOKE_INFO("T8 about to unmap blocks 2..%d", mapped - 1);
+    }
+    const u64 t0 = armGetSystemTick();
+    Result rc = svcUnmapProcessCodeMemory(process, reinterpret_cast<u64>(b.dst),
+                                          reinterpret_cast<u64>(b.src), k2MiB);
+    const double ms = TicksToMs(armGetSystemTick() - t0);
+    if (i == 0) {
+      unmap_first = ms;
+      SMOKE_INFO("T8 unmap block 0 %s in %.3f ms", Rc(rc).c_str(), ms);
+    }
+    if (R_FAILED(rc)) {
+      ++unmap_failed;
+      if (unmap_failed <= 4) {
+        SMOKE_INFO("T8 unmap block %d %s", i, Rc(rc).c_str());
+      }
+      continue;
+    }
+    b.mapped = false;
+    unmap_total += ms;
+    ++unmapped;
+  }
+  if (mapped > 0) {
+    SMOKE_INFO("T8 RESULT unmap: %d/%d blocks in %.2f ms (first %.3f ms, avg %.3f ms), %d failed",
+               unmapped, mapped, unmap_total, unmap_first,
+               unmapped ? unmap_total / unmapped : 0.0, unmap_failed);
+  }
+
+  // What the sources hold after the unmap: the pattern written through dst
+  // survives only if the unmap moves the pages back.
+  int kept = 0, lost = 0, unreadable = 0;
+  for (int i = 0; i < usable; ++i) {
+    const T8Block& b = blocks[i];
+    if (b.mapped || !CanRead(b.src)) {
+      ++unreadable;
+      continue;
+    }
+    const auto* q = reinterpret_cast<const volatile u64*>(b.src);
+    const bool same = q[0] == T8Pattern(i, 0) && q[k2MiB / 16] == T8Pattern(i, k2MiB / 16) &&
+                      q[k2MiB / 8 - 1] == T8Pattern(i, k2MiB / 8 - 1);
+    same ? ++kept : ++lost;
+  }
+  if (usable > 0) {
+    SMOKE_INFO("T8 first src after unmap: %s", QueryStr(blocks[0].src).c_str());
+    SMOKE_INFO("T8 RESULT source after unmap: %d blocks keep the data written through dst, %d "
+               "LOST it, %d not readable%s",
+               kept, lost, unreadable,
+               lost ? " -> NOTE: data written through the destination is lost on unmap" : "");
+  }
+
+  int leaked = 0;
+  for (T8Block& b : blocks) {
+    if (!b.src) {
+      continue;
+    }
+    if (b.mapped) {
+      ++leaked;  // still moved: the heap block must not be returned to malloc
+    } else {
+      std::free(b.src);
+    }
+  }
+  if (leaked) {
+    SMOKE_INFO("T8 %d blocks still mapped; their source buffers are intentionally leaked", leaked);
+  } else {
+    ReleaseReservation(reservation);
+  }
+  SMOKE_INFO("T8 END");
 }
 
 }  // namespace
@@ -681,5 +1112,7 @@ void RunProbes() {
   ProbeJit();
   ProbeHeap();
   ProbeTranslationCost();
+  ProbeTranslationTable();
+  ProbeOnDemandCommit();
   SMOKE_INFO("PROBES DONE");
 }

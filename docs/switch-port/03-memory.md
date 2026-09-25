@@ -1,8 +1,26 @@
 # Switch port — 03: memoria guest (analisi)
 
-Aggiornato: 2026-09-24 · Ramo `switch-port` · Solo analisi: in questo passo non è stato implementato niente nel runtime.
+Aggiornato: 2026-09-25 · Ramo `switch-port` · Solo analisi: in questo passo non è stato implementato niente nel runtime.
 
 Legenda: **[codice]** = verificato nei sorgenti del repo. **[HW]** = comportamento del kernel Horizon da confermare sulla console, con `switch-smoke` o con un test mirato.
+
+## Decisione (2026-09-25, dopo `switch-smoke` T1–T6 sulla console)
+
+**Si procede con il progetto A: traduzione degli indirizzi, con la memoria presa da `malloc`.** I motivi vengono dallo `smoke.log` della console (hbl in modalità applicazione, tutte le SVC di memoria segnalate come disponibili):
+
+- **Alias RW veri: impossibili.**
+  - `svcMapProcessCodeMemory` **sposta** la memoria: dopo il mapping la sorgente passa a `perm=--- attr=0x1` e la destinazione diventa l'unica vista (T1).
+  - CodeMemory dà solo **owner RW + slave R-X**: l'owner accetta solo RW, lo slave solo R-- o R-X. Un secondo `MapOwner` o `MapSlave` sullo stesso oggetto viene rifiutato con `2001-0125` (T2).
+- **`svcMapPhysicalMemory` non disponibile.** Il processo non ha system resource (`total 0x0`), e la chiamata fallisce con `2001-0125` sia in ASLR sia nella regione alias (T3). Quindi `memory_switch.cpp` oggi non può funzionare in nessun caso (§4).
+- **Heap già tutto assegnato dal loader.** C'è l'heap override, il pool libero è di 3 MiB e `svcSetHeapSize` non può far crescere l'heap (T5). La memoria del gioco va presa da `malloc`, che dispone di tutto il pool: 512 MiB con `malloc` + `memset` in 88 ms.
+- **Progetto B (memoria condivisa):** resta escluso finché non si prova `svcCreateSharedMemory` con più mapping. T2 fa pensare che il kernel rifiuti i mapping multipli anche lì.
+
+Restano due domande aperte:
+
+- quanto costa la traduzione con una tabella (T7, §6);
+- se il commit su richiesta funziona con `svcMapProcessCodeMemory` (T8, §6).
+
+La §7 conta quanti accessi possono saltare la traduzione.
 
 ## Sintesi
 
@@ -184,9 +202,9 @@ Ordine suggerito:
 3. traduzione in `TranslateVirtual`/`HostToGuestVirtual` e macro codegen;
 4. commit su richiesta e misura della memoria in gioco.
 
-## 6. Test sulla console: `switch-smoke` T1–T6
+## 6. Test sulla console: `switch-smoke` T1–T8
 
-Dopo i passi 1–4 e il verdetto `SMOKE OK/FAIL`, `switch-smoke.nro` esegue sei sonde (`tools/switch-smoke/probes.cpp`). Sono **misure**, non test con esito positivo o negativo, e non cambiano il verdetto.
+Dopo i passi 1–4 e il verdetto `SMOKE OK/FAIL`, `switch-smoke.nro` esegue otto sonde (`tools/switch-smoke/probes.cpp`). Sono **misure**, non test con esito positivo o negativo, e non cambiano il verdetto.
 
 **Log resistente ai crash.** Ogni riga di `smoke.log` scritta dallo smoke segue questi passi:
 
@@ -210,6 +228,8 @@ Limite: `fsync` sul descrittore separato forza i dati di quel descrittore. Le ri
 | T4 | Quale backend sceglie `jitCreate`? | Stampa gli hint coinvolti e chiama `jitCreate(0x1000)`; registra il tipo scelto | Vedi sotto |
 | T5 | Heap massimo con `svcSetHeapSize` e tempo per allocare 512 MiB | Stampa se il loader fornisce l'heap (override) e l'heap attuale. Ricerca binaria del massimo, **solo per crescita** (malloc usa l'heap attuale), poi il tempo di `svcSetHeapSize(+512 MiB)` e del primo `memset`. Ripristina la dimensione iniziale. Se la crescita non è possibile, misura `malloc` + `memset` di 512 MiB | |
 | T6 | Costo della traduzione del progetto A | 100 M letture + scritture u32 big-endian (volatili, `rev`, come `REX_LOAD/STORE_U32`) su 64 MiB. 3 modalità × 2 schemi di accesso (sequenziale, pseudo-casuale LCG) con gli stessi indirizzi | Differenza % rispetto all'accesso diretto |
+| T7 | Costo del progetto A con una tabella | Come T6, con gli stessi schemi e indirizzi, ma con `host = addr + table[addr >> 24]` su 256 `u64`. Rifà le misure dirette nello stesso run. Prima verifica la codifica della tabella su 9 indirizzi | Differenza % rispetto al diretto; ms a confronto con T6 |
+| T8 | Commit su richiesta con `svcMapProcessCodeMemory` | Riserva 0xA0000000 byte con `virtmemFindCodeMemory`. Sposta al suo interno 256 blocchi da 2 MiB presi con `aligned_alloc(2 MiB)`, uno ogni 10 MiB, e li porta a RW con `svcSetProcessMemoryPermission`. Scrive in ogni blocco un motivo diverso e rilegge tutto. Esegue ldaxr/stlxr e CAS a 32 e 64 bit sul primo e sull'ultimo blocco. Smonta i blocchi e controlla le sorgenti | Tempi per blocco e totali, esito di dati e atomiche. "LOST" se i dati scritti tramite la destinazione non tornano nella sorgente |
 
 ### T4: cosa fa `jitCreate` (libnx 4.12.0 installata)
 
@@ -229,3 +249,79 @@ Dal disassemblato di `probes.o`:
 - **progetto A:** `and` + `cmp` + 2 `add` + `csel`, senza salti, quindi nessun errore di predizione anche con finestre miste.
 
 Nella variante sequenziale "50% finestre" c'è un contatore in più (la finestra è `i & 1`), da considerare leggendo quel numero.
+
+### Risultati T1–T6 sulla console (2026-09-25)
+
+| Sonda | Risultato |
+|---|---|
+| T1 | `svcMapProcessCodeMemory` riesce. La sorgente passa a `---` con `attr=0x1` (bloccata), la destinazione diventa `type=0x09 RW-` dopo `svcSetProcessMemoryPermission`. Nessuna scrittura incrociata è stata possibile: **è un trasloco**. Il valore letto nella sorgente dopo lo smontaggio non dimostra niente, perché tramite `dst` non era stato scritto nulla. Lo misura T8 |
+| T2 | Owner: solo RW. Slave: solo R-- o R-X. Owner RW e slave R-X vedono la stessa memoria. La sorgente resta bloccata finché l'oggetto esiste; dopo la chiusura contiene i dati scritti. Un secondo owner o slave: `2001-0125` |
+| T3 | System resource 0: `svcMapPhysicalMemory` fallisce con `2001-0125` sia in ASLR sia nella regione alias |
+| T4 | `jitCreate` sceglie `JitType_CodeMemory` |
+| T5 | Heap override dal loader, pool libero 3 MiB. T5 legge la dimensione dell'heap dal primo blocco (1 MiB) invece che dall'heap intero, quindi la ricerca ha provato a **ridurre** l'heap (`svcSetHeapSize(2 MiB)` → `2001-0106`). Il kernel ha rifiutato e non ci sono danni, ma con l'heap override la ricerca del massimo di T5 non è attendibile. `malloc(512 MiB)` + `memset`: 88 ms |
+| T6 | Sequenziale: diretto 3,50 ns/iter; progetto A +92% (tutto sotto 0xA0000000) e +124% (50% nelle finestre). Casuale: diretto 34,5 ns/iter; progetto A +7,4% e +12,9% |
+
+Il +92% sequenziale è il caso peggiore: il ciclo contiene solo l'accesso, e le 5 istruzioni di traduzione lo raddoppiano. Nel caso casuale domina il cache miss e la traduzione quasi non si vede.
+
+### T7: codice generato a confronto con T6
+
+Disassemblato di `probes.o` (GCC 16.1, `-O2 -mtune=cortex-a57`). Ciclo interno sequenziale, con tutti gli accessi sotto 0xA0000000:
+
+```
+T6 diretto                  T6 progetto A (csel)               T7 tabella
+add  w1, w1, #4             add  w3, w3, #4                    add  w2, w2, #4
+subs x4, x4, #1             and  w3, w3, #0x3fffffc            and  w2, w2, #0x3fffffc
+and  w1, w1, #0x3fffffc     mov  w2, w3           ; barriera   mov  w1, w2           ; barriera
+ldr  w2, [x5, w1, uxtw]     and  x5, x2, #0x1fffffff           lsr  w3, w1, #24
+rev  w2, w2                 cmp  w2, w7           ; 0x9fffffff subs x5, x5, #1
+add  x0, x0, w2, uxtw       add  x4, x8, w2, uxtw              ldr  x6, [x7, x3, lsl #3] ; tabella
+add  w3, w2, #1             add  x5, x1, x5                    ldr  w3, [x6, w1, uxtw]
+rev  w3, w3                 csel x4, x4, x5, ls                rev  w3, w3
+str  w3, [x5, w1, uxtw]     ldr  w2, [x4]                      add  x0, x0, w3, uxtw
+b.ne                        subs x6, x6, #1                    add  w4, w3, #1
+                            rev / add / add / rev              rev  w4, w4
+                            str  w5, [x4]                      str  w4, [x6, w1, uxtw]
+                            b.ne                               b.ne
+```
+
+- **T6:** 5 istruzioni di traduzione (`and`, `cmp`, `add`, `add`, `csel`), tutte ALU. `ldr` e `str` usano `[x4]`, cioè l'indirizzo già calcolato.
+- **T7:** 2 istruzioni, `lsr` e il `ldr` dalla tabella. La somma `addr + entry` entra nell'indirizzamento `[x6, w1, uxtw]` di `ldr` e `str`, come nell'accesso diretto. In cambio c'è un **load dipendente** sul percorso dell'indirizzo: un hit in L1, circa 4 cicli sull'A57.
+- **Finestre miste:** il ciclo di T7 resta uguale, perché è la tabella a scegliere la finestra, non un confronto. T6 invece ha bisogno anche lì di `cmp` e `csel`.
+- **Nel codice ricompilato** la tabella deve stare in un registro: come secondo parametro accanto a `base`, oppure caricata con `adrp` + `ldr` da una variabile globale all'inizio di ogni funzione. I suoi 2 KiB restano in L1 nei cicli caldi.
+
+La scelta tra le due forme dipende dai numeri di T7 sulla console.
+
+## 7. Accessi che possono saltare la traduzione
+
+Conteggio statico sul codice generato presente nel repo (`gta4-recomp/generated/gta4_recomp.*.cpp`, 714.912 accessi). Uno script classifica il primo argomento di ogni `REX_LOAD_*`, `REX_STORE_*` e `REX_RAW_ADDR`; quando l'argomento è `ea`, risale all'assegnazione `ea = ...`. Il codice non è ancora compilato per Switch, ma le macro sono le stesse.
+
+| Classe | Accessi | % | Traduzione |
+|---|---|---|---|
+| **relativi a r1** (stack guest) | 196.399 | **27,5%** | si può saltare |
+| **indirizzo costante** (catena `li`/`lis`/`addi`/`ori` nello stesso blocco) | 65.418 | **9,2%** | si può risolvere durante la generazione |
+| costante, con analisi lineare sull'intera funzione (limite superiore) | 94.239 | 13,2% | come sopra, ma richiede un'analisi del flusso |
+| relativi a r13 (KPCR) | 647 | 0,1% | — |
+| altro | 452.448 | 63,3% | a runtime |
+
+Per tipo di accesso:
+
+| Tipo | Accessi | r1 | costanti |
+|---|---|---|---|
+| load | 398.481 | 20,0% | 12,7% |
+| store | 247.608 | **46,4%** | 4,2% |
+| `REX_RAW_ADDR` (vettori e atomiche) | 68.823 | 2,4% | 6,5% |
+
+**Stack (r1).** Gli stack guest stanno in `kStackAddressRangeBegin..End` = `0x70000000–0x7EFFFFFF` (`xthread.h:294`), sotto `0x7F000000`. Nel progetto A sono quindi sempre il percorso diretto `base + a`.
+
+Il generatore sa quando la base è r1:
+
+- `emit_load_d_form`/`emit_store_d_form` (`src/codegen/builders/context.cpp:460-538`) ricevono il registro base in `insn.operands[2]` (d-form) o `operands[1]` (x-form);
+- `stwu r1` passa da `ea = -N + ctx.r1.u32`.
+
+Basta emettere una macro diversa, per esempio `REX_LOAD_U32_STACK`, uguale all'attuale `base + a`. Condizione: il gioco usa r1 solo come stack pointer (ABI PowerPC), come in tutto il codice analizzato.
+
+**Costanti.** Il 99,6% degli indirizzi costanti è in `0x80000000–0x8FFFFFFF` (dati del XEX), quindi percorso diretto. Il resto: 277 accessi sotto `0x7F000000`, 8 in `0x7F` e 1 da `0xA0000000` in su.
+
+Il generatore traccia già i `lis` per l'MMIO, ma solo come bit "è MMIO": `mmio_base_regs` in `builder_context.h:44`, impostato da `build_lis` in `memory.cpp:27`. Se tracciasse il valore (`lis` + `addi`/`ori`), potrebbe scegliere la finestra durante la generazione. Il valore andrebbe azzerato alle etichette, e dopo le chiamate per r0 e r3–r12. `mmio_base_regs` oggi non si azzera alle etichette: per decidere la traduzione serve la versione conservativa.
+
+**In tutto, il 36,7% degli accessi (27,5% + 9,2%) può evitare la traduzione a runtime; tra gli store, la metà.** Il costo misurato in T6/T7 resta sul 63% degli accessi, cioè quelli basati su puntatori.

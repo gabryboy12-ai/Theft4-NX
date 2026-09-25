@@ -10,7 +10,7 @@
 //      memory_switch.cpp, then a write/read-back at both ends of the region
 //   4. four threads through rex::thread::Thread, one per core where allowed
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
-// followed by the exploratory probes T1-T6 in probes.cpp (alias primitives,
+// followed by the exploratory probes T1-T8 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
 //
 // Every smoke line is made durable before the next operation: the SDK logger
@@ -49,6 +49,15 @@ constexpr const char* kLogPath = "sdmc:/switch/theft4/smoke.log";
 
 std::string g_first_failure;
 bool g_logging_ready = false;
+
+}  // namespace
+
+// Start of the NRO image; switch.ld places it at ELF address 0, so its runtime
+// address is the module base.
+extern "C" char __start__;
+int main(int argc, char** argv);
+
+namespace {
 
 // Appends one line to smoke.log and forces it to storage: open, write, fsync,
 // close. The SDK logger is flushed first so its lines stay in order.
@@ -106,6 +115,20 @@ void StepLogging() {
   REXLOG_INFO("[smoke] SDK logger initialised");
   g_logging_ready = true;
   SMOKE_INFO("step 1 logging: SDK logger writing to %s", kLogPath);
+}
+
+// Runtime addresses to match crash-report PCs against the ELF:
+// ELF address = runtime address - module base.
+void StepModuleBase() {
+  const u64 module_base = reinterpret_cast<u64>(&__start__);
+  const u64 main_address = reinterpret_cast<u64>(&main);
+  MemoryInfo info{};
+  u32 page_info = 0;
+  const Result rc = svcQueryMemory(&info, &page_info, main_address);
+  SMOKE_INFO("module base (__start__) 0x%" PRIx64 ", main 0x%" PRIx64 " = base + 0x%" PRIx64,
+             module_base, main_address, main_address - module_base);
+  SMOKE_INFO("  code block of main: 0x%" PRIx64 "+0x%" PRIx64 " (rc 0x%x)", info.addr, info.size,
+             rc);
 }
 
 // ── 2. Address space ────────────────────────────────────────────────────────
@@ -400,6 +423,7 @@ int main(int argc, char** argv) {
   consoleUpdate(nullptr);
 
   StepLogging();
+  StepModuleBase();
   StepAddressSpace();
   StepGuestMemory();
   StepThreads();
