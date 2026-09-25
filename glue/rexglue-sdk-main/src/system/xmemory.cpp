@@ -127,6 +127,11 @@ Memory::~Memory() {
     mapping_base_ = nullptr;
     mapping_ = rex::memory::kFileMappingHandleInvalid;
   }
+#if REX_PLATFORM_NX
+  // The heaps above dropped their page references; return the reservation.
+  rex::memory::nx::ReleaseGuestArena();
+  mapping_base_ = nullptr;
+#endif
 
   virtual_membase_ = nullptr;
   physical_membase_ = nullptr;
@@ -135,6 +140,23 @@ Memory::~Memory() {
 bool Memory::Initialize() {
   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
 
+#if REX_PLATFORM_NX
+  // Guest memory design A (docs/switch-port/03-memory.md): Horizon cannot map
+  // the same memory twice, so there is no file mapping and there are no
+  // aliased views. One reservation holds guest 0x00000000-0x8FFFFFFF and the
+  // 512 MiB of guest physical memory; the backend picks its address (the
+  // 1 << n search below does not apply) and rex_guest_table translates the
+  // aliased ranges.
+  rex::memory::nx::GuestArena arena{};
+  if (!rex::memory::nx::ReserveGuestArena(&arena)) {
+    REXSYS_ERROR("Unable to reserve the guest address space.");
+    assert_always();
+    return false;
+  }
+  mapping_base_ = arena.virtual_base;
+  virtual_membase_ = arena.virtual_base;
+  physical_membase_ = arena.physical_base;
+#else
   // Create main page file-backed mapping. This is all reserved but
   // uncommitted (so it shouldn't expand page file).
   // Round up to allocation granularity to accommodate platforms with large pages.
@@ -177,6 +199,26 @@ bool Memory::Initialize() {
 #endif
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
+#endif
+
+#if REX_PLATFORM_NX
+  // Without aliased views each heap's membase is chosen so that
+  // membase + heap_base is the host address of its first page:
+  // 0x90000000 shares the 0x80000000 memory, the physical windows share
+  // physical_membase_ (0xE0000000 adds host_address_offset = 0x1000 itself).
+  auto rebase = [](uint8_t* host, uint64_t guest) {
+    return reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(host) - guest);
+  };
+  uint8_t* const v90000000_membase = rebase(virtual_membase_, 0x10000000);
+  uint8_t* const vA0000000_membase = rebase(physical_membase_, 0xA0000000);
+  uint8_t* const vC0000000_membase = rebase(physical_membase_, 0xC0000000);
+  uint8_t* const vE0000000_membase = rebase(physical_membase_, 0xE0000000);
+#else
+  uint8_t* const v90000000_membase = virtual_membase_;
+  uint8_t* const vA0000000_membase = virtual_membase_;
+  uint8_t* const vC0000000_membase = virtual_membase_;
+  uint8_t* const vE0000000_membase = virtual_membase_;
+#endif
 
   // Prepare virtual heaps.
   heaps_.v00000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestVirtual, 0x00000000,
@@ -185,17 +227,17 @@ bool Memory::Initialize() {
                               0x40000000 - 0x01000000, 64 * 1024);
   heaps_.v80000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestXex, 0x80000000,
                               0x10000000, 64 * 1024);
-  heaps_.v90000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestXex, 0x90000000,
+  heaps_.v90000000.Initialize(this, v90000000_membase, memory::HeapType::kGuestXex, 0x90000000,
                               0x10000000, 4096);
 
   // Prepare physical heaps.
   heaps_.physical.Initialize(this, physical_membase_, memory::HeapType::kGuestPhysical, 0x00000000,
                              0x20000000, 4096);
-  heaps_.vA0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xA0000000,
+  heaps_.vA0000000.Initialize(this, vA0000000_membase, memory::HeapType::kGuestPhysical, 0xA0000000,
                               0x20000000, 64 * 1024, &heaps_.physical);
-  heaps_.vC0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xC0000000,
+  heaps_.vC0000000.Initialize(this, vC0000000_membase, memory::HeapType::kGuestPhysical, 0xC0000000,
                               0x20000000, 16 * 1024 * 1024, &heaps_.physical);
-  heaps_.vE0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xE0000000,
+  heaps_.vE0000000.Initialize(this, vE0000000_membase, memory::HeapType::kGuestPhysical, 0xE0000000,
                               0x1FD00000, 4096, &heaps_.physical);
 
   // Protect the first and last 64kb of memory.
@@ -213,15 +255,23 @@ bool Memory::Initialize() {
                               memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
                               memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
 
+#if REX_PLATFORM_NX
+  // No pre-commit on NX: physical memory is backed on demand like the rest of
+  // the arena (it would take 512 MiB of the pool up front). The last
+  // 0xE0000000 page reaches 4 KiB past the 512 MiB (host_address_offset).
+  uint8_t* const membase_end = physical_membase_ + 0x1FFFFFFF + 0x1000;
+#else
   // Pre-commit the physical memory range so the GPU can access it
   // without page faults. Reference: xenia-canary 5f5be0668.
   rex::memory::AllocFixed(heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
                           rex::memory::AllocationType::kCommit,
                           rex::memory::PageAccess::kReadWrite);
+  uint8_t* const membase_end = physical_membase_ + 0x1FFFFFFF;
+#endif
 
   // Install MMIO handler for physical address translation and MMIO ranges
   mmio_handler_ = runtime::MMIOHandler::Install(
-      virtual_membase_, physical_membase_, physical_membase_ + 0x1FFFFFFF, HostToGuestVirtualThunk,
+      virtual_membase_, physical_membase_, membase_end, HostToGuestVirtualThunk,
       this, AccessViolationCallbackThunk, this);
   if (!mmio_handler_) {
     REXSYS_ERROR("Unable to install MMIO handlers");
@@ -436,6 +486,9 @@ VirtualHeap* Memory::GetPhysicalHeap() {
 }
 
 uint32_t Memory::HostToGuestVirtual(const void* host_address) const {
+#if REX_PLATFORM_NX
+  return rex::memory::HostToGuest(host_address);
+#else
   size_t virtual_address =
       reinterpret_cast<size_t>(host_address) - reinterpret_cast<size_t>(virtual_membase_);
   uint32_t vE0000000_host_offset = heaps_.vE0000000.host_address_offset();
@@ -445,6 +498,7 @@ uint32_t Memory::HostToGuestVirtual(const void* host_address) const {
     virtual_address -= vE0000000_host_offset;
   }
   return uint32_t(virtual_address);
+#endif
 }
 
 uint32_t Memory::HostToGuestVirtualThunk(const void* context, const void* host_address) {
@@ -500,6 +554,14 @@ uint32_t Memory::SearchAligned(uint32_t start, uint32_t end, const uint32_t* val
 bool Memory::AddVirtualMappedRange(uint32_t virtual_address, uint32_t mask, uint32_t size,
                                    void* context, runtime::MMIOReadCallback read_callback,
                                    runtime::MMIOWriteCallback write_callback) {
+#if REX_PLATFORM_NX
+  // 0x7F000000 is translated onto physical memory on NX (no separate view),
+  // so protecting it would protect guest physical pages. Generated code
+  // routes MMIO through REX_MM_LOAD/STORE (MMIOHandler::CheckLoad/CheckStore);
+  // accesses the recompiler does not recognise are not trapped here.
+  return mmio_handler_->RegisterRange(virtual_address, mask, size, context, read_callback,
+                                      write_callback);
+#else
   if (!rex::memory::AllocFixed(TranslateVirtual(virtual_address), size,
                                rex::memory::AllocationType::kCommit,
                                rex::memory::PageAccess::kNoAccess)) {
@@ -508,6 +570,7 @@ bool Memory::AddVirtualMappedRange(uint32_t virtual_address, uint32_t mask, uint
   }
   return mmio_handler_->RegisterRange(virtual_address, mask, size, context, read_callback,
                                       write_callback);
+#endif
 }
 
 runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
@@ -516,6 +579,9 @@ runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
 
 bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
                                      void* host_address, bool is_write) {
+#if REX_PLATFORM_NX
+  return NxPhysicalAccessViolation(std::move(global_lock_locked_once), host_address, is_write);
+#else
   // Access via physical_membase_ is special, when need to bypass everything
   // (for instance, for a data provider to actually write the data) so only
   // triggering callbacks on virtual memory regions.
@@ -614,7 +680,63 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
   }
 
   return false;
+#endif
 }
+
+#if REX_PLATFORM_NX
+bool Memory::NxPhysicalAccessViolation(
+    std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* host_address,
+    bool is_write) {
+  // Faults in the virtual half of the arena belong to non-physical heaps,
+  // which have no callbacks (same outcome as the desktop path).
+  const uintptr_t host = reinterpret_cast<uintptr_t>(host_address);
+  const uintptr_t physical = reinterpret_cast<uintptr_t>(physical_membase_);
+  if (!is_write || host < physical || host >= physical + 0x20000000 + 0x1000) {
+    return false;
+  }
+  // Host offset = guest physical address (for 0xE0000000 too, see
+  // PhysicalHeap::GetPhysicalAddress). EnablePhysicalMemoryAccessCallbacks
+  // watches the address in all three windows and they now share one host
+  // page, so all of them must see the write: triggering one would leave the
+  // others' watch bits set on a page that is writable again.
+  const uint32_t physical_address = uint32_t(host - physical);
+  bool triggered = false;
+  PhysicalHeap* const windows[] = {&heaps_.vA0000000, &heaps_.vC0000000, &heaps_.vE0000000};
+  for (PhysicalHeap* heap : windows) {
+    const uint32_t window_offset = heap->GetPhysicalAddress(heap->heap_base());
+    if (physical_address < window_offset ||
+        physical_address - window_offset >= heap->heap_size()) {
+      continue;
+    }
+    const uint32_t guest_address = heap->heap_base() + (physical_address - window_offset);
+    // global_critical_region_ is recursive: the caller's lock stays held.
+    triggered |= heap->TriggerCallbacks(global_critical_region_.Acquire(), guest_address, 1,
+                                        is_write, false);
+  }
+  if (triggered) {
+    return true;
+  }
+
+  // Stale host protection: the canonical physical heap says writable.
+  constexpr uint32_t kWriteProtectMask =
+      memory::kMemoryProtectWrite | memory::kMemoryProtectWriteCombine;
+  uint32_t physical_protect = 0;
+  if (physical_address < heaps_.physical.heap_size() &&
+      heaps_.physical.QueryProtect(physical_address, &physical_protect) &&
+      (physical_protect & kWriteProtectMask)) {
+    const uintptr_t page_base = host & ~(uintptr_t(rex::memory::page_size()) - 1);
+    if (rex::memory::Protect(reinterpret_cast<void*>(page_base), rex::memory::page_size(),
+                             rex::memory::PageAccess::kReadWrite, nullptr)) {
+      REXSYS_WARN("Recovered stale physical page protection for physical {:08X}",
+                  physical_address);
+      return true;
+    }
+  }
+  REXSYS_ERROR("Unhandled guest physical write fault: physical={:08X} host={:016X} protect={:08X}",
+               physical_address, static_cast<uint64_t>(host), physical_protect);
+  return false;
+}
+#endif
 
 bool Memory::AccessViolationCallbackThunk(
     std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* context,
@@ -905,7 +1027,82 @@ void BaseHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType hea
   unreserved_page_count_ = uint32_t(page_table_.size());
 }
 
+#if REX_PLATFORM_NX
+bool BaseHeap::NxCommitPages(uint32_t first_page, uint32_t last_page,
+                             rex::memory::PageAccess access) {
+  // Runs of pages this heap has not committed yet: one host reference each.
+  uint32_t run_first = UINT32_MAX;
+  for (uint32_t page_number = first_page; page_number <= last_page + 1; ++page_number) {
+    const bool uncommitted = page_number <= last_page &&
+                             !(page_table_[page_number].state & memory::kMemoryAllocationCommit);
+    if (uncommitted) {
+      if (run_first == UINT32_MAX) {
+        run_first = page_number;
+      }
+      continue;
+    }
+    if (run_first == UINT32_MAX) {
+      continue;
+    }
+    if (!rex::memory::AllocFixed(TranslateRelative(run_first << page_size_shift_),
+                                 size_t(page_number - run_first) << page_size_shift_,
+                                 rex::memory::AllocationType::kCommit,
+                                 rex::memory::PageAccess::kReadWrite)) {
+      // Undo the runs committed by this call (their table state is unchanged).
+      if (run_first > first_page) {
+        NxDecommitUncommitted(first_page, run_first - 1);
+      }
+      return false;
+    }
+    run_first = UINT32_MAX;
+  }
+  // Like the other backends' commit, the requested access applies to the
+  // whole range, already committed pages included.
+  return rex::memory::Protect(TranslateRelative(first_page << page_size_shift_),
+                              size_t(last_page - first_page + 1) << page_size_shift_, access);
+}
+
+void BaseHeap::NxDecommitUncommitted(uint32_t first_page, uint32_t last_page) {
+  for (uint32_t page_number = first_page; page_number <= last_page; ++page_number) {
+    if (!(page_table_[page_number].state & memory::kMemoryAllocationCommit)) {
+      rex::memory::DeallocFixed(TranslateRelative(page_number << page_size_shift_), page_size_,
+                                rex::memory::DeallocationType::kDecommit);
+    }
+  }
+}
+
+void BaseHeap::NxDecommitPages(uint32_t first_page, uint32_t last_page) {
+  uint32_t run_first = UINT32_MAX;
+  for (uint32_t page_number = first_page; page_number <= last_page + 1; ++page_number) {
+    const bool committed = page_number <= last_page &&
+                           (page_table_[page_number].state & memory::kMemoryAllocationCommit);
+    if (committed) {
+      if (run_first == UINT32_MAX) {
+        run_first = page_number;
+      }
+      continue;
+    }
+    if (run_first != UINT32_MAX) {
+      rex::memory::DeallocFixed(TranslateRelative(run_first << page_size_shift_),
+                                size_t(page_number - run_first) << page_size_shift_,
+                                rex::memory::DeallocationType::kDecommit);
+      run_first = UINT32_MAX;
+    }
+  }
+}
+#endif
+
 void BaseHeap::Dispose() {
+#if REX_PLATFORM_NX
+  // Drop this heap's references page by page: DeallocFixed on a whole region
+  // would also drop references that aliasing heaps hold on the same pages.
+  if (!page_table_.empty()) {
+    NxDecommitPages(0, uint32_t(page_table_.size()) - 1);
+    for (auto& page_entry : page_table_) {
+      page_entry.state &= ~memory::kMemoryAllocationCommit;
+    }
+  }
+#else
   // Walk table and release all regions.
   for (uint32_t page_number = 0; page_number < page_table_.size(); ++page_number) {
     auto& page_entry = page_table_[page_number];
@@ -917,6 +1114,7 @@ void BaseHeap::Dispose() {
       page_number += page_entry.region_page_count;
     }
   }
+#endif
 }
 
 void BaseHeap::DumpMap() {
@@ -1031,6 +1229,10 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
 
   for (size_t i = 0; i < page_table_.size(); i++) {
     auto& page = page_table_[i];
+#if REX_PLATFORM_NX
+    // The AllocFixed below takes a new reference for a committed page.
+    NxDecommitPages(uint32_t(i), uint32_t(i));
+#endif
     page.qword = stream->Read<uint64_t>();
     if (!page.state) {
       // Unallocated.
@@ -1069,6 +1271,11 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
 }
 
 void BaseHeap::Reset() {
+#if REX_PLATFORM_NX
+  if (!page_table_.empty()) {
+    NxDecommitPages(0, uint32_t(page_table_.size()) - 1);
+  }
+#endif
   // TODO(DrChat): protect pages.
   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
@@ -1169,12 +1376,20 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
   if (allocation_type == memory::kMemoryAllocationReserve) {
     // Reserve is not needed, as we are mapped already.
   } else {
+#if REX_PLATFORM_NX
+    void* result = TranslateRelative(start_page_number << page_size_shift_);
+    if ((allocation_type & memory::kMemoryAllocationCommit) &&
+        !NxCommitPages(start_page_number, end_page_number, ToPageAccess(protect))) {
+      result = nullptr;
+    }
+#else
     auto alloc_type = (allocation_type & memory::kMemoryAllocationCommit)
                           ? rex::memory::AllocationType::kCommit
                           : rex::memory::AllocationType::kReserve;
     void* result =
         rex::memory::AllocFixed(TranslateRelative(start_page_number << page_size_shift_),
                                 page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
+#endif
     if (!result) {
       REXSYS_ERROR("BaseHeap::AllocFixed failed to alloc range from host");
       return false;
@@ -1323,12 +1538,20 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
   if (allocation_type == memory::kMemoryAllocationReserve) {
     // Reserve is not needed, as we are mapped already.
   } else {
+#if REX_PLATFORM_NX
+    void* result = TranslateRelative(start_page_number << page_size_shift_);
+    if ((allocation_type & memory::kMemoryAllocationCommit) &&
+        !NxCommitPages(start_page_number, end_page_number, ToPageAccess(protect))) {
+      result = nullptr;
+    }
+#else
     auto alloc_type = (allocation_type & memory::kMemoryAllocationCommit)
                           ? rex::memory::AllocationType::kCommit
                           : rex::memory::AllocationType::kReserve;
     void* result =
         rex::memory::AllocFixed(TranslateRelative(start_page_number << page_size_shift_),
                                 page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
+#endif
     if (!result) {
       REXSYS_ERROR("BaseHeap::Alloc failed to alloc range from host");
       return false;
@@ -1375,6 +1598,10 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
     PLOGW("BaseHeap::Decommit failed due to host VirtualFree failure");
     return false;
   }*/
+
+#if REX_PLATFORM_NX
+  NxDecommitPages(start_page_number, end_page_number);
+#endif
 
   // Perform table change.
   for (uint32_t page_number = start_page_number; page_number <= end_page_number; ++page_number) {
@@ -1439,6 +1666,9 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
 
   // Perform table change.
   uint32_t end_page_number = base_page_number + base_page_entry.region_page_count - 1;
+#if REX_PLATFORM_NX
+  NxDecommitPages(base_page_number, end_page_number);
+#endif
   for (uint32_t page_number = base_page_number; page_number <= end_page_number; ++page_number) {
     auto& page_entry = page_table_[page_number];
     page_entry.qword = 0;

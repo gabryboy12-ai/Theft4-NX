@@ -39,6 +39,19 @@ extern "C" {
 #include <switch/types.h>
 }
 
+// libnx enters __libnx_exception_handler on __nx_exception_stack, a weak
+// 0x400-byte default shared by the whole process (with one global
+// ThreadExceptionDump). The handler below alone keeps a HostThreadContext
+// (~0x330 bytes) and an Exception on it, and the MMIO / write-watch
+// callbacks it dispatches to take locks and call into the memory system, so
+// the default overflows into .bss. Give it a stack that fits that path.
+// Faults on two threads at once still share this stack and the dump: libnx
+// has no per-thread exception context (see docs/switch-port/03-memory.md).
+extern "C" {
+alignas(16) u8 __nx_exception_stack[0x10000];
+u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+}
+
 namespace rex::arch {
 
 namespace {

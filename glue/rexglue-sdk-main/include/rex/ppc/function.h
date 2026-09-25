@@ -304,9 +304,14 @@ struct ArgTranslator {
     } else if constexpr (std::is_null_pointer_v<T>) {
       SetIntegerArgumentValue(ctx, base, idx, 0);
     } else if constexpr (std::is_pointer_v<T>) {
+#if REX_PLATFORM_NX
+      // No aliased views on NX: `value - base` is wrong for physical memory.
+      SetIntegerArgumentValue(ctx, base, idx, rex::memory::HostToGuest(value));
+#else
       SetIntegerArgumentValue(ctx, base, idx,
                               static_cast<uint32_t>(reinterpret_cast<uintptr_t>(value) -
                                                     reinterpret_cast<uintptr_t>(base)));
+#endif
     } else {
       SetIntegerArgumentValue(ctx, base, idx, value);
     }
@@ -419,8 +424,13 @@ __attribute__((noinline)) void HostToGuestFunction(PPCContext& ctx, uint8_t* bas
 
     if constexpr (std::is_pointer<ret_t>()) {
       if (v != nullptr) {
+#if REX_PLATFORM_NX
+        // No aliased views on NX: `v - base` is wrong for physical memory.
+        ctx.r3.u64 = rex::memory::HostToGuest(v);
+#else
         ctx.r3.u64 =
             static_cast<uint32_t>(reinterpret_cast<size_t>(v) - reinterpret_cast<size_t>(base));
+#endif
       } else {
         ctx.r3.u64 = 0;
       }

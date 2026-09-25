@@ -4,13 +4,13 @@
 // sdmc:/switch/theft4/smoke.log (through the SDK logger):
 //   1. SDK logging
 //   2. svcGetInfo address-space layout (alias, heap, ASLR regions)
-//   3. guest memory reservation, done exactly like
-//      rex::system::Memory::Initialize() (src/system/xmemory.cpp): same
-//      mapping size, same CreateFileMappingHandle / MapFileView calls from
-//      memory_switch.cpp, then a write/read-back at both ends of the region
+//   3. guest memory through the runtime itself: rex::memory::Memory::Initialize
+//      (design A, docs/switch-port/03-memory.md), translation of every guest
+//      window, commit on demand, aliases 0x80/0x90 and the physical views,
+//      release
 //   4. four threads through rex::thread::Thread, one per core where allowed
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
-// followed by the exploratory probes T1-T8 in probes.cpp (alias primitives,
+// followed by the exploratory probes T1-T9 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
 //
 // Every smoke line is made durable before the next operation: the SDK logger
@@ -38,6 +38,7 @@
 #include <rex/chrono/clock.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/system/xmemory.h>
 #include <rex/thread.h>
 
 #include "probes.h"
@@ -180,174 +181,147 @@ void StepAddressSpace() {
   }
 }
 
-// Pure virtual reservation (libnx virtmem bookkeeping only, no backing, no
-// SVC) of the runtime mapping size, to learn whether the address space fits it.
-void StepVirtualReservation(size_t size) {
-  SMOKE_INFO("  virtmem-only reservation of %s bytes (no backing)", Hex(size).c_str());
-  virtmemLock();
-  void* base = virtmemFindAslr(size, 0x200000);
-  VirtmemReservation* reservation = base ? virtmemAddReservation(base, size) : nullptr;
-  virtmemUnlock();
-  if (!base || !reservation) {
-    Fail("virtmem reservation", "virtmemFindAslr/virtmemAddReservation failed for " + Hex(size));
-    return;
-  }
-  u64 alias_start = 0, alias_size = 0;
-  svcGetInfo(&alias_start, InfoType_AliasRegionAddress, CUR_PROCESS_HANDLE, 0);
-  svcGetInfo(&alias_size, InfoType_AliasRegionSize, CUR_PROCESS_HANDLE, 0);
-  SMOKE_INFO("  ok: ASLR range %p-%p; alias region size %s %s the mapping size", base,
-             static_cast<void*>(static_cast<uint8_t*>(base) + size - 1), Hex(alias_size).c_str(),
-             alias_size >= size ? ">=" : "<");
-  virtmemLock();
-  virtmemRemoveReservation(reservation);
-  virtmemUnlock();
-}
-
 // ── 3. Guest memory ─────────────────────────────────────────────────────────
 
-// Copy of map_info[] in src/system/xmemory.cpp (static there).
-struct MapInfo {
-  uint64_t virtual_address_start;
-  uint64_t virtual_address_end;
-  uint64_t target_address;
-};
-constexpr MapInfo kMapInfo[] = {
-    {0x00000000, 0x3FFFFFFF, 0x0000000000000000ull},
-    {0x40000000, 0x7EFFFFFF, 0x0000000040000000ull},
-    {0x7F000000, 0x7FFFFFFF, 0x0000000100000000ull},
-    {0x80000000, 0x8FFFFFFF, 0x0000000080000000ull},
-    {0x90000000, 0x9FFFFFFF, 0x0000000080000000ull},
-    {0xA0000000, 0xBFFFFFFF, 0x0000000100000000ull},
-    {0xC0000000, 0xDFFFFFFF, 0x0000000100000000ull},
-    {0xE0000000, 0xFFFFFFFF, 0x0000000100001000ull},
-    {0x100000000, 0x11FFFFFFF, 0x0000000100000000ull},
-};
-constexpr size_t kViewCount = sizeof(kMapInfo) / sizeof(kMapInfo[0]);
+// The runtime's own guest memory: rex::memory::Memory::Initialize()
+// (src/system/xmemory.cpp, NX branch) on top of memory_switch.cpp (design A,
+// docs/switch-port/03-memory.md). Kept alive for T9, destroyed at exit.
+std::unique_ptr<rex::memory::Memory> g_memory;
 
-void UnmapViews(rex::memory::FileMappingHandle mapping, uint8_t* (&views)[kViewCount]) {
-  for (size_t n = 0; n < kViewCount; n++) {
-    if (views[n]) {
-      rex::memory::UnmapFileView(
-          mapping, views[n], kMapInfo[n].virtual_address_end - kMapInfo[n].virtual_address_start + 1);
-      views[n] = nullptr;
-    }
-  }
+void LogArenaStats(const char* when) {
+  const auto stats = rex::memory::nx::GetGuestArenaStats();
+  SMOKE_INFO("  arena %s: %zu blocks mapped (%zu MiB, peak %zu), %zu pages committed, "
+             "%" PRIu64 " maps / %" PRIu64 " unmaps, %.2f ms moving blocks in",
+             when, stats.mapped_blocks, stats.mapped_blocks * 2, stats.peak_mapped_blocks,
+             stats.committed_pages, stats.map_calls, stats.unmap_calls,
+             double(armTicksToNs(stats.map_ticks)) / 1e6);
 }
 
-// Memory::MapViews().
-int MapViews(rex::memory::FileMappingHandle mapping, uint8_t* mapping_base, size_t granularity,
-             uint8_t* (&views)[kViewCount]) {
-  const uint64_t granularity_mask = ~uint64_t(granularity - 1);
-  for (size_t n = 0; n < kViewCount; n++) {
-    views[n] = reinterpret_cast<uint8_t*>(rex::memory::MapFileView(
-        mapping, mapping_base + kMapInfo[n].virtual_address_start,
-        kMapInfo[n].virtual_address_end - kMapInfo[n].virtual_address_start + 1,
-        rex::memory::PageAccess::kReadWrite, kMapInfo[n].target_address & granularity_mask));
-    if (!views[n]) {
-      UnmapViews(mapping, views);
-      return 1;
-    }
-  }
-  return 0;
-}
-
-bool WriteReadBack(const char* label, uint8_t* address, uint64_t pattern) {
-  volatile uint64_t* p = reinterpret_cast<volatile uint64_t*>(address);
-  *p = pattern;
-  const uint64_t read = *p;
-  SMOKE_INFO("  %s %p: wrote %s read %s -> %s", label, static_cast<void*>(address),
-             Hex(pattern).c_str(), Hex(read).c_str(), read == pattern ? "ok" : "MISMATCH");
-  return read == pattern;
-}
-
-// Reserves like Memory::Initialize(), maps the views like Memory::MapViews()
-// and touches both ends of the physically backed region.
-bool ReserveAndProbe(const char* step, size_t mapping_size) {
-  const size_t granularity = rex::memory::allocation_granularity();
-  const std::string file_name =
-      "xenia_memory_" + std::to_string(rex::chrono::Clock::QueryHostTickCount());
-
-  SMOKE_INFO("  CreateFileMappingHandle(size=%s, kReadWrite, commit=false)",
-             Hex(mapping_size).c_str());
-  const auto mapping = rex::memory::CreateFileMappingHandle(
-      file_name, mapping_size, rex::memory::PageAccess::kReadWrite, false);
-  if (mapping == rex::memory::kFileMappingHandleInvalid) {
-    Fail(step, "CreateFileMappingHandle(" + Hex(mapping_size) +
-                   ") returned kFileMappingHandleInvalid (see log for memory_switch reason)");
-    return false;
-  }
-
-  uint8_t* views[kViewCount] = {};
-  uint8_t* mapping_base = nullptr;
-  for (size_t n = 32; n < 64; n++) {
-    auto candidate = reinterpret_cast<uint8_t*>(1ull << n);
-    if (!MapViews(mapping, candidate, granularity, views)) {
-      mapping_base = candidate;
-      break;
-    }
-  }
+// Every guest window must land where rex_guest_table says, as seen by the
+// runtime's own TranslateVirtual / TranslatePhysical.
+bool CheckTranslation(rex::memory::Memory& memory) {
+  uint8_t* const v = memory.virtual_membase();
+  uint8_t* const p = memory.physical_membase();
+  struct Expect {
+    uint32_t guest;
+    uint8_t* host;
+    const char* what;
+  };
+  const Expect kExpect[] = {
+      {0x00001000u, v + 0x1000, "virtual 4K"},
+      {0x7EFFFFFCu, v + 0x7EFFFFFCull, "virtual 64K end"},
+      {0x7F000010u, p + 0x10, "0x7F writeback -> physical"},
+      {0x80000020u, v + 0x80000020ull, "XEX 64K"},
+      {0x90000020u, v + 0x80000020ull, "XEX 4K -> 0x80"},
+      {0xA0000030u, p + 0x30, "physical 0xA"},
+      {0xC0000040u, p + 0x40, "physical 0xC"},
+      {0xE0000050u, p + 0x1050, "physical 0xE (+4 KiB)"},
+      {0xFFFFEFFCu, p + 0x1FFFFFFC, "physical 0xE end"},
+  };
   bool ok = true;
-  if (!mapping_base) {
-    Fail(step, "MapViews failed for every base 1<<32 .. 1<<63");
-    ok = false;
-  } else {
-    SMOKE_INFO("  MapViews ok at mapping_base %p", static_cast<void*>(mapping_base));
-    for (size_t n = 0; n < kViewCount; n++) {
-      SMOKE_INFO("    view %zu guest %s-%s -> host %p", n,
-                 Hex(kMapInfo[n].virtual_address_start).c_str(),
-                 Hex(kMapInfo[n].virtual_address_end).c_str(), static_cast<void*>(views[n]));
+  for (const Expect& e : kExpect) {
+    uint8_t* host = memory.TranslateVirtual(e.guest);
+    if (host != e.host) {
+      Fail("guest memory", "TranslateVirtual(" + Hex(e.guest) + ") = " +
+                               Hex(reinterpret_cast<uint64_t>(host)) + ", expected " +
+                               Hex(reinterpret_cast<uint64_t>(e.host)) + " (" + e.what + ")");
+      ok = false;
     }
-    if (views[0] != mapping_base) {
-      SMOKE_INFO(
-          "  note: primary view is at %p, not at mapping_base %p; the runtime uses "
-          "mapping_base as virtual_membase_",
-          static_cast<void*>(views[0]), static_cast<void*>(mapping_base));
-    }
-
-    // views[0] is the physically backed store (memory_switch.cpp commits the
-    // whole mapping there). Probe its first and last 8 bytes; aliased views
-    // are unbacked on Switch and are not touched.
-    size_t backed_size = 0;
-    rex::memory::PageAccess access{};
-    size_t query_length = 0;
-    if (rex::memory::QueryProtect(views[0], query_length, access)) {
-      backed_size = query_length;
-    }
-    const size_t aligned_size = (mapping_size + granularity - 1) & ~(granularity - 1);
-    SMOKE_INFO("  backing store %p size %s (QueryProtect region %s)", static_cast<void*>(views[0]),
-               Hex(aligned_size).c_str(), Hex(backed_size).c_str());
-    ok &= WriteReadBack("first", views[0], 0x5EED0000CAFEF00Dull);
-    ok &= WriteReadBack("last ", views[0] + aligned_size - sizeof(uint64_t), 0xDEADBEEF01234567ull);
-    if (!ok) {
-      Fail(step, "write/read-back mismatch");
-    }
-    UnmapViews(mapping, views);
   }
-  rex::memory::CloseFileMappingHandle(mapping, file_name);
+  SMOKE_INFO("  translation of 9 guest addresses (all windows): %s", ok ? "ok" : "MISMATCH");
   return ok;
 }
 
+bool WriteRead32(const char* label, void* write_host, void* read_host, uint32_t pattern) {
+  *static_cast<volatile uint32_t*>(write_host) = pattern;
+  const uint32_t read = *static_cast<volatile uint32_t*>(read_host);
+  SMOKE_INFO("  %s: wrote %08X at %p, read %08X at %p -> %s", label, pattern, write_host, read,
+             read_host, read == pattern ? "ok" : "MISMATCH");
+  return read == pattern;
+}
+
 void StepGuestMemory() {
-  // Memory::Initialize(): round_up(0x120000000 + granularity, granularity).
-  const size_t granularity = rex::memory::allocation_granularity();
-  const size_t runtime_size =
-      (size_t(0x120000000ull) + granularity + granularity - 1) & ~(granularity - 1);
-  SMOKE_INFO("step 3 guest memory (runtime path, granularity %s)", Hex(granularity).c_str());
-  StepVirtualReservation(runtime_size);
-  if (ReserveAndProbe("guest memory", runtime_size)) {
-    SMOKE_INFO("  runtime-size reservation ok");
+  SMOKE_INFO("step 3 guest memory: rex::memory::Memory::Initialize (runtime path, design A)");
+  g_memory = std::make_unique<rex::memory::Memory>();
+  SMOKE_INFO("  about to Memory::Initialize");
+  if (!g_memory->Initialize()) {
+    Fail("guest memory", "Memory::Initialize failed (see log for memory_switch reason)");
+    g_memory.reset();
+    return;
+  }
+  rex::memory::Memory& memory = *g_memory;
+  SMOKE_INFO("  virtual_membase %p, physical_membase %p",
+             static_cast<void*>(memory.virtual_membase()),
+             static_cast<void*>(memory.physical_membase()));
+  LogArenaStats("after Initialize");
+  if (!CheckTranslation(memory)) {
     return;
   }
 
-  // Diagnostic only, not the runtime path: the largest request that
-  // memory_switch.cpp accepts (kNxMaxMappingBytes = 2304 MiB), to learn
-  // whether that budget is actually available on this console.
-  constexpr size_t kNxMaxMappingBytes = size_t(2304) * 1024 * 1024;
-  SMOKE_INFO("step 3b DIAGNOSTIC: retry at the memory_switch.cpp cap %s",
-             Hex(kNxMaxMappingBytes).c_str());
-  if (ReserveAndProbe("guest memory diagnostic", kNxMaxMappingBytes)) {
-    SMOKE_INFO("  diagnostic reservation at the cap ok");
+  bool ok = true;
+  // XEX alias: Initialize writes 0x2a6e3f38 (big-endian) at 0x8000001C.
+  const uint32_t xex80 = *memory.TranslateVirtual<volatile uint32_t*>(0x8000001C);
+  const uint32_t xex90 = *memory.TranslateVirtual<volatile uint32_t*>(0x9000001C);
+  SMOKE_INFO("  0x8000001C = %08X, 0x9000001C = %08X (expected 383F6E2A both) -> %s", xex80,
+             xex90, xex80 == 0x383F6E2Au && xex90 == xex80 ? "ok" : "MISMATCH");
+  ok &= xex80 == 0x383F6E2Au && xex90 == xex80;
+
+  // Virtual heap: commit on demand, write, read back, release.
+  auto* v40 = memory.LookupHeap(0x40000000);
+  uint32_t virtual_address = 0;
+  SMOKE_INFO("  about to allocate 4 MiB in the 0x40000000 heap");
+  if (!v40->Alloc(4u << 20, 0x10000,
+                  rex::memory::kMemoryAllocationReserve | rex::memory::kMemoryAllocationCommit,
+                  rex::memory::kMemoryProtectRead | rex::memory::kMemoryProtectWrite, false,
+                  &virtual_address)) {
+    Fail("guest memory", "0x40000000 heap Alloc(4 MiB) failed");
+    return;
   }
+  uint8_t* vh = memory.TranslateVirtual(virtual_address);
+  ok &= WriteRead32("virtual first", vh, vh, 0x11223344u);
+  ok &= WriteRead32("virtual last ", vh + (4u << 20) - 4, vh + (4u << 20) - 4, 0x55667788u);
+  LogArenaStats("with 4 MiB virtual");
+
+  // Physical memory through its four views: allocate in the 0xE0000000 heap,
+  // write through 0xE, read through physical_membase, 0xA and 0xC.
+  auto* vE = memory.LookupHeapByType(true, 4096);
+  uint32_t e_address = 0;
+  SMOKE_INFO("  about to allocate 64 KiB in the 0xE0000000 heap");
+  if (!vE->Alloc(0x10000, 0x1000,
+                 rex::memory::kMemoryAllocationReserve | rex::memory::kMemoryAllocationCommit,
+                 rex::memory::kMemoryProtectRead | rex::memory::kMemoryProtectWrite, false,
+                 &e_address)) {
+    Fail("guest memory", "0xE0000000 heap Alloc(64 KiB) failed");
+    return;
+  }
+  const uint32_t physical = memory.GetPhysicalAddress(e_address);
+  SMOKE_INFO("  0xE heap: guest %08X = physical %08X", e_address, physical);
+  uint8_t* eh = memory.TranslateVirtual(e_address);
+  ok &= WriteRead32("0xE -> physical", eh, memory.TranslatePhysical(physical), 0xA1B2C3D4u);
+  ok &= WriteRead32("0xE -> 0xA     ", eh + 8, memory.TranslateVirtual(0xA0000000u + physical + 8),
+                    0x0BADF00Du);
+  ok &= WriteRead32("0xC -> 0xE     ", memory.TranslateVirtual(0xC0000000u + physical + 16),
+                    eh + 16, 0xCAFEBABEu);
+  LogArenaStats("with 64 KiB physical");
+
+  SMOKE_INFO("  about to release both allocations");
+  v40->Release(virtual_address);
+  vE->Release(e_address);
+  LogArenaStats("after release");
+  if (!ok) {
+    Fail("guest memory", "write/read-back mismatch (see lines above)");
+    return;
+  }
+  SMOKE_INFO("  guest memory ok");
+}
+
+void StepGuestMemoryShutdown() {
+  if (!g_memory) {
+    return;
+  }
+  SMOKE_INFO("about to destroy rex::memory::Memory");
+  g_memory.reset();
+  LogArenaStats("after ~Memory");
 }
 
 // ── 4. Threads ──────────────────────────────────────────────────────────────
@@ -434,7 +408,8 @@ int main(int argc, char** argv) {
     Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
   }
 
-  RunProbes();
+  RunProbes(g_memory.get());
+  StepGuestMemoryShutdown();
   std::printf("\nPress + to exit.\n");
   consoleUpdate(nullptr);
 

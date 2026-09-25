@@ -1,4 +1,4 @@
-// switch-smoke probes T1-T8: open questions of the Horizon guest-memory designs
+// switch-smoke probes T1-T9: open questions of the Horizon guest-memory designs
 // (docs/switch-port/03-memory.md).
 //
 //   T1 svcMapProcessCodeMemory + svcSetProcessMemoryPermission as an RW alias
@@ -10,6 +10,8 @@
 //   T7 cost of design A's translation through a 256-entry table (T6 addresses)
 //   T8 on-demand commit: 2 MiB heap blocks moved into a guest-space reservation
 //      with svcMapProcessCodeMemory, made RW, used, atomics, then unmapped
+//   T9 fault round trip on guest memory (read-only / no-access page, handler
+//      restores RW and resumes) and the runtime's physical write watch
 //
 // Rules: each probe logs BEGIN before doing anything; every syscall that may
 // fault or kill the process is preceded by an "about to" line (each line is
@@ -30,6 +32,10 @@
 #include <vector>
 
 #include <switch.h>
+
+#include <rex/exception_handler.h>
+#include <rex/memory/utils.h>
+#include <rex/system/xmemory.h>
 
 namespace {
 
@@ -946,8 +952,10 @@ void ProbeOnDemandCommit() {
       SMOKE_INFO("T8 aligned_alloc(2 MiB) failed at block %d; stopping", i);
       break;
     }
-    SMOKE_INFO("T8 about to map block %d: src %p -> dst %p (+0x%" PRIx64 ")", i, b.src, b.dst,
-               u64(i) * kT8Stride);
+    if (i == 0 || i == kT8Blocks - 1) {
+      SMOKE_INFO("T8 about to map block %d: src %p -> dst %p (+0x%" PRIx64 ")", i, b.src, b.dst,
+                 u64(i) * kT8Stride);
+    }
     const u64 t0 = armGetSystemTick();
     Result rc = svcMapProcessCodeMemory(process, reinterpret_cast<u64>(b.dst),
                                         reinterpret_cast<u64>(b.src), k2MiB);
@@ -972,7 +980,6 @@ void ProbeOnDemandCommit() {
                  Rc(rc2).c_str());
       break;
     }
-    SMOKE_INFO("T8 block %d map %.3f ms + RW %.3f ms", i, map_ms[i], perm_ms[i]);
   }
   if (mapped > 0) {
     double min_ms = 1e9, max_ms = 0;
@@ -980,9 +987,19 @@ void ProbeOnDemandCommit() {
       min_ms = std::min(min_ms, map_ms[i] + perm_ms[i]);
       max_ms = std::max(max_ms, map_ms[i] + perm_ms[i]);
     }
+    const double avg_ms = total_ms / mapped;
+    // Per-block lines only for outliers (errors are logged in the loop).
+    int slow = 0;
+    for (int i = 0; i < mapped; ++i) {
+      if (map_ms[i] + perm_ms[i] > 3.0 * avg_ms) {
+        ++slow;
+        SMOKE_INFO("T8 block %d slow: map %.3f ms + RW %.3f ms (> 3x avg %.3f ms)", i, map_ms[i],
+                   perm_ms[i], avg_ms);
+      }
+    }
     SMOKE_INFO("T8 RESULT map+RW: %d blocks (%d MiB) in %.2f ms; per block min %.3f avg %.3f max "
-               "%.3f ms",
-               mapped, mapped * 2, total_ms, min_ms, total_ms / mapped, max_ms);
+               "%.3f ms; %d above 3x avg",
+               mapped, mapped * 2, total_ms, min_ms, avg_ms, max_ms, slow);
     SMOKE_INFO("T8 first dst %s", QueryStr(blocks[0].dst).c_str());
     SMOKE_INFO("T8 first src %s", QueryStr(blocks[0].src).c_str());
   }
@@ -1025,40 +1042,48 @@ void ProbeOnDemandCommit() {
     SMOKE_INFO("T8 dst not RW (%s); no write test", QueryStr(blocks[0].dst).c_str());
   }
 
-  // Unmap: the first block alone (timed), then the rest.
-  double unmap_total = 0, unmap_first = 0;
+  // Unmap every block, timed per block.
+  std::vector<double> unmap_ms(kT8Blocks, 0.0);
+  double unmap_total = 0;
   int unmapped = 0, unmap_failed = 0;
   for (int i = 0; i < mapped; ++i) {
     T8Block& b = blocks[i];
-    if (i < 2) {
+    if (i == 0 || i == mapped - 1) {
       SMOKE_INFO("T8 about to svcUnmapProcessCodeMemory block %d (dst %p, src %p)", i, b.dst,
                  b.src);
-    } else if (i == 2) {
-      SMOKE_INFO("T8 about to unmap blocks 2..%d", mapped - 1);
     }
     const u64 t0 = armGetSystemTick();
     Result rc = svcUnmapProcessCodeMemory(process, reinterpret_cast<u64>(b.dst),
                                           reinterpret_cast<u64>(b.src), k2MiB);
-    const double ms = TicksToMs(armGetSystemTick() - t0);
-    if (i == 0) {
-      unmap_first = ms;
-      SMOKE_INFO("T8 unmap block 0 %s in %.3f ms", Rc(rc).c_str(), ms);
-    }
+    unmap_ms[i] = TicksToMs(armGetSystemTick() - t0);
     if (R_FAILED(rc)) {
       ++unmap_failed;
-      if (unmap_failed <= 4) {
-        SMOKE_INFO("T8 unmap block %d %s", i, Rc(rc).c_str());
-      }
+      SMOKE_INFO("T8 unmap block %d %s", i, Rc(rc).c_str());
       continue;
     }
     b.mapped = false;
-    unmap_total += ms;
+    unmap_total += unmap_ms[i];
     ++unmapped;
   }
   if (mapped > 0) {
-    SMOKE_INFO("T8 RESULT unmap: %d/%d blocks in %.2f ms (first %.3f ms, avg %.3f ms), %d failed",
-               unmapped, mapped, unmap_total, unmap_first,
-               unmapped ? unmap_total / unmapped : 0.0, unmap_failed);
+    const double avg_ms = unmapped ? unmap_total / unmapped : 0.0;
+    double min_ms = 1e9, max_ms = 0;
+    int slow = 0;
+    for (int i = 0; i < mapped; ++i) {
+      if (blocks[i].mapped) {
+        continue;
+      }
+      min_ms = std::min(min_ms, unmap_ms[i]);
+      max_ms = std::max(max_ms, unmap_ms[i]);
+      if (unmap_ms[i] > 3.0 * avg_ms) {
+        ++slow;
+        SMOKE_INFO("T8 unmap block %d slow: %.3f ms (> 3x avg %.3f ms)", i, unmap_ms[i], avg_ms);
+      }
+    }
+    SMOKE_INFO("T8 RESULT unmap: %d/%d blocks in %.2f ms; per block min %.3f avg %.3f max %.3f ms; "
+               "%d above 3x avg, %d failed",
+               unmapped, mapped, unmap_total, unmapped ? min_ms : 0.0, avg_ms, max_ms, slow,
+               unmap_failed);
   }
 
   // What the sources hold after the unmap: the pattern written through dst
@@ -1102,9 +1127,185 @@ void ProbeOnDemandCommit() {
   SMOKE_INFO("T8 END");
 }
 
+// ── T9 ──────────────────────────────────────────────────────────────────────
+
+// Fault round trip on guest memory: a page made read-only (or inaccessible)
+// with svcSetProcessMemoryPermission, a write, and an exception handler
+// (installed through exception_handler_switch.cpp, after the runtime's
+// MMIOHandler) that restores RW and resumes the faulting instruction.
+struct T9State {
+  u8* page = nullptr;
+  u32 faults = 0;
+  u32 writes = 0;
+  u64 last_pc = 0;
+  u64 last_address = 0;
+  bool restore_failed = false;
+};
+
+bool T9Handler(rex::arch::Exception* ex, void* data) {
+  auto* state = static_cast<T9State*>(data);
+  if (ex->code() != rex::arch::Exception::Code::kAccessViolation) {
+    return false;
+  }
+  const u64 address = ex->fault_address();
+  const u64 page = reinterpret_cast<u64>(state->page);
+  if (address < page || address >= page + 0x1000) {
+    return false;
+  }
+  ++state->faults;
+  state->writes += ex->access_violation_operation() ==
+                   rex::arch::Exception::AccessViolationOperation::kWrite;
+  state->last_pc = ex->pc();
+  state->last_address = address;
+  // Signal-handler context: no logging here. rex::memory::Protect inside the
+  // arena is svcSetProcessMemoryPermission.
+  if (!rex::memory::Protect(state->page, 0x1000, rex::memory::PageAccess::kReadWrite)) {
+    state->restore_failed = true;
+    return false;
+  }
+  return true;  // resume at the faulting instruction
+}
+
+struct T9Watch {
+  u32 calls = 0;
+  u32 last_start = 0;
+  u32 last_length = 0;
+};
+
+std::pair<uint32_t, uint32_t> T9Invalidation(void* context, uint32_t physical_address_start,
+                                             uint32_t length, bool exact_range) {
+  (void)exact_range;
+  auto* watch = static_cast<T9Watch*>(context);
+  ++watch->calls;
+  watch->last_start = physical_address_start;
+  watch->last_length = length;
+  return {0, UINT32_MAX};
+}
+
+void ProbeFaultRoundTrip(rex::memory::Memory* memory) {
+  const char* p = "T9";
+  SMOKE_INFO("T9 BEGIN fault round trip on guest memory (exception_handler_switch.cpp)");
+  if (!memory) {
+    SMOKE_INFO("T9 SKIP no rex::memory::Memory (step 3 failed)");
+    return;
+  }
+  if (!Hinted(p, 0x73, "svcSetProcessMemoryPermission")) {
+    return;
+  }
+  const Handle process = envGetOwnProcessHandle();
+  auto* heap = memory->LookupHeap(0x40000000);
+  uint32_t guest = 0;
+  if (!heap->Alloc(0x10000, 0x10000,
+                   rex::memory::kMemoryAllocationReserve | rex::memory::kMemoryAllocationCommit,
+                   rex::memory::kMemoryProtectRead | rex::memory::kMemoryProtectWrite, false,
+                   &guest)) {
+    SMOKE_INFO("T9 SKIP cannot allocate 64 KiB of guest memory");
+    return;
+  }
+  T9State state;
+  state.page = memory->TranslateVirtual(guest);
+  auto* word = reinterpret_cast<volatile u32*>(state.page + 0x40);
+  SMOKE_INFO("T9 guest %08X -> host %p: %s", guest, state.page, QueryStr(state.page).c_str());
+  rex::arch::ExceptionHandler::Install(T9Handler, &state);
+
+  // 1. One read-only page, one write.
+  SMOKE_INFO("T9 about to svcSetProcessMemoryPermission(%p, 0x1000, R)", state.page);
+  Result rc =
+      svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_R);
+  SMOKE_INFO("T9 set R %s: %s", Rc(rc).c_str(), QueryStr(state.page).c_str());
+  if (R_SUCCEEDED(rc)) {
+    SMOKE_INFO("T9 about to write to the read-only page");
+    const u64 t0 = armGetSystemTick();
+    *word = 0x600DF00Du;
+    const double ms = TicksToMs(armGetSystemTick() - t0);
+    SMOKE_INFO("T9 write done: faults %u (write %u), pc 0x%" PRIx64 ", address 0x%" PRIx64
+               ", value %08X -> %s, %.3f ms, page now %s",
+               state.faults, state.writes, state.last_pc, state.last_address, *word,
+               state.faults == 1 && *word == 0x600DF00Du ? "ok" : "UNEXPECTED", ms,
+               QueryStr(state.page).c_str());
+  }
+
+  // 2. Cost of a full round trip, and of the two SVCs alone.
+  constexpr int kRounds = 1000;
+  u32 before = state.faults;
+  SMOKE_INFO("T9 about to run %d x (set R, write -> fault -> set RW -> resume)", kRounds);
+  u64 t0 = armGetSystemTick();
+  for (int i = 0; i < kRounds; ++i) {
+    svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_R);
+    *word = u32(i);
+  }
+  const double round_ms = TicksToMs(armGetSystemTick() - t0);
+  const u32 round_faults = state.faults - before;
+  t0 = armGetSystemTick();
+  for (int i = 0; i < kRounds; ++i) {
+    svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_R);
+    svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_Rw);
+  }
+  const double svc_ms = TicksToMs(armGetSystemTick() - t0);
+  SMOKE_INFO("T9 RESULT round trip: %u faults for %d writes, %.2f us each; the two SVCs alone "
+             "%.2f us; exception path %.2f us; last value %u -> %s",
+             round_faults, kRounds, round_ms * 1000.0 / kRounds, svc_ms * 1000.0 / kRounds,
+             (round_ms - svc_ms) * 1000.0 / kRounds, *word,
+             round_faults == u32(kRounds) && *word == u32(kRounds - 1) ? "ok" : "UNEXPECTED");
+
+  // 3. No access at all (read fault).
+  SMOKE_INFO("T9 about to svcSetProcessMemoryPermission(%p, 0x1000, ---)", state.page);
+  rc = svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000,
+                                     Perm_None);
+  SMOKE_INFO("T9 set --- %s: %s", Rc(rc).c_str(), QueryStr(state.page).c_str());
+  if (R_SUCCEEDED(rc)) {
+    before = state.faults;
+    SMOKE_INFO("T9 about to read the inaccessible page");
+    const u32 v = *word;
+    SMOKE_INFO("T9 read done: faults %u, value %u -> %s", state.faults - before, v,
+               state.faults - before == 1 && v == u32(kRounds - 1) ? "ok" : "UNEXPECTED");
+  }
+  rex::arch::ExceptionHandler::Uninstall(T9Handler, &state);
+  if (state.restore_failed) {
+    SMOKE_INFO("T9 NOTE the handler could not restore RW (rex::memory::Protect failed)");
+  }
+  heap->Release(guest);
+
+  // 4. The runtime's own write watch: physical memory watched through
+  //    EnablePhysicalMemoryAccessCallbacks, written through another window.
+  //    Faults go MMIOHandler -> Memory::NxPhysicalAccessViolation.
+  auto* vA = memory->LookupHeapByType(true, 64 * 1024);
+  uint32_t a_address = 0;
+  if (!vA->Alloc(0x10000, 0x10000,
+                 rex::memory::kMemoryAllocationReserve | rex::memory::kMemoryAllocationCommit,
+                 rex::memory::kMemoryProtectRead | rex::memory::kMemoryProtectWrite, false,
+                 &a_address)) {
+    SMOKE_INFO("T9 SKIP write watch: cannot allocate physical memory");
+    SMOKE_INFO("T9 END");
+    return;
+  }
+  const uint32_t physical = memory->GetPhysicalAddress(a_address);
+  T9Watch watch;
+  void* handle = memory->RegisterPhysicalMemoryInvalidationCallback(T9Invalidation, &watch);
+  u8* through_c = memory->TranslateVirtual(0xC0000000u + physical);
+  SMOKE_INFO("T9 watch physical %08X (guest %08X), write through 0xC view %p", physical,
+             a_address, through_c);
+  SMOKE_INFO("T9 about to EnablePhysicalMemoryAccessCallbacks + write");
+  memory->EnablePhysicalMemoryAccessCallbacks(physical, 0x1000, true, false);
+  SMOKE_INFO("T9 page after enable: %s", QueryStr(through_c).c_str());
+  t0 = armGetSystemTick();
+  *reinterpret_cast<volatile u32*>(through_c + 0x80) = 0x5EED5EEDu;
+  const double watch_ms = TicksToMs(armGetSystemTick() - t0);
+  const u32 read_a =
+      *reinterpret_cast<volatile u32*>(memory->TranslateVirtual(a_address) + 0x80);
+  SMOKE_INFO("T9 RESULT write watch: %u invalidation call(s) (last %08X+%X), value through 0xA "
+             "%08X -> %s, %.3f ms, page now %s",
+             watch.calls, watch.last_start, watch.last_length, read_a,
+             watch.calls >= 1 && read_a == 0x5EED5EEDu ? "ok" : "UNEXPECTED", watch_ms,
+             QueryStr(through_c).c_str());
+  memory->UnregisterPhysicalMemoryInvalidationCallback(handle);
+  vA->Release(a_address);
+  SMOKE_INFO("T9 END");
+}
+
 }  // namespace
 
-void RunProbes() {
+void RunProbes(rex::memory::Memory* memory) {
   SMOKE_INFO("PROBES BEGIN (results are measurements; they do not change the SMOKE verdict)");
   ProbeProcessCodeMemory();
   ProbeCodeMemory();
@@ -1114,5 +1315,6 @@ void RunProbes() {
   ProbeTranslationCost();
   ProbeTranslationTable();
   ProbeOnDemandCommit();
+  ProbeFaultRoundTrip(memory);
   SMOKE_INFO("PROBES DONE");
 }

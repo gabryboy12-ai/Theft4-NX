@@ -152,6 +152,32 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
                   size_t file_offset);
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length);
 
+#if REX_PLATFORM_NX
+// Guest memory design A (docs/switch-port/03-memory.md, core/memory_switch.cpp):
+// one reservation without aliased views, translated by rex_guest_table
+// (rex/memory/guest_table.h). Inside it, AllocFixed(kCommit) takes one
+// reference per 4 KiB page and DeallocFixed drops one; 2 MiB blocks are
+// backed on the first reference and returned on the last.
+namespace nx {
+struct GuestArena {
+  uint8_t* virtual_base;   // host address of guest 0x00000000 (virtual_membase)
+  uint8_t* physical_base;  // host address of guest physical 0 (physical_membase)
+  size_t size;
+};
+struct GuestArenaStats {
+  size_t mapped_blocks = 0;
+  size_t peak_mapped_blocks = 0;
+  size_t committed_pages = 0;  // 4 KiB pages with at least one reference
+  uint64_t map_calls = 0;
+  uint64_t unmap_calls = 0;
+  uint64_t map_ticks = 0;  // armGetSystemTick() spent moving blocks in
+};
+bool ReserveGuestArena(GuestArena* out);
+void ReleaseGuestArena();
+GuestArenaStats GetGuestArenaStats();
+}  // namespace nx
+#endif
+
 inline size_t hash_combine(size_t seed) {
   return seed;
 }

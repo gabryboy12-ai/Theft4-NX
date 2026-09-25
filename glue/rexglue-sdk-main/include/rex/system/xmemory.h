@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include <rex/memory/guest_table.h>
 #include <rex/memory/utils.h>
 #include <rex/ppc/context.h>  // PPCFunc type (minimal header)
 #include <rex/system/mmio_handler.h>
@@ -48,7 +49,13 @@ namespace rex::memory {
 /// Same raw arithmetic as recompiled code; no Memory* or heap lookup needed.
 template <typename T = u8*>
 inline T GuestPtr(u8* base, u32 guest_address) noexcept {
+#if REX_PLATFORM_NX
+  // No aliased views on NX: the translation table maps every window.
+  (void)base;
+  return reinterpret_cast<T>(GuestToHost(guest_address));
+#else
   return reinterpret_cast<T>(base + guest_address + detail::PhysicalHostOffset(guest_address));
+#endif
 }
 
 class Memory;
@@ -226,6 +233,19 @@ class BaseHeap {
   void Initialize(memory::Memory* memory, uint8_t* membase, HeapType heap_type, uint32_t heap_base,
                   uint32_t heap_size, uint32_t page_size, uint32_t host_address_offset = 0);
 
+#if REX_PLATFORM_NX
+  // Guest memory design A: the host backing is referenced per heap page, so
+  // only commit-state transitions of this heap's pages reach the backend
+  // (core/memory_switch.cpp). Commits the not-yet-committed pages of
+  // [first_page, last_page], then applies `access` to the whole range.
+  bool NxCommitPages(uint32_t first_page, uint32_t last_page, rex::memory::PageAccess access);
+  // Drops the host reference of the committed pages of [first_page, last_page].
+  void NxDecommitPages(uint32_t first_page, uint32_t last_page);
+  // Rollback of NxCommitPages: drops the reference of the pages of
+  // [first_page, last_page] whose table state is not committed.
+  void NxDecommitUncommitted(uint32_t first_page, uint32_t last_page);
+#endif
+
   memory::Memory* memory_;
   uint8_t* membase_;
   HeapType heap_type_;
@@ -345,12 +365,17 @@ class Memory {
   // Note that the contents at the specified host address are big-endian.
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) const {
+#if REX_PLATFORM_NX
+    // No aliased views on NX: the translation table maps every window.
+    return reinterpret_cast<T>(rex::memory::GuestToHost(guest_address));
+#else
     uint8_t* host_address = virtual_membase_ + guest_address;
     const auto heap = LookupHeap(guest_address);
     if (heap) {
       host_address += heap->host_address_offset();
     }
     return reinterpret_cast<T>(host_address);
+#endif
   }
 
   // Base address of physical memory in the host address space.
@@ -528,6 +553,11 @@ class Memory {
 
   bool AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
                                void* host_address, bool is_write);
+#if REX_PLATFORM_NX
+  // Write watch on physical_membase_: all physical windows share these pages.
+  bool NxPhysicalAccessViolation(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+                                 void* host_address, bool is_write);
+#endif
   static bool AccessViolationCallbackThunk(
       std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* context,
       void* host_address, bool is_write);

@@ -1,122 +1,112 @@
 /**
  * @file        core/memory_switch.cpp
- * @brief       Nintendo Switch (libnx) memory backend
+ * @brief       Nintendo Switch (libnx) memory backend: guest memory design A
  *
- * Uses svcMapPhysicalMemory to back virtual address ranges with physical RAM,
- * svcSetMemoryPermission for page protection, svcQueryMemory for introspection,
- * and virtmem* APIs for address space reservation.
+ * See docs/switch-port/03-memory.md. Horizon gives an application no way to
+ * map the same pages at two addresses (svcMapProcessCodeMemory moves memory,
+ * CodeMemory gives one RW owner view only, svcMapPhysicalMemory needs a
+ * system resource the process does not have) and the loader hands the whole
+ * pool to the heap. So on NX:
  *
- * ── HOS memory model constraints (horizon userland) ──
+ * - The guest address space is ONE virtmem reservation (the "arena") with
+ *   no aliased views:
+ *     arena + 0x00000000 .. 0x8FFFFFFF   guest 0x00000000-0x8FFFFFFF
+ *     arena + 0x90000000 .. +512 MiB+4K  guest physical memory (physical_base)
+ *   Guest 0x90000000-0x9FFFFFFF (XEX 4 KiB pages) reuses the 0x80000000
+ *   host range; 0x7F000000 and the 0xA0000000/0xC0000000/0xE0000000 windows
+ *   reuse physical_base (0xE0000000 with the +4 KiB offset the physical heap
+ *   applies). rex_guest_table[addr >> 24] holds, per 16 MiB slice, the host
+ *   address of guest 0 for that slice: host = addr + rex_guest_table[addr >> 24].
  *
- * 1. svcMapPhysicalMemory (syscall 0x2C) requires the address AND size to be
- *    aligned to 0x200000 (2 MiB). This is the hardware TLB block size on
- *    Aarch64 and is enforced by the kernel. See switchbrew.org/wiki/SVC and
- *    libnx runtime/init.c (comment: "Must be a multiple of 0x200000").
- *    Consequently, the allocation_granularity surfaced to xmemory.cpp is
- *    0x200000; page_size() stays at 0x1000 so the emulator's write-watch and
- *    per-4K-page protection machinery in BaseHeap continues to work
- *    (svcSetMemoryPermission itself accepts 4 KiB granularity).
+ * - Backing is committed on demand in 2 MiB blocks: a block taken with
+ *   aligned_alloc from the heap is moved to its arena offset with
+ *   svcMapProcessCodeMemory and made RW with svcSetProcessMemoryPermission.
+ *   Every 4 KiB host page carries a reference count: xmemory.cpp commits and
+ *   decommits one reference per heap page transition (the physical heap and
+ *   the 0xA/0xC/0xE window heaps, and the 0x80/0x90 XEX heaps, share host
+ *   pages). A block is moved back to the heap and freed when none of its
+ *   pages is referenced.
  *
- * 2. Userland heap budget on Switch is strictly bounded by the configured
- *    application memory pool: 3.0 GiB (Erista, 4 GiB RAM) or 3.5 GiB
- *    (Mariko, 6 GiB RAM), further reduced by applet overhead, framebuffers,
- *    gpu heap, and libnx internal allocations. The emulator's canonical
- *    ~4.5 GiB file mapping (0x11FFFFFFF bytes) will NOT fit. We cap physical
- *    commit to ~2.25 GiB (the canonical virtual region 0x00000000–0x8FFFFFFF
- *    plus the 512 MiB physical page pool) and refuse larger requests early
- *    with a clear error.
+ * - Protection: svcSetProcessMemoryPermission, 4 KiB granularity, on mapped
+ *   blocks only. Unmapped blocks have no pages to protect.
  *
- * 3. TRUE virtual aliasing (multiple VAs backed by the same physical pages)
- *    is UNAVAILABLE to userland homebrew. The needed syscalls —
- *    svcCreateSharedMemory (0x50), svcMapProcessMemory (0x74) — are
- *    privileged; svcMirrorMemory does not exist on HOS. The emulator's 9
- *    overlapping views (see xmemory.cpp map_info[]) therefore cannot be
- *    satisfied with distinct VAs backed by shared physical pages. Attempting
- *    svcMapPhysicalMemory on every view would multiply physical commit by 9×
- *    and blow the budget (~20 GiB for a 2.25 GiB backing store).
- *
- *    Our MapFileView only commits the primary view (the one whose file offset
- *    starts at 0). Aliased views (file_offset != 0, or that overlap an
- *    already-committed region) are recorded as VA reservations with NO
- *    physical backing; accessing them will fault. The emulator's MMIO / VA
- *    translation layer (see runtime::MMIOHandler and Memory::TranslateVirtual)
- *    already routes guest physical accesses (0xA0000000+) through
- *    physical_membase_, so the aliased views are not needed once translation
- *    is active — however, any code that does raw pointer arithmetic on a
- *    view VA *will* fault. This is a deliberate trade-off. See TODO below.
- *
- * TODO(switch): implement a patched translation path in xmemory.cpp that
- *   routes aliased-range host pointer access through the primary backing
- *   store on NX. Alternatively, investigate svcMapPhysicalMemoryUnsafe (5.0+)
- *   + sysmodule hook to increase the safe heap cap — unlikely, but worth
- *   documenting the option.
+ * Addresses outside the arena (none in the runtime today) fall back to heap
+ * memory for AllocFixed(nullptr) and plain svcSetMemoryPermission for Protect.
+ * The file-mapping API is not used on NX: xmemory.cpp reserves the arena
+ * through rex::memory::nx::ReserveGuestArena instead.
  *
  * @license     BSD 3-Clause License
  */
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <vector>
 
 #include <rex/assert.h>
 #include <rex/logging.h>
+#include <rex/memory/guest_table.h>
 #include <rex/memory/utils.h>
 #include <rex/platform.h>
 
 extern "C" {
-#include <switch/result.h>
+#include <switch/arm/counter.h>
 #include <switch/kernel/svc.h>
 #include <switch/kernel/virtmem.h>
+#include <switch/result.h>
+#include <switch/runtime/env.h>
+}
+
+extern "C" {
+alignas(64) uint64_t rex_guest_table[256];
+uint8_t* rex_guest_virtual_base;
+uint8_t* rex_guest_physical_base;
 }
 
 namespace rex {
 namespace memory {
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+namespace {
 
-// Protection/watchpoint page size. svcSetMemoryPermission accepts 4 KiB
-// granularity (switchbrew.org/wiki/SVC#svcSetMemoryPermission). Keep this at
-// 4 KiB so xmemory.cpp's per-system-page protection / write-watch tracking
-// doesn't coarsen to 2 MiB granularity.
-static constexpr size_t kNxPageSize = 0x1000;
+constexpr size_t kNxPageSize = 0x1000;
+constexpr size_t kNxBlockSize = 0x200000;
+constexpr uint32_t kNxPagesPerBlock = kNxBlockSize / kNxPageSize;
 
-// Physical allocation granularity. svcMapPhysicalMemory REQUIRES addr and
-// size to be multiples of 2 MiB. All svcMapPhysicalMemory / svcUnmap calls
-// below must be aligned to this.
-static constexpr size_t kNxAllocGranularity = 0x200000;
+// Arena layout (see the file header).
+constexpr uint64_t kVirtualSpan = 0x90000000ull;
+constexpr uint64_t kPhysicalSpan = 0x20000000ull + kNxBlockSize;  // +4 KiB of 0xE0, rounded
+constexpr uint64_t kArenaSize = kVirtualSpan + kPhysicalSpan;
+constexpr size_t kArenaBlocks = kArenaSize / kNxBlockSize;
 
-// Budget cap: on userland homebrew the total mapped heap across the process
-// is bounded (typically ~3 GiB Erista, ~3.5 GiB Mariko, minus framebuffer +
-// gpu + sysmodule overhead). We refuse mapping requests larger than this to
-// fail early rather than let svcMapPhysicalMemory return 0xD401 (LimitReached)
-// deep inside MapViews.
-//
-// Picked 2304 MiB as a safe margin: 2048 MiB for the canonical 4 GiB guest VA
-// minus the aliased physical ranges (0xA0000000–0xFFFFFFFF = 1.5 GiB that
-// map onto the 512 MiB physical pool), plus the 512 MiB physical pool itself
-// = 2048 + 512 = 2560 MiB on paper. We leave ~256 MiB headroom for everything
-// else the process needs and settle on 2304 MiB. xmemory.cpp requests
-// 0x11FFFFFFF (~4.5 GiB) for its mapping; that request will be CAPPED to
-// this value on Switch via the CreateFileMappingHandle branch below.
-static constexpr size_t kNxMaxMappingBytes = size_t(2304) * 1024 * 1024;
+struct Block {
+  void* source = nullptr;      // aligned_alloc'd heap memory while moved into the arena
+  uint16_t referenced = 0;     // pages of this block with a non-zero reference count
+};
 
-static inline size_t NxAlignUp(size_t value, size_t alignment) {
+struct Arena {
+  std::mutex mutex;
+  uint8_t* base = nullptr;
+  VirtmemReservation* reservation = nullptr;
+  Handle process = INVALID_HANDLE;
+  std::vector<uint16_t> page_refs;  // one per 4 KiB page of the arena
+  std::vector<Block> blocks;
+  nx::GuestArenaStats stats;
+};
+
+Arena g_arena;
+
+inline size_t AlignUp(size_t value, size_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
-// Round up to the 2 MiB allocation granularity required by svcMapPhysicalMemory.
-static inline size_t NxAlignAlloc(size_t value) {
-  return NxAlignUp(value, kNxAllocGranularity);
+inline bool InArena(const void* address) {
+  const uintptr_t a = reinterpret_cast<uintptr_t>(address);
+  const uintptr_t base = reinterpret_cast<uintptr_t>(g_arena.base);
+  return g_arena.base && a >= base && a < base + kArenaSize;
 }
 
-// Round up to the 4 KiB permission granularity used by svcSetMemoryPermission.
-static inline size_t NxAlignPage(size_t value) {
-  return NxAlignUp(value, kNxPageSize);
-}
-
-// Convert PageAccess to libnx Permission enum value.
-// svcSetMemoryPermission only accepts Perm_None(0), Perm_R(1), Perm_Rw(3).
-// Execute permissions fall back to the non-execute equivalent (best effort).
-static uint32_t ToNxPermission(PageAccess access) {
+uint32_t ToNxPermission(PageAccess access) {
   switch (access) {
     case PageAccess::kNoAccess:
       return Perm_None;
@@ -131,8 +121,7 @@ static uint32_t ToNxPermission(PageAccess access) {
   }
 }
 
-// Convert libnx Permission bits to PageAccess.
-static PageAccess NxPermToPageAccess(uint32_t perm) {
+PageAccess NxPermToPageAccess(uint32_t perm) {
   const bool r = (perm & Perm_R) != 0;
   const bool w = (perm & Perm_W) != 0;
   const bool x = (perm & Perm_X) != 0;
@@ -141,195 +130,343 @@ static PageAccess NxPermToPageAccess(uint32_t perm) {
   return w ? PageAccess::kReadWrite : PageAccess::kReadOnly;
 }
 
-// Check if a memory region is already backed by physical pages (MemType_Heap
-// or any mapped type). Used to distinguish "reserve then commit" from fresh
-// allocation.
-static bool NxIsRegionMapped(void* addr, size_t length) {
-  MemoryInfo mem_info;
-  u32 page_info;
-  Result rc = svcQueryMemory(&mem_info, &page_info, (u64)addr);
-  if (R_FAILED(rc)) return false;
-  // MemType 0 = Unmapped. Anything else has backing pages.
-  return (mem_info.type & 0xFF) != MemType_Unmapped;
+uint8_t* BlockAddress(size_t block) {
+  return g_arena.base + block * kNxBlockSize;
 }
 
+// Moves a zeroed 2 MiB heap block to its arena offset and makes it RW.
+// Caller holds g_arena.mutex.
+bool MapBlock(size_t block) {
+  Block& b = g_arena.blocks[block];
+  void* source = std::aligned_alloc(kNxBlockSize, kNxBlockSize);
+  if (!source) {
+    REXSYS_ERROR("memory_switch: aligned_alloc(2 MiB) failed for arena block {} ({} mapped)",
+                 block, g_arena.stats.mapped_blocks);
+    return false;
+  }
+  std::memset(source, 0, kNxBlockSize);
+  const u64 dst = reinterpret_cast<u64>(BlockAddress(block));
+  const u64 t0 = armGetSystemTick();
+  Result rc = svcMapProcessCodeMemory(g_arena.process, dst, reinterpret_cast<u64>(source),
+                                      kNxBlockSize);
+  if (R_SUCCEEDED(rc)) {
+    rc = svcSetProcessMemoryPermission(g_arena.process, dst, kNxBlockSize, Perm_Rw);
+    if (R_FAILED(rc)) {
+      REXSYS_ERROR("memory_switch: svcSetProcessMemoryPermission(RW) block {} rc=0x{:x}", block,
+                   rc);
+      svcUnmapProcessCodeMemory(g_arena.process, dst, reinterpret_cast<u64>(source),
+                                kNxBlockSize);
+    }
+  } else {
+    REXSYS_ERROR("memory_switch: svcMapProcessCodeMemory block {} rc=0x{:x}", block, rc);
+  }
+  if (R_FAILED(rc)) {
+    std::free(source);
+    return false;
+  }
+  g_arena.stats.map_ticks += armGetSystemTick() - t0;
+  b.source = source;
+  ++g_arena.stats.mapped_blocks;
+  ++g_arena.stats.map_calls;
+  g_arena.stats.peak_mapped_blocks =
+      std::max(g_arena.stats.peak_mapped_blocks, g_arena.stats.mapped_blocks);
+  return true;
+}
+
+// Moves a block back to the heap and frees it. Caller holds g_arena.mutex.
+void UnmapBlock(size_t block) {
+  Block& b = g_arena.blocks[block];
+  const u64 dst = reinterpret_cast<u64>(BlockAddress(block));
+  // Pages may have been protected R or none; the unmap wants the block as mapped.
+  svcSetProcessMemoryPermission(g_arena.process, dst, kNxBlockSize, Perm_Rw);
+  const Result rc = svcUnmapProcessCodeMemory(g_arena.process, dst,
+                                              reinterpret_cast<u64>(b.source), kNxBlockSize);
+  if (R_FAILED(rc)) {
+    // The source stays moved: it must not go back to malloc. Keep the block
+    // mapped so a later commit can reuse it.
+    REXSYS_ERROR("memory_switch: svcUnmapProcessCodeMemory block {} rc=0x{:x}; block kept",
+                 block, rc);
+    return;
+  }
+  std::free(b.source);
+  b.source = nullptr;
+  --g_arena.stats.mapped_blocks;
+  ++g_arena.stats.unmap_calls;
+}
+
+// Applies `perm` to [address, address + length) on mapped blocks only.
+// Caller holds g_arena.mutex.
+bool ProtectArena(uint8_t* address, size_t length, uint32_t perm) {
+  bool ok = true;
+  uint8_t* end = address + length;
+  while (address < end) {
+    const size_t block = size_t(address - g_arena.base) / kNxBlockSize;
+    uint8_t* block_end = std::min(end, BlockAddress(block) + kNxBlockSize);
+    if (g_arena.blocks[block].source) {
+      const Result rc = svcSetProcessMemoryPermission(
+          g_arena.process, reinterpret_cast<u64>(address), size_t(block_end - address), perm);
+      if (R_FAILED(rc)) {
+        REXSYS_ERROR("memory_switch: svcSetProcessMemoryPermission({}, 0x{:x}, {}) rc=0x{:x}",
+                     static_cast<void*>(address), size_t(block_end - address), perm, rc);
+        ok = false;
+      }
+    }
+    address = block_end;
+  }
+  return ok;
+}
+
+void DecommitArena(uint8_t* address, size_t length);
+
+// One reference on every page of the range; maps blocks and zeroes pages
+// that become referenced. Caller holds g_arena.mutex.
+bool CommitArena(uint8_t* address, size_t length) {
+  const size_t first_page = size_t(address - g_arena.base) / kNxPageSize;
+  const size_t last_page = first_page + length / kNxPageSize - 1;
+  for (size_t page = first_page; page <= last_page; ++page) {
+    const size_t block = page / kNxPagesPerBlock;
+    Block& b = g_arena.blocks[block];
+    uint16_t& refs = g_arena.page_refs[page];
+    if (refs == 0) {
+      if (!b.source) {
+        if (!MapBlock(block)) {
+          if (page > first_page) {
+            DecommitArena(address, (page - first_page) * kNxPageSize);
+          }
+          return false;
+        }
+      } else {
+        // Reused page of a block that stayed mapped: give it zeroed contents
+        // as a fresh commit would.
+        uint8_t* p = g_arena.base + page * kNxPageSize;
+        svcSetProcessMemoryPermission(g_arena.process, reinterpret_cast<u64>(p), kNxPageSize,
+                                      Perm_Rw);
+        std::memset(p, 0, kNxPageSize);
+      }
+      ++b.referenced;
+      ++g_arena.stats.committed_pages;
+    }
+    ++refs;
+  }
+  return true;
+}
+
+// Drops one reference on every referenced page of the range and returns
+// blocks with no referenced page. Caller holds g_arena.mutex.
+void DecommitArena(uint8_t* address, size_t length) {
+  const size_t first_page = size_t(address - g_arena.base) / kNxPageSize;
+  const size_t last_page = first_page + length / kNxPageSize - 1;
+  for (size_t page = first_page; page <= last_page; ++page) {
+    uint16_t& refs = g_arena.page_refs[page];
+    if (refs == 0) {
+      continue;
+    }
+    if (--refs == 0) {
+      const size_t block = page / kNxPagesPerBlock;
+      Block& b = g_arena.blocks[block];
+      --g_arena.stats.committed_pages;
+      if (--b.referenced == 0) {
+        UnmapBlock(block);
+      }
+    }
+  }
+}
+
+}  // namespace
+
 size_t page_size() { return kNxPageSize; }
-size_t allocation_granularity() { return kNxAllocGranularity; }
+size_t allocation_granularity() { return kNxBlockSize; }
 
 bool IsWritableExecutableMemorySupported() { return false; }
 
+// ── Guest arena ──────────────────────────────────────────────────────────────
+
+namespace nx {
+
+bool ReserveGuestArena(GuestArena* out) {
+  std::lock_guard<std::mutex> lock(g_arena.mutex);
+  if (g_arena.base) {
+    REXSYS_ERROR("memory_switch: guest arena already reserved at {}",
+                 static_cast<void*>(g_arena.base));
+    return false;
+  }
+  if (!envIsSyscallHinted(0x77) || !envIsSyscallHinted(0x78) || !envIsSyscallHinted(0x73)) {
+    REXSYS_ERROR(
+        "memory_switch: svcMapProcessCodeMemory/svcUnmapProcessCodeMemory/"
+        "svcSetProcessMemoryPermission not available to this process");
+    return false;
+  }
+  const Handle process = envGetOwnProcessHandle();
+  if (process == INVALID_HANDLE) {
+    REXSYS_ERROR("memory_switch: no handle to the own process (envGetOwnProcessHandle)");
+    return false;
+  }
+
+  // Code-region address space: svcMapProcessCodeMemory destinations must be
+  // there. One extra block for 2 MiB alignment.
+  virtmemLock();
+  void* raw = virtmemFindCodeMemory(kArenaSize + kNxBlockSize, 0);
+  uint8_t* base = raw ? reinterpret_cast<uint8_t*>(AlignUp(reinterpret_cast<uintptr_t>(raw),
+                                                           kNxBlockSize))
+                      : nullptr;
+  VirtmemReservation* reservation = base ? virtmemAddReservation(base, kArenaSize) : nullptr;
+  virtmemUnlock();
+  if (!reservation) {
+    REXSYS_ERROR("memory_switch: cannot reserve 0x{:x} bytes of code address space", kArenaSize);
+    return false;
+  }
+
+  g_arena.base = base;
+  g_arena.reservation = reservation;
+  g_arena.process = process;
+  g_arena.page_refs.assign(kArenaSize / kNxPageSize, 0);
+  g_arena.blocks.assign(kArenaBlocks, Block{});
+  g_arena.stats = {};
+
+  const uint64_t v = reinterpret_cast<uint64_t>(base);
+  const uint64_t p = v + kVirtualSpan;
+  for (uint32_t i = 0; i < 256; ++i) {
+    uint64_t entry = v;                                   // 0x00-0x7E, 0x80-0x8F
+    if (i == 0x7F) {
+      entry = p - 0x7F000000ull;                          // GPU writeback -> physical 0
+    } else if (i >= 0x90 && i < 0xA0) {
+      entry = v - 0x10000000ull;                          // XEX 4 KiB -> XEX 64 KiB
+    } else if (i >= 0xA0 && i < 0xC0) {
+      entry = p - 0xA0000000ull;
+    } else if (i >= 0xC0 && i < 0xE0) {
+      entry = p - 0xC0000000ull;
+    } else if (i >= 0xE0) {
+      entry = p - 0xE0000000ull + 0x1000;                 // PhysicalHeap host_address_offset
+    }
+    rex_guest_table[i] = entry;
+  }
+  rex_guest_virtual_base = base;
+  rex_guest_physical_base = base + kVirtualSpan;
+
+  out->virtual_base = base;
+  out->physical_base = base + kVirtualSpan;
+  out->size = kArenaSize;
+  REXSYS_INFO("memory_switch: guest arena {}-{} (virtual {}, physical {})",
+              static_cast<void*>(base), static_cast<void*>(base + kArenaSize - 1),
+              static_cast<void*>(base), static_cast<void*>(base + kVirtualSpan));
+  return true;
+}
+
+void ReleaseGuestArena() {
+  std::lock_guard<std::mutex> lock(g_arena.mutex);
+  if (!g_arena.base) {
+    return;
+  }
+  size_t kept = 0;
+  for (size_t block = 0; block < g_arena.blocks.size(); ++block) {
+    if (g_arena.blocks[block].source) {
+      UnmapBlock(block);
+      kept += g_arena.blocks[block].source != nullptr;
+    }
+  }
+  if (kept) {
+    // Still-moved blocks keep their addresses; leave the reservation in place.
+    REXSYS_ERROR("memory_switch: {} arena blocks could not be unmapped; arena leaked", kept);
+    return;
+  }
+  virtmemLock();
+  virtmemRemoveReservation(g_arena.reservation);
+  virtmemUnlock();
+  std::memset(rex_guest_table, 0, sizeof(rex_guest_table));
+  rex_guest_virtual_base = nullptr;
+  rex_guest_physical_base = nullptr;
+  g_arena.base = nullptr;
+  g_arena.reservation = nullptr;
+  g_arena.page_refs.clear();
+  g_arena.page_refs.shrink_to_fit();
+  g_arena.blocks.clear();
+  g_arena.blocks.shrink_to_fit();
+}
+
+GuestArenaStats GetGuestArenaStats() {
+  std::lock_guard<std::mutex> lock(g_arena.mutex);
+  return g_arena.stats;
+}
+
+}  // namespace nx
+
 // ── AllocFixed ───────────────────────────────────────────────────────────────
-// Emulates Windows VirtualAlloc semantics:
-//   Reserve:       find/hold VA range, back with svcMapPhysicalMemory (Perm_None)
-//   Commit:        set page permissions on already-backed VA range
-//   ReserveCommit: reserve + commit in one step
-//
-// Note on alignment: svcMapPhysicalMemory needs 2 MiB alignment for both addr
-// and size. svcSetMemoryPermission accepts 4 KiB. We use NxAlignAlloc for any
-// length that flows into svcMap/Unmap and NxAlignPage for length into
-// svcSetMemoryPermission.
+// Inside the arena:
+//   kReserve        nothing to do (the arena reservation covers it)
+//   kCommit         one reference per 4 KiB page (see the file header), then
+//                   `access` on the whole range
+// Outside the arena only base_address == nullptr is supported (heap memory).
 
 void* AllocFixed(void* base_address, size_t length, AllocationType allocation_type,
                  PageAccess access) {
   if (length == 0) return nullptr;
-  const size_t alloc_len = NxAlignAlloc(length);
-  const size_t perm_len = NxAlignPage(length);
-  if (alloc_len == 0) return nullptr;
+  const size_t page_len = AlignUp(length, kNxPageSize);
+  const bool do_commit = allocation_type == AllocationType::kCommit ||
+                         allocation_type == AllocationType::kReserveCommit;
 
-  const bool do_reserve =
-      (allocation_type == AllocationType::kReserve ||
-       allocation_type == AllocationType::kReserveCommit);
-  const bool do_commit =
-      (allocation_type == AllocationType::kCommit ||
-       allocation_type == AllocationType::kReserveCommit);
-
-  // ── Fixed-address path ─────────────────────────────────────────────────
-  if (base_address) {
-    // 2 MiB alignment is required for svcMapPhysicalMemory. If the caller
-    // gives us a mis-aligned base, we can't back it — this is always a bug.
-    if ((reinterpret_cast<uintptr_t>(base_address) & (kNxAllocGranularity - 1)) != 0) {
-      REXSYS_ERROR(
-          "memory_switch: AllocFixed base {} not 2MiB-aligned; svcMapPhysicalMemory will fail",
-          base_address);
+  if (base_address && InArena(base_address)) {
+    auto* address = reinterpret_cast<uint8_t*>(
+        reinterpret_cast<uintptr_t>(base_address) & ~uintptr_t(kNxPageSize - 1));
+    if (!do_commit) {
+      return base_address;
+    }
+    std::lock_guard<std::mutex> lock(g_arena.mutex);
+    if (!CommitArena(address, page_len)) {
       return nullptr;
     }
-
-    if (do_reserve) {
-      // Back this VA range with physical memory, permission = Perm_None for
-      // reserve-only, or the requested access for reserve+commit.
-      // If the region is already mapped (e.g. from MapFileView), skip the
-      // svcMapPhysicalMemory call — it would fail on MemType_Heap memory.
-      if (!NxIsRegionMapped(base_address, alloc_len)) {
-        Result rc = svcMapPhysicalMemory(base_address, alloc_len);
-        if (R_FAILED(rc)) {
-          REXSYS_ERROR(
-              "memory_switch: svcMapPhysicalMemory({}, 0x{:x}) failed rc=0x{:x}",
-              base_address, alloc_len, rc);
-          return nullptr;
-        }
-      }
+    if (!ProtectArena(address, page_len, ToNxPermission(access))) {
+      return nullptr;
     }
-
-    if (do_commit) {
-      // Apply requested permissions. svcMapPhysicalMemory gives Rw by default.
-      uint32_t perm = ToNxPermission(access);
-      Result rc = svcSetMemoryPermission(base_address, perm_len, perm);
-      if (R_FAILED(rc)) {
-        // Commit on already-committed memory with matching perm is fine.
-        // Some memory types (MemType_Heap with Perm_Rw) may reject a
-        // redundant svcSetMemoryPermission. Accept this silently when the
-        // requested perm is Rw and the region is already Rw.
-        if (perm == Perm_Rw && NxIsRegionMapped(base_address, alloc_len)) {
-          return base_address;
-        }
-        return nullptr;
-      }
-      // Zero-fill committed memory.
-      if (access == PageAccess::kReadWrite || access == PageAccess::kExecuteReadWrite) {
-        std::memset(base_address, 0, perm_len);
-      }
-    } else {
-      // Reserve-only: set to Perm_None.
-      svcSetMemoryPermission(base_address, perm_len, Perm_None);
-    }
-
     return base_address;
   }
 
-  // ── No fixed address: find a free VA via virtmem ───────────────────────
-  // virtmemFindAslr already yields 2 MiB-aligned addresses on HOS.
-  virtmemLock();
-  void* addr = virtmemFindAslr(alloc_len, kNxAllocGranularity);
-  VirtmemReservation* rv = nullptr;
-  if (addr) {
-    rv = virtmemAddReservation(addr, alloc_len);
-  }
-  virtmemUnlock();
-  if (!addr || !rv) return nullptr;
-
-  // Back with physical memory.
-  Result rc = svcMapPhysicalMemory(addr, alloc_len);
-  if (R_FAILED(rc)) {
-    REXSYS_ERROR(
-        "memory_switch: svcMapPhysicalMemory(aslr={}, 0x{:x}) failed rc=0x{:x}", addr,
-        alloc_len, rc);
-    virtmemLock();
-    virtmemRemoveReservation(rv);
-    virtmemUnlock();
+  if (base_address) {
+    REXSYS_ERROR("memory_switch: AllocFixed at {} outside the guest arena is not supported",
+                 base_address);
     return nullptr;
   }
-
-  // Zero-fill.
-  std::memset(addr, 0, alloc_len);
-
-  if (do_commit) {
-    uint32_t perm = ToNxPermission(access);
-    if (perm != Perm_Rw) {
-      svcSetMemoryPermission(addr, perm_len, perm);
-    }
-  } else {
-    // Reserve-only: mark inaccessible.
-    svcSetMemoryPermission(addr, perm_len, Perm_None);
+  void* memory = std::aligned_alloc(kNxPageSize, page_len);
+  if (memory) {
+    std::memset(memory, 0, page_len);
   }
-
-  return addr;
+  return memory;
 }
 
 // ── DeallocFixed ─────────────────────────────────────────────────────────────
 
 bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocation_type) {
   if (!base_address) return false;
-  const size_t alloc_len = NxAlignAlloc(length);
-  const size_t perm_len = NxAlignPage(length);
-
-  switch (deallocation_type) {
-    case DeallocationType::kDecommit: {
-      // Zero-fill BEFORE removing access.
-      // Restore Rw first in case it was Perm_None or Perm_R.
-      svcSetMemoryPermission(base_address, perm_len, Perm_Rw);
-      std::memset(base_address, 0, perm_len);
-      // Remove access but keep physical backing (can be re-committed).
-      svcSetMemoryPermission(base_address, perm_len, Perm_None);
-      return true;
-    }
-    case DeallocationType::kRelease: {
-      // Fully release: restore Rw so svcUnmapPhysicalMemory can operate,
-      // then unmap the physical backing. Note svcUnmapPhysicalMemory also
-      // requires 2 MiB alignment — hence alloc_len.
-      svcSetMemoryPermission(base_address, perm_len, Perm_Rw);
-      Result rc = svcUnmapPhysicalMemory(base_address, alloc_len);
-      // Note: if this was heap-allocated memory (no virtmem reservation),
-      // we cannot free() it after unmapping physical pages — the VA is now
-      // invalid. The reservation (if any) leaks; acceptable for the
-      // emulator's process-lifetime allocations.
-      return R_SUCCEEDED(rc);
-    }
-    default:
-      return false;
+  if (InArena(base_address)) {
+    // Decommit and release both drop the references taken by AllocFixed.
+    (void)deallocation_type;
+    std::lock_guard<std::mutex> lock(g_arena.mutex);
+    DecommitArena(static_cast<uint8_t*>(base_address), AlignUp(length, kNxPageSize));
+    return true;
   }
+  if (deallocation_type == DeallocationType::kRelease) {
+    std::free(base_address);
+    return true;
+  }
+  return false;
 }
 
 // ── Protect ──────────────────────────────────────────────────────────────────
 
 bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* out_old_access) {
-  // 4 KiB granularity is sufficient here — svcSetMemoryPermission accepts
-  // page-aligned (not block-aligned) regions.
-  const size_t perm_len = NxAlignPage(length);
-
-  // Query old access before changing, if the caller needs it.
   if (out_old_access) {
     *out_old_access = PageAccess::kNoAccess;
     MemoryInfo mem_info;
     u32 page_info;
-    Result qrc = svcQueryMemory(&mem_info, &page_info, (u64)base_address);
-    if (R_SUCCEEDED(qrc)) {
+    if (R_SUCCEEDED(svcQueryMemory(&mem_info, &page_info, (u64)base_address))) {
       *out_old_access = NxPermToPageAccess(mem_info.perm);
     }
   }
-
-  uint32_t perm = ToNxPermission(access);
-  Result rc = svcSetMemoryPermission(base_address, perm_len, perm);
-  return R_SUCCEEDED(rc);
+  const size_t perm_len = AlignUp(length, kNxPageSize);
+  if (InArena(base_address)) {
+    std::lock_guard<std::mutex> lock(g_arena.mutex);
+    return ProtectArena(static_cast<uint8_t*>(base_address), perm_len, ToNxPermission(access));
+  }
+  return R_SUCCEEDED(svcSetMemoryPermission(base_address, perm_len, ToNxPermission(access)));
 }
 
 // ── QueryProtect ─────────────────────────────────────────────────────────────
@@ -355,303 +492,42 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
   return true;
 }
 
-// ── File mapping (guest address space) ───────────────────────────────────────
-//
-// See the file header for the aliasing rationale. Briefly:
-//   * CreateFileMappingHandle reserves a single contiguous VA range and backs
-//     it with svcMapPhysicalMemory — this is the "primary" backing store.
-//   * MapFileView at file_offset==0 returns the primary backing VA (or the
-//     caller's requested fixed address, provided it matches the backing).
-//   * MapFileView at file_offset!=0 (the aliased 9-view case from xmemory.cpp)
-//     returns a VA reservation WITHOUT physical backing — touching it will
-//     fault. The emulator must route accesses in those guest ranges through
-//     the MMIO handler / physical_membase_ translation (which it already does
-//     for physical guest addresses; see xmemory.cpp).
-
-struct NxFileMappingInfo {
-  void* base;                       // Primary backing store VA (physical-backed).
-  size_t size;                      // Aligned size of the backing store.
-  VirtmemReservation* reservation;  // Virtmem reservation (for cleanup).
-};
-
-static constexpr int kMaxNxFileMappings = 4;
-static NxFileMappingInfo s_nx_file_mappings[kMaxNxFileMappings] = {};
-
-// Tracking for "logical" (unbacked) aliased views created by MapFileView.
-// We need to remember the virtmem reservation so UnmapFileView can release it
-// without trying to call svcUnmapPhysicalMemory (which would fail on unbacked
-// VA).
-struct NxAliasView {
-  void* base;
-  size_t size;
-  VirtmemReservation* reservation;  // nullptr if the VA overlaps the primary
-                                    // backing and was not separately reserved.
-};
-static constexpr int kMaxNxAliasViews = 16;
-static NxAliasView s_nx_alias_views[kMaxNxAliasViews] = {};
-
-static int NxAllocAliasSlot() {
-  for (int i = 0; i < kMaxNxAliasViews; i++) {
-    if (s_nx_alias_views[i].base == nullptr) return i;
-  }
-  return -1;
-}
-
-static NxAliasView* NxFindAliasView(void* base) {
-  for (int i = 0; i < kMaxNxAliasViews; i++) {
-    if (s_nx_alias_views[i].base == base) return &s_nx_alias_views[i];
-  }
-  return nullptr;
-}
+// ── File mapping ─────────────────────────────────────────────────────────────
+// Not available on NX: Horizon has no application-level way to map the same
+// memory twice. xmemory.cpp uses nx::ReserveGuestArena instead.
 
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
                                           PageAccess access, bool commit) {
   (void)path;
   (void)access;
   (void)commit;
-
-  // Enforce the budget cap: the canonical emulator request of 0x11FFFFFFF
-  // (~4.5 GiB) cannot be satisfied on Switch userland. Fail early with a
-  // clear error — the caller (xmemory.cpp) already treats a failed mapping as
-  // fatal.
-  if (length > kNxMaxMappingBytes) {
-    REXSYS_ERROR(
-        "memory_switch: requested mapping 0x{:x} ({} MiB) exceeds Switch userland cap 0x{:x} "
-        "({} MiB); guest heap budget on NX is ~3 GiB. xmemory.cpp must be patched with an "
-        "#if REX_PLATFORM_NX branch to request a smaller mapping or use a different layout.",
-        length, length / (1024 * 1024), kNxMaxMappingBytes,
-        kNxMaxMappingBytes / (1024 * 1024));
-    return kFileMappingHandleInvalid;
-  }
-
-  const size_t aligned_length = NxAlignAlloc(length);
-
-  // Find a free slot first.
-  int slot = -1;
-  for (int i = 0; i < kMaxNxFileMappings; i++) {
-    if (s_nx_file_mappings[i].base == nullptr) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot < 0) return kFileMappingHandleInvalid;
-
-  // Find a free VA range large enough for the entire backing store.
-  virtmemLock();
-  void* base = virtmemFindAslr(aligned_length, kNxAllocGranularity);
-  VirtmemReservation* rv = nullptr;
-  if (base) {
-    rv = virtmemAddReservation(base, aligned_length);
-  }
-  virtmemUnlock();
-
-  if (!base || !rv) {
-    REXSYS_ERROR("memory_switch: virtmemFindAslr failed for 0x{:x} bytes", aligned_length);
-    return kFileMappingHandleInvalid;
-  }
-
-  // Back the entire range with physical memory. This gives us a contiguous
-  // region of real pages that serves as the "file" for MapFileView.
-  Result rc = svcMapPhysicalMemory(base, aligned_length);
-  if (R_FAILED(rc)) {
-    REXSYS_ERROR(
-        "memory_switch: svcMapPhysicalMemory({}, 0x{:x}) failed rc=0x{:x} (heap budget "
-        "exhausted?)",
-        base, aligned_length, rc);
-    virtmemLock();
-    virtmemRemoveReservation(rv);
-    virtmemUnlock();
-    return kFileMappingHandleInvalid;
-  }
-
-  // Zero-fill the backing store.
-  std::memset(base, 0, aligned_length);
-
-  s_nx_file_mappings[slot].base = base;
-  s_nx_file_mappings[slot].size = aligned_length;
-  s_nx_file_mappings[slot].reservation = rv;
-
-  return static_cast<FileMappingHandle>(slot);
+  REXSYS_ERROR(
+      "memory_switch: CreateFileMappingHandle(0x{:x}) is not supported on Switch; guest memory "
+      "uses rex::memory::nx::ReserveGuestArena",
+      length);
+  return kFileMappingHandleInvalid;
 }
 
 void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
+  (void)handle;
   (void)path;
-  int idx = static_cast<int>(handle);
-  if (idx < 0 || idx >= kMaxNxFileMappings) return;
-
-  auto& info = s_nx_file_mappings[idx];
-  if (info.base) {
-    // Restore Rw before unmapping.
-    svcSetMemoryPermission(info.base, info.size, Perm_Rw);
-    svcUnmapPhysicalMemory(info.base, info.size);
-    if (info.reservation) {
-      virtmemLock();
-      virtmemRemoveReservation(info.reservation);
-      virtmemUnlock();
-    }
-    info.base = nullptr;
-    info.size = 0;
-    info.reservation = nullptr;
-  }
-
-  // Also release any alias views still tracked for this mapping. This is a
-  // best-effort cleanup — ordinarily UnmapViews() releases them first.
-  for (int i = 0; i < kMaxNxAliasViews; i++) {
-    auto& av = s_nx_alias_views[i];
-    if (av.base && av.reservation) {
-      virtmemLock();
-      virtmemRemoveReservation(av.reservation);
-      virtmemUnlock();
-    }
-    av = {};
-  }
 }
 
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
                   size_t file_offset) {
-  int idx = static_cast<int>(handle);
-  if (idx < 0 || idx >= kMaxNxFileMappings) return nullptr;
-
-  const auto& info = s_nx_file_mappings[idx];
-  if (!info.base) return nullptr;
-
-  const size_t alloc_length = NxAlignAlloc(length);
-  const size_t perm_length = NxAlignPage(length);
-
-  // Verify the view fits within the logical backing store.
-  if (file_offset + alloc_length > info.size) {
-    REXSYS_ERROR(
-        "memory_switch: MapFileView offset+len=0x{:x}+0x{:x} exceeds mapping 0x{:x}",
-        file_offset, alloc_length, info.size);
-    return nullptr;
-  }
-
-  // ── The primary view: file_offset == 0 ───────────────────────────────
-  // This is the one view that gets real physical backing. If the caller
-  // requested a specific base_address, we can't satisfy it — the primary
-  // backing lives at info.base and cannot be moved. Return info.base and
-  // trust the caller (xmemory.cpp tries multiple bases; the returned one
-  // becomes mapping_base_).
-  if (file_offset == 0) {
-    void* addr = info.base;
-    if (base_address && base_address != addr) {
-      // xmemory.cpp passes mapping_base + 0 here — it will accept the value
-      // we return (it stores it in mapping_base_). To stay compatible with
-      // callers that assume the returned address equals the requested one,
-      // log a warning and still return the backing address.
-      REXSYS_WARN(
-          "memory_switch: MapFileView requested base {} but primary backing is at {}; "
-          "returning backing address (caller must use returned value)",
-          base_address, addr);
-    }
-    uint32_t perm = ToNxPermission(access);
-    if (perm != Perm_Rw) {
-      svcSetMemoryPermission(addr, perm_length, perm);
-    }
-    return addr;
-  }
-
-  // ── Aliased view: file_offset != 0 ───────────────────────────────────
-  // These are the 8 aliased views from xmemory.cpp map_info[]. We cannot
-  // create real VA aliases in userland HOS. Instead, we reserve the VA
-  // range and return it unbacked. Any access will fault — the emulator's
-  // MMIO handler and TranslateVirtual path must redirect these reads/writes
-  // to info.base + file_offset.
-  //
-  // TODO(switch): xmemory.cpp currently does NOT redirect host-pointer
-  // access to aliased ranges through MMIOHandler; only guest-virtual
-  // accesses go through TranslateVirtual. Any code that does
-  //   memcpy(mapping_base + 0xA0000000 + guest_offset, ...)
-  // will fault on Switch. A proper fix requires an xmemory.cpp NX branch
-  // that remaps aliased-range host pointers back to the primary backing.
-  // Until that lands, NX builds will segfault on the first aliased-range
-  // host access. DO NOT ship without completing that work.
-  if (!base_address) {
-    REXSYS_ERROR(
-        "memory_switch: MapFileView aliased view (offset=0x{:x}) requires a fixed base "
-        "address from the caller",
-        file_offset);
-    return nullptr;
-  }
-  if ((reinterpret_cast<uintptr_t>(base_address) & (kNxAllocGranularity - 1)) != 0) {
-    REXSYS_ERROR("memory_switch: MapFileView alias base {} not 2MiB-aligned", base_address);
-    return nullptr;
-  }
-
-  int slot = NxAllocAliasSlot();
-  if (slot < 0) {
-    REXSYS_ERROR("memory_switch: alias view slot table exhausted");
-    return nullptr;
-  }
-
-  // If the requested VA happens to fall inside the primary backing already
-  // (shouldn't, given xmemory.cpp's layout, but guard anyway), just return it.
-  const uintptr_t req = reinterpret_cast<uintptr_t>(base_address);
-  const uintptr_t base = reinterpret_cast<uintptr_t>(info.base);
-  if (req >= base && req + alloc_length <= base + info.size) {
-    s_nx_alias_views[slot].base = base_address;
-    s_nx_alias_views[slot].size = alloc_length;
-    s_nx_alias_views[slot].reservation = nullptr;  // inside primary; no extra res
-    return base_address;
-  }
-
-  // Reserve the VA range so other allocators don't step on it, but do NOT
-  // back it with physical memory.
-  virtmemLock();
-  VirtmemReservation* rv = virtmemAddReservation(base_address, alloc_length);
-  virtmemUnlock();
-  if (!rv) {
-    REXSYS_ERROR(
-        "memory_switch: virtmemAddReservation({}, 0x{:x}) failed for alias view",
-        base_address, alloc_length);
-    return nullptr;
-  }
-
-  s_nx_alias_views[slot].base = base_address;
-  s_nx_alias_views[slot].size = alloc_length;
-  s_nx_alias_views[slot].reservation = rv;
-
-  REXSYS_WARN(
-      "memory_switch: MapFileView created UNBACKED alias {} len=0x{:x} (file_offset=0x{:x}); "
-      "host-pointer access will fault — see TODO(switch) in memory_switch.cpp",
-      base_address, alloc_length, file_offset);
-
-  return base_address;
+  (void)handle;
+  (void)base_address;
+  (void)length;
+  (void)access;
+  (void)file_offset;
+  return nullptr;
 }
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
   (void)handle;
-  if (!base_address) return false;
-
-  // Is this the primary view? (base_address matches a mapping's backing)
-  for (int i = 0; i < kMaxNxFileMappings; i++) {
-    if (s_nx_file_mappings[i].base == base_address) {
-      // Primary view lives as long as the mapping handle; nothing to do here.
-      // CloseFileMappingHandle will release it.
-      return true;
-    }
-  }
-
-  // Is this a tracked alias view?
-  NxAliasView* av = NxFindAliasView(base_address);
-  if (av) {
-    if (av->reservation) {
-      virtmemLock();
-      virtmemRemoveReservation(av->reservation);
-      virtmemUnlock();
-    }
-    *av = {};
-    return true;
-  }
-
-  // Unknown view — treat it as a legacy fully-backed mapping and attempt a
-  // plain unmap. This preserves behaviour for callers that might still use
-  // the old single-view path.
-  const size_t alloc_length = NxAlignAlloc(length);
-  const size_t perm_length = NxAlignPage(length);
-  svcSetMemoryPermission(base_address, perm_length, Perm_Rw);
-  Result rc = svcUnmapPhysicalMemory(base_address, alloc_length);
-  return R_SUCCEEDED(rc);
+  (void)base_address;
+  (void)length;
+  return false;
 }
 
 }  // namespace memory

@@ -1,8 +1,23 @@
-# Switch port — 03: memoria guest (analisi)
+# Switch port — 03: memoria guest
 
-Aggiornato: 2026-09-25 · Ramo `switch-port` · Solo analisi: in questo passo non è stato implementato niente nel runtime.
+Aggiornato: 2026-09-25 · Ramo `switch-port` · Progetto deciso e fase 1 implementata (§8–§10). Le sezioni 1–7 sono l'analisi che ha portato alla decisione.
 
 Legenda: **[codice]** = verificato nei sorgenti del repo. **[HW]** = comportamento del kernel Horizon da confermare sulla console, con `switch-smoke` o con un test mirato.
+
+## Progetto definitivo (2026-09-25)
+
+Deciso dopo `switch-smoke` T1–T8 sulla console:
+
+- **Traduzione con tabella a 256 voci** per tutti gli accessi alla memoria guest: `host = addr + table[addr >> 24]`. In T7 costa +48,5% nel sequenziale (contro +92,3% del `csel` di T6) e +4,1% nel casuale (contro +7,4%).
+- **Backing a blocchi da 2 MiB** presi con `aligned_alloc` e spostati al loro offset con `svcMapProcessCodeMemory` + `svcSetProcessMemoryPermission(RW)`:
+  - il blocco viene preso **su richiesta**, quando il gioco impegna una pagina;
+  - viene **restituito** quando non contiene più pagine guest impegnate.
+
+  T8: 0,023 ms per blocco, 512 MiB in 5,86 ms, dati e atomiche corretti, nessun dato perso allo smontaggio.
+- **Nessun alias.** 0x90 → 0x80, 0x7F → fisica, e le finestre 0xA/0xC/0xE → fisica sono voci della tabella.
+- **Elisione della traduzione per stack (r1) e indirizzi costanti:** è un'**ottimizzazione futura** (§7). Non è implementata.
+
+L'implementazione della fase 1 (correttezza prima delle prestazioni) è descritta in §8–§10.
 
 ## Decisione (2026-09-25, dopo `switch-smoke` T1–T6 sulla console)
 
@@ -15,12 +30,7 @@ Legenda: **[codice]** = verificato nei sorgenti del repo. **[HW]** = comportamen
 - **Heap già tutto assegnato dal loader.** C'è l'heap override, il pool libero è di 3 MiB e `svcSetHeapSize` non può far crescere l'heap (T5). La memoria del gioco va presa da `malloc`, che dispone di tutto il pool: 512 MiB con `malloc` + `memset` in 88 ms.
 - **Progetto B (memoria condivisa):** resta escluso finché non si prova `svcCreateSharedMemory` con più mapping. T2 fa pensare che il kernel rifiuti i mapping multipli anche lì.
 
-Restano due domande aperte:
-
-- quanto costa la traduzione con una tabella (T7, §6);
-- se il commit su richiesta funziona con `svcMapProcessCodeMemory` (T8, §6).
-
-La §7 conta quanti accessi possono saltare la traduzione.
+Le due domande che restavano aperte hanno avuto risposta sulla console: il costo della tabella (T7) e il commit su richiesta con `svcMapProcessCodeMemory` (T8). Vedi il progetto definitivo qui sopra. La §7 conta quanti accessi possono saltare la traduzione.
 
 ## Sintesi
 
@@ -202,9 +212,9 @@ Ordine suggerito:
 3. traduzione in `TranslateVirtual`/`HostToGuestVirtual` e macro codegen;
 4. commit su richiesta e misura della memoria in gioco.
 
-## 6. Test sulla console: `switch-smoke` T1–T8
+## 6. Test sulla console: `switch-smoke` T1–T9
 
-Dopo i passi 1–4 e il verdetto `SMOKE OK/FAIL`, `switch-smoke.nro` esegue otto sonde (`tools/switch-smoke/probes.cpp`). Sono **misure**, non test con esito positivo o negativo, e non cambiano il verdetto.
+Dopo i passi 1–4 e il verdetto `SMOKE OK/FAIL`, `switch-smoke.nro` esegue nove sonde (`tools/switch-smoke/probes.cpp`). Sono **misure**, non test con esito positivo o negativo, e non cambiano il verdetto.
 
 **Log resistente ai crash.** Ogni riga di `smoke.log` scritta dallo smoke segue questi passi:
 
@@ -229,7 +239,8 @@ Limite: `fsync` sul descrittore separato forza i dati di quel descrittore. Le ri
 | T5 | Heap massimo con `svcSetHeapSize` e tempo per allocare 512 MiB | Stampa se il loader fornisce l'heap (override) e l'heap attuale. Ricerca binaria del massimo, **solo per crescita** (malloc usa l'heap attuale), poi il tempo di `svcSetHeapSize(+512 MiB)` e del primo `memset`. Ripristina la dimensione iniziale. Se la crescita non è possibile, misura `malloc` + `memset` di 512 MiB | |
 | T6 | Costo della traduzione del progetto A | 100 M letture + scritture u32 big-endian (volatili, `rev`, come `REX_LOAD/STORE_U32`) su 64 MiB. 3 modalità × 2 schemi di accesso (sequenziale, pseudo-casuale LCG) con gli stessi indirizzi | Differenza % rispetto all'accesso diretto |
 | T7 | Costo del progetto A con una tabella | Come T6, con gli stessi schemi e indirizzi, ma con `host = addr + table[addr >> 24]` su 256 `u64`. Rifà le misure dirette nello stesso run. Prima verifica la codifica della tabella su 9 indirizzi | Differenza % rispetto al diretto; ms a confronto con T6 |
-| T8 | Commit su richiesta con `svcMapProcessCodeMemory` | Riserva 0xA0000000 byte con `virtmemFindCodeMemory`. Sposta al suo interno 256 blocchi da 2 MiB presi con `aligned_alloc(2 MiB)`, uno ogni 10 MiB, e li porta a RW con `svcSetProcessMemoryPermission`. Scrive in ogni blocco un motivo diverso e rilegge tutto. Esegue ldaxr/stlxr e CAS a 32 e 64 bit sul primo e sull'ultimo blocco. Smonta i blocchi e controlla le sorgenti | Tempi per blocco e totali, esito di dati e atomiche. "LOST" se i dati scritti tramite la destinazione non tornano nella sorgente |
+| T8 | Commit su richiesta con `svcMapProcessCodeMemory` | Riserva 0xA0000000 byte con `virtmemFindCodeMemory`. Sposta al suo interno 256 blocchi da 2 MiB presi con `aligned_alloc(2 MiB)`, uno ogni 10 MiB, e li porta a RW con `svcSetProcessMemoryPermission`. Scrive in ogni blocco un motivo diverso e rilegge tutto. Esegue ldaxr/stlxr e CAS a 32 e 64 bit sul primo e sull'ultimo blocco. Smonta i blocchi e controlla le sorgenti | Tempi per blocco e totali, esito di dati e atomiche. "LOST" se i dati scritti tramite la destinazione non tornano nella sorgente. Una riga per blocco solo per errori o tempi oltre 3× la media; "about to" solo per il primo e l'ultimo blocco di ogni serie |
+| T9 | Un fault su memoria guest si gestisce e si riprende? Quanto costa? | Sulla memoria del runtime (step 3): porta una pagina da 4 KiB a R-- con `svcSetProcessMemoryPermission` e ci scrive. Un gestore installato con `rex::arch::ExceptionHandler::Install` (dopo quello dell'`MMIOHandler`) riporta la pagina a RW e riprende l'istruzione. Poi 1000 giri completi, le sole SVC per confronto, e un fault in lettura su una pagina `---`. Infine il write-watch del runtime: `EnablePhysicalMemoryAccessCallbacks` su memoria fisica e scrittura tramite la finestra 0xC | Numero di fault, valore scritto, µs per giro. Per il write-watch: chiamate al callback di invalidazione e valore letto tramite la finestra 0xA (§10) |
 
 ### T4: cosa fa `jitCreate` (libnx 4.12.0 installata)
 
@@ -262,6 +273,11 @@ Nella variante sequenziale "50% finestre" c'è un contatore in più (la finestra
 | T6 | Sequenziale: diretto 3,50 ns/iter; progetto A +92% (tutto sotto 0xA0000000) e +124% (50% nelle finestre). Casuale: diretto 34,5 ns/iter; progetto A +7,4% e +12,9% |
 
 Il +92% sequenziale è il caso peggiore: il ciclo contiene solo l'accesso, e le 5 istruzioni di traduzione lo raddoppiano. Nel caso casuale domina il cache miss e la traduzione quasi non si vede.
+
+### Risultati T7 e T8 sulla console (2026-09-25)
+
+- **T7:** con la tabella il sequenziale costa +48,5% (T6 `csel`: +92,3%) e il casuale +4,1% (T6: +7,4%). Il progetto definitivo usa quindi la tabella.
+- **T8:** 0,023 ms per blocco da 2 MiB, 512 MiB in 5,86 ms. Dati e atomiche (ldaxr/stlxr, CAS a 32 e 64 bit) sono corretti. Allo smontaggio nessun dato è andato perso: la sorgente contiene quanto scritto tramite la destinazione.
 
 ### T7: codice generato a confronto con T6
 
@@ -325,3 +341,99 @@ Basta emettere una macro diversa, per esempio `REX_LOAD_U32_STACK`, uguale all'a
 Il generatore traccia già i `lis` per l'MMIO, ma solo come bit "è MMIO": `mmio_base_regs` in `builder_context.h:44`, impostato da `build_lis` in `memory.cpp:27`. Se tracciasse il valore (`lis` + `addi`/`ori`), potrebbe scegliere la finestra durante la generazione. Il valore andrebbe azzerato alle etichette, e dopo le chiamate per r0 e r3–r12. `mmio_base_regs` oggi non si azzera alle etichette: per decidere la traduzione serve la versione conservativa.
 
 **In tutto, il 36,7% degli accessi (27,5% + 9,2%) può evitare la traduzione a runtime; tra gli store, la metà.** Il costo misurato in T6/T7 resta sul 63% degli accessi, cioè quelli basati su puntatori.
+
+**Ottimizzazione futura, non implementata.** Con la tabella, un accesso relativo a r1 o a un indirizzo costante nella fascia diretta può saltare `lsr` + `ldr` della voce e tornare a `base + a`. Per gli indirizzi costanti in un'altra finestra la voce si può risolvere durante la generazione. Richiede una macro dedicata nel generatore (§9) e la verifica che r1 resti sempre nello stack guest. La fase 1 traduce tutti gli accessi.
+
+
+## 8. Implementazione, fase 1: memoria guest su NX
+
+Tutto dietro `REX_PLATFORM_NX`; le altre piattaforme non cambiano.
+
+| File | Ruolo |
+|---|---|
+| `src/core/memory_switch.cpp` | riscritto: prenotazione dell'arena, tabella, commit/decommit a blocchi da 2 MiB con conteggio dei riferimenti, protezione |
+| `include/rex/memory/guest_table.h` | nuovo: `rex_guest_table[256]`, `GuestToHost`, `HostToGuest` |
+| `include/rex/memory/utils.h` | API `rex::memory::nx::ReserveGuestArena` / `ReleaseGuestArena` / `GetGuestArenaStats` |
+| `src/system/xmemory.cpp`, `include/rex/system/xmemory.h` | ramo NX di `Memory::Initialize`, membase degli heap, transizioni di commit degli heap, `TranslateVirtual`, `HostToGuestVirtual`, write-watch (§10) |
+| `include/rex/ppc/function.h` | conversione host → guest dei puntatori restituiti o passati al guest |
+| `src/core/exception_handler_switch.cpp` | stack di eccezione da 64 KiB (§10) |
+
+### Arena e tabella
+
+L'arena è una sola prenotazione `virtmem` nella regione codice (`virtmemFindCodeMemory`, dove `svcMapProcessCodeMemory` accetta le destinazioni), allineata a 2 MiB. L'indirizzo lo sceglie il backend: su NX il ciclo `1 << n` di `Initialize` non si usa più. Questo risolve il problema di `mapping_base` di §4.
+
+| Host | Contenuto |
+|---|---|
+| `V = arena + 0` … `+0x8FFFFFFF` | guest `0x00000000–0x8FFFFFFF` (`virtual_membase`) |
+| `P = arena + 0x90000000` … `+512 MiB + 4 KiB` | memoria fisica guest (`physical_membase`), arrotondata a 2 MiB |
+
+| Voce `rex_guest_table[i]` | Valore |
+|---|---|
+| `0x00–0x7E`, `0x80–0x8F` | `V` |
+| `0x7F` | `P - 0x7F000000` (writeback GPU → fisica 0) |
+| `0x90–0x9F` | `V - 0x10000000` (XEX 4 KiB → stessa memoria di 0x80) |
+| `0xA0–0xBF` | `P - 0xA0000000` |
+| `0xC0–0xDF` | `P - 0xC0000000` |
+| `0xE0–0xFF` | `P - 0xE0000000 + 0x1000` (come `host_address_offset` dell'heap 0xE) |
+
+Ogni heap riceve una membase tale che `membase + heap_base` sia l'indirizzo host della sua prima pagina:
+
+- `v90000000`: `V - 0x10000000`;
+- `vA0000000`: `P - 0xA0000000`;
+- `vC0000000`: `P - 0xC0000000`;
+- `vE0000000`: `P - 0xE0000000`; i 4 KiB li aggiunge l'heap stesso.
+
+Così `TranslateRelative`, le protezioni e il write-watch degli heap cadono sulle stesse pagine della tabella. Lo scostamento di 4 KiB di 0xE è lo stesso per heap, runtime e codice generato, quindi il vecchio disallineamento di `REX_PHYS_HOST_OFFSET` su NX (§1) sparisce.
+
+### Commit e decommit
+
+- Il backend tiene un contatore di riferimenti per ogni pagina host da 4 KiB e, per ogni blocco da 2 MiB, il numero di pagine referenziate.
+- **Primo riferimento a un blocco non mappato:** `aligned_alloc(2 MiB)`, `memset(0)`, `svcMapProcessCodeMemory`, `svcSetProcessMemoryPermission(RW)`. Una pagina che torna referenziata in un blocco rimasto mappato viene azzerata.
+- **Ultima pagina rilasciata:** RW, `svcUnmapProcessCodeMemory`, `free`.
+- **Un riferimento per heap e per pagina.** Più heap condividono le stesse pagine host: l'heap fisico e le finestre 0xA/0xC/0xE, oppure 0x80 e 0x90. Per questo `xmemory.cpp` chiama il backend solo alle **transizioni di stato del singolo heap** (`BaseHeap::NxCommitPages` / `NxDecommitPages`). Una pagina resta impegnata finché almeno un heap la usa.
+- **Punti agganciati:** `AllocFixed`, `AllocRange`, `Decommit`, `Release`, `Dispose`, `Reset`, `Restore`.
+- **Protezione:** `svcSetProcessMemoryPermission` a 4 KiB, solo sui blocchi mappati.
+
+### Differenze rispetto al desktop da tenere presenti
+
+| Punto | Desktop | NX |
+|---|---|---|
+| Pre-commit dei 512 MiB fisici all'avvio | sì | no, su richiesta come il resto |
+| `Decommit` / `Release` | solo tabella (+ `Protect` NoAccess con `protect_on_release`) | restituiscono la memoria quando il blocco si svuota |
+| Accesso a memoria mai impegnata | riesce (le viste sono mappate RW per intero) | in un blocco mappato riesce, RW come sul desktop; in un blocco non mappato va in **fault** |
+| Aritmetica di puntatori host oltre il confine di una finestra da 16 MiB (es. `TranslateVirtual(0x8FFFFF00) + 0x200`) | contigua | **non contigua**: dopo `V + 0x90000000` c'è la memoria fisica |
+| `HostToGuestVirtual` e `function.h` su un puntatore alla memoria fisica | la finestra da cui viene il puntatore | sempre la finestra 0xA, perché la vista d'origine non è ricostruibile |
+| Range MMIO (`AddVirtualMappedRange`) | pagine protette NoAccess | nessuna protezione (§10) |
+
+## 10. MMIO e write-watch
+
+### Come funziona oggi (desktop)
+
+- **MMIO riconosciuto dal generatore.** Il generatore marca come base MMIO i registri caricati con `lis` ≥ `0x7F00` (`mmio_base_regs`) e gli accessi seguiti da `eieio`. Per questi emette `REX_MM_LOAD_*`/`REX_MM_STORE_*`, che per `0x7F000000–0x7FFFFFFF` chiamano `MMIOHandler::CheckLoad`/`CheckStore`. Non c'è nessun fault.
+- **MMIO non riconosciuto.** `Memory::AddVirtualMappedRange` porta il range a NoAccess nella vista 0x7F, quindi un accesso host o guest non riconosciuto va in fault. `MMIOHandler::ExceptionCallback` trova il range, decodifica l'istruzione ARM64/x86 (`TryDecodeLoadStore`), chiama il callback e riprende dopo l'istruzione.
+- **Write-watch della memoria fisica.** La GPU (`shared_memory.cpp`, `primitive_processor.cpp`) chiama `EnablePhysicalMemoryAccessCallbacks`, che mette a sola lettura le pagine nelle viste 0xA/0xC/0xE. Quando il guest ci scrive:
+  1. l'accesso va in fault;
+  2. `MMIOHandler` non trova il range;
+  3. `Memory::AccessViolationCallback` chiama `PhysicalHeap::TriggerCallbacks`;
+  4. i callback di invalidazione girano, la pagina torna RW e l'esecuzione riprende.
+
+  Le scritture tramite `physical_membase_` **non** vanno in fault, perché su desktop sono un'altra vista delle stesse pagine: GPU e data provider scrivono lì apposta.
+- **Consegna delle eccezioni:** segnali su POSIX, VEH su Windows, Mach su macOS. Su Switch passa da `__libnx_exception_handler` in `exception_handler_switch.cpp`, che inoltra alla stessa lista di gestori.
+
+### Cosa cambia su Switch (implementato)
+
+- **Una sola pagina host.** Senza viste separate la protezione colpisce l'unica pagina host. Vanno quindi in fault sia le scritture guest da qualunque finestra, sia quelle host tramite `physical_membase_`.
+  - `Memory::NxPhysicalAccessViolation` riceve il fault nell'intervallo `P…P+512 MiB+4 KiB` e chiama `TriggerCallbacks` su **tutte e tre** le finestre. `EnablePhysicalMemoryAccessCallbacks` arma tutte e tre, e chiamandone una sola rimarrebbe un bit di watch su una pagina già tornata RW.
+  - Se nessuna finestra osserva la pagina e l'heap fisico la dà per scrivibile, la riporta a RW: è lo stesso recupero del desktop.
+- **MMIO.** La finestra 0x7F è tradotta sulla memoria fisica. Proteggere il range MMIO vorrebbe dire proteggere la fisica da `0x00C80000` in poi. Su NX `AddVirtualMappedRange` quindi registra solo il range.
+  - Gli accessi riconosciuti dal generatore (`REX_MM_*`) funzionano come prima.
+  - **Quelli non riconosciuti finiscono in silenzio nella memoria fisica**, invece di andare in fault.
+- **Stack di eccezione.** libnx esegue il gestore su `__nx_exception_stack`: uno stack debole di **0x400 byte**, con un solo `ThreadExceptionDump` globale (verificato nel disassemblato di `__libnx_exception_entry`).
+  - Il gestore occupa già da solo circa 0x320 byte per `HostThreadContext`, più l'`Exception`, e i callback prendono lock e girano nel sistema di memoria. Ogni fault gestito sforava quindi lo stack.
+  - Ora `exception_handler_switch.cpp` definisce uno stack da 64 KiB.
+
+### Rischi aperti
+
+- **Fault contemporanei su due thread.** Stack e dump di libnx sono globali, quindi due thread in fault nello stesso momento si corrompono a vicenda. Con il write-watch attivo (GPU + thread guest) può succedere. Servirebbe un punto d'ingresso delle eccezioni con contesto per thread al posto di `__libnx_exception_entry`: non fatto in questa fase.
+- **Lock nei callback.** Una scrittura host su una pagina osservata ora va in fault, e i callback di invalidazione girano sul thread che scrive. Se quel thread tiene un lock che serve al callback (per esempio il mutex di `SharedMemory`), si ha un deadlock. Da verificare nei percorsi GPU che scrivono memoria guest tramite `TranslatePhysical`.
+- **Costo.** T9 misura il giro completo fault → gestore → ripresa.
