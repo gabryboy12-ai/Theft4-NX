@@ -405,6 +405,60 @@ Così `TranslateRelative`, le protezioni e il write-watch degli heap cadono sull
 | `HostToGuestVirtual` e `function.h` su un puntatore alla memoria fisica | la finestra da cui viene il puntatore | sempre la finestra 0xA, perché la vista d'origine non è ricostruibile |
 | Range MMIO (`AddVirtualMappedRange`) | pagine protette NoAccess | nessuna protezione (§10) |
 
+## 9. Macro del codice generato su NX
+
+Le macro vengono dal template del generatore, `resources/templates/codegen/init_h.inja`. Il ramo `#if REX_PLATFORM_NX` include `rex/memory/guest_table.h` e definisce ogni accesso come `rex::memory::GuestToHost(addr)`: `REX_RAW_ADDR`, `REX_LOAD_*`, `REX_STORE_*`, `REX_LOAD_STRING` e il ramo non-MMIO di `REX_MM_*`.
+
+- **Altre piattaforme.** Il ramo `#else` è il testo di prima. Le `REX_MM_*` ora passano da `REX_MMIO_FALLBACK_HOST(addr)`, che fuori da NX si espande esattamente in `base + (addr) + REX_PHYS_HOST_OFFSET(addr)`.
+- **`gta4-recomp/generated/gta4_init.h` non è modificato.** È un file generato: le nuove macro entrano nel codice del gioco quando `init_h.inja` viene rigenerato con `rexglue codegen`. Il codice `gta4_recomp.*.cpp` resta com'è, perché usa solo i nomi delle macro.
+- **`base` resta il parametro di ogni funzione**, cioè l'indirizzo host del guest 0. Lo usano `REX_LOOKUP_FUNC` (la tabella delle funzioni sta a `0x83300000`, nella fascia diretta) e le funzioni host che ricevono `base`.
+
+### Dove sta il puntatore alla tabella
+
+| Opzione | Costo per accesso | Perché no / sì |
+|---|---|---|
+| Campo in `PPCContext` | un load dal contesto, ripetuto dopo ogni chiamata (il contesto è un riferimento `__restrict` passato a tutte le funzioni) | cambia il layout del contesto e va impostato in ogni punto che crea un contesto |
+| Nuovo parametro delle funzioni | nessuno | cambia la firma `REX_FUNC` e tutte le chiamate generate `sub_X(ctx, base)`: richiede di rigenerare tutto |
+| `base` = tabella | nessuno | `function.h` e gli hook usano `base` come membase (`GuestPtr`, `v - base`) |
+| **Array globale `hidden`** (scelta) | nessun load per l'indirizzo della tabella: `adrp` + `add` PC-relative, calcolati una volta per funzione | nessuna modifica a firme o contesto |
+
+### Disassemblato di funzioni generate
+
+Due funzioni vere di `gta4_recomp.0.cpp`, compilate in scratch con l'header generato e le macro nuove sostituite (GCC 16.1, `-O3 -march=armv8-a -mtune=cortex-a57`, stessi flag dell'SDK).
+
+`sub_821465B0`, inizio (un `lis`/`lwz` da indirizzo costante e due load dipendenti):
+
+```
+NX (tabella)                                   Prima (base + addr)
+adrp x6, rex_guest_table                       mov  x2, #0xc000
+add  x2, x6, :lo12:rex_guest_table             movk x2, #0x82c6, lsl #16
+mov  x1, #0xc3d8                               add  x2, x1, x2
+movk x1, #0x82c6, lsl #16                      ldr  w2, [x2, #984]        ; lwz r11,-15400(r11)
+ldr  x3, [x2, #1040]      ; table[0x82]        rev  w6, w2
+ldr  w4, [x3, x1]         ; lwz r11,-15400(r11) ...
+rev  w5, w4                                    add  w2, w3, #0x4
+...                                            ldr  w2, [x1, w2, uxtw]    ; lwz r10,4(r11)
+add  w1, w5, #0x4
+lsr  w3, w1, #24
+ldr  x3, [x2, x3, lsl #3] ; table[addr >> 24]
+ldr  w3, [x3, w1, uxtw]   ; lwz r10,4(r11)
+```
+
+Ciclo di `sub_821463B0` (ricerca binaria, `lwzx r11,r11,r7`):
+
+```
+NX                                             Prima
+add  w5, w11, w4                               add  w9, w11, w5
+lsr  w2, w5, #24                               ldr  w3, [x1, w9, uxtw]
+ldr  x2, [x10, x2, lsl #3]
+ldr  w2, [x2, w5, uxtw]
+```
+
+- **Tabella:** l'indirizzo si ottiene con `adrp` + `add` una sola volta per funzione (`x2`/`x10`), senza load di puntatori.
+- **Per accesso:** `lsr` + `ldr` della voce. La somma `addr + voce` entra nell'indirizzamento `[x, w, uxtw]` di load e store, come nell'accesso diretto.
+- **Indirizzi costanti:** GCC calcola già l'indice, per esempio `ldr x3, [x2, #1040]` = `table[0x82]` e `ldr x3, [x6]` = `table[0]` per `li r11,0`. Resta solo il load della voce, che è l'ottimizzazione futura di §7.
+- **Dimensioni:** `sub_821465B0` passa da 57 a 71 istruzioni, `sub_821463B0` da 86 a 96.
+
 ## 10. MMIO e write-watch
 
 ### Come funziona oggi (desktop)
