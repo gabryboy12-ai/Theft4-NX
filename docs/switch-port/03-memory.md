@@ -488,7 +488,11 @@ ldr  w2, [x2, w5, uxtw]
 
 ### Rischi aperti
 
-- **Fault contemporanei su due thread.** Stack e dump di libnx sono globali, ma il kernel non fa entrare due thread nel gestore insieme. In mesosphere (`kern_exception_handlers.cpp`, `KProcess::EnterUserException`) un thread in fault diventa l'`exception thread` del processo prima di ricevere l'eccezione in user mode. Un secondo thread in fault aspetta nel kernel finché il primo non esegue `svcReturnFromException` (`LeaveUserException`). Quindi stack e dump sono usati da un thread alla volta: **nessuna corruzione, ma i fault di tutto il processo vengono serializzati**.
+- **Fault contemporanei su due thread.** Il kernel non fa entrare due thread nel gestore insieme. In mesosphere (`kern_exception_handlers.cpp`, `KProcess::EnterUserException`) un thread in fault diventa l'`exception thread` del processo prima di ricevere l'eccezione in user mode. Un secondo thread in fault aspetta nel kernel finché il primo non esegue `svcReturnFromException` (`LeaveUserException`).
+
+  Con l'ingresso di libnx però la protezione non valeva per il gestore: `__libnx_exception_entry` chiama `svcReturnFromException` **prima** di eseguire `__libnx_exception_handler`, quindi il gestore girava fuori dalla zona esclusiva, su uno stack e un dump globali. In più, al suo ritorno libnx chiama sempre `svcBreak` (run 5, `04-threads-exit.md` §6).
+
+  Ora `exception_handler_switch.cpp` fornisce il proprio `__libnx_exception_entry` (in libnx è weak). Il gestore gira dentro la zona esclusiva e riprende con `svcReturnFromException(0)`. Stack e contesto sono usati da un thread alla volta: **nessuna corruzione, ma i fault di tutto il processo vengono serializzati**.
 
   Il rischio vero è il **deadlock**. Se il thread A è nel gestore e aspetta un lock tenuto dal thread B, e B va in fault mentre tiene quel lock, B aspetta nel kernel che A esca e A aspetta B. Il gestore prende `global_critical_region_` e il mutex dell'arena: nessun codice deve andare in fault su una pagina osservata mentre tiene uno dei due.
 

@@ -165,3 +165,52 @@ Lo smoke verifica anche che:
 Se uno di questi controlli fallisce: `SMOKE FAIL at module base`.
 
 Verifica sui numeri del run 4: `main` a runtime `0x39f379420` meno `main` nell'ELF (`0x2420`) dà `0x39f377000`, cioè l'inizio del blocco R-X di `main`. Con `crash_match.py` (PC = `main`, ritorno dopo un `bl` in `main`) `0x39f377000` è fra le basi coerenti. Da ora la base stampata dallo smoke permette di scegliere direttamente quella giusta.
+
+## 6. Run 5: User Break dopo il primo fault gestito
+
+### Crash report
+
+- User Break, Break Reason 0x0, modulo `switch-smoke` a base `0x13f0a5000`;
+- PC +0xd793c, LR +0xdd90c, ritorni +0x1e7e0, +0x35dc, +0x3040.
+
+ELF: la build del commit `51798c4f` (i commit successivi toccano solo documenti e README). Con `crash_match.py`, PC, LR e i primi due ritorni danno **una sola base, `0x13f0a5000`**. L'ultimo ritorno, +0x3040, cade dopo un `udf` e non dopo un `bl`: è la fine del percorso sui frame pointer, non un chiamante reale.
+
+| Offset | Funzione (`addr2line -f -C -i`) |
+|---|---|
+| PC +0xd793c | `svcBreak` (libnx `svc.s:234`) |
+| LR +0xdd90c | `__libnx_exception_returnentry` (libnx `exception.s:188`) |
+| +0x1e7e0 | `RunProbes`: il `bl` a +0x1e7dc chiama `ProbeFaultRoundTrip` (T9) |
+| +0x35dc | `main` → `RunProbes` |
+
+### Causa
+
+T9 scrive sulla sua pagina resa di sola lettura. Il fault passa da `MMIOHandler` (nessun range) a `T9Handler`, che rimette RW e restituisce `true`. Il nostro `__libnx_exception_handler` ritorna, e lì si ferma tutto: nel disassemblato di libnx 4.12.0, `__libnx_exception_returnentry` è
+
+```
+bl  __libnx_exception_handler
+mov w0, wzr ; mov x1, #0 ; mov x2, #0
+bl  svcBreak          // sempre
+```
+
+Il ritorno dal gestore non riprende niente. `__libnx_exception_entry` ha già riscritto pc/sp del frame del kernel verso `returnentry` e chiamato `svcReturnFromException` prima di eseguire il gestore. Il commento in `exception_handler_switch.cpp` ("returning ... causes libnx to svcReturnFromException and resume at ctx->pc") era sbagliato.
+
+Di conseguenza, su Switch nessun fault era mai stato ripreso: né MMIO né write-watch né T9/T10. Inoltre il gestore girava fuori dalla zona esclusiva del kernel, su stack e dump condivisi (vedi `03-memory.md` §10).
+
+### Correzione (`exception_handler_switch.cpp`, solo NX)
+
+`__libnx_exception_entry` è weak in libnx (`nm libnx.a`: `W`). Il file ne definisce uno proprio, in assembly. Il kernel entra con x0 = tipo e x1 = `ThreadExceptionFrameA64` nella process-local region (x0–x8, lr, sp, pc, pstate, esr, far). x9–x29 e i registri SIMD sono ancora quelli del thread.
+
+1. Passa a `__nx_exception_stack`. Condividerlo è sicuro, perché la zona esclusiva del kernel è ancora attiva.
+2. Salva x9–x29, q0–q31, fpsr e fpcr.
+3. Chiama `rex_nx_exception_dispatch`, che costruisce `HostThreadContext` da frame e registri salvati, esegue la lista dei gestori e riscrive i registri modificati (x0–x8, lr, sp, pc nel frame; il resto nell'area salvata).
+4. Ripristina i registri e chiama `svc 0x28` (`svcReturnFromException`):
+   - `0`: il kernel ricarica il frame e riprende al pc, eventualmente fatto avanzare dal gestore;
+   - `0xF801` (non gestito): il kernel tratta l'eccezione come non gestita con il contesto **originale**. Il crash report mostra quindi il PC vero invece di `svcBreak`.
+
+Verificato nel link: crt0 salta al nuovo `__libnx_exception_entry` e `libnx.a(exception.o)` non viene più incluso.
+
+### Log del run 5
+
+Il log conteneva solo 3 righe, tutte dell'SDK. Dal run 5 lo smoke configura la policy di diagnostica, quindi il file sink dell'SDK tiene `smoke.log` aperto in scrittura. Il FS di Horizon rifiuta di aprire in scrittura un file già aperto in scrittura da un altro handle, quindi ogni `open()` di `DurableAppend` falliva in silenzio.
+
+Ora l'SDK non ha un file sink proprio: un sink (`DurableSink`) scrive ogni riga con lo stesso percorso open/write/fsync/close delle righe dello smoke, sotto un mutex, nello stesso ordine. Un'apertura fallita viene segnalata a schermo.
