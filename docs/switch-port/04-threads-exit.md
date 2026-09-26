@@ -119,3 +119,22 @@ Alla pressione di + lo smoke esce da `main`: `exit` → `__call_exitprocs` → `
 - Il distruttore e le altre piattaforme non cambiano.
 
 Anche gli altri oggetti statici con distruttore non vengono mai distrutti su NX. Finché non tengono thread o risorse del kernel questo non causa crash, ma va tenuto presente per il runtime completo.
+
+### Base del modulo nello smoke
+
+Nel run 4 lo smoke stampava `module base (__start__) 0x0`. Il motivo: `__start__` è un simbolo **assoluto** di `switch.ld` (`PROVIDE_HIDDEN(__start__ = 0x0)`, tipo `a` in `nm`), e un link PIE non lo riloca.
+
+Ora lo smoke usa `_start`, l'etichetta d'ingresso del crt0 di libnx:
+
+- sta in `.text` all'indirizzo ELF 0 (tipo `T`);
+- il suo slot nella GOT ha una rilocazione relativa (`.relr.dyn`), quindi a runtime vale base + 0.
+
+Lo smoke verifica anche che:
+
+- il blocco di codice R-X restituito da `svcQueryMemory` inizi esattamente alla base;
+- la base sia allineata a pagina;
+- a +0x10 ci sia la magic `NRO0`, che elf2nro scrive nell'header del file caricato.
+
+Se uno di questi controlli fallisce: `SMOKE FAIL at module base`.
+
+Verifica sui numeri del run 4: `main` a runtime `0x39f379420` meno `main` nell'ELF (`0x2420`) dà `0x39f377000`, cioè l'inizio del blocco R-X di `main`. Con `crash_match.py` (PC = `main`, ritorno dopo un `bl` in `main`) `0x39f377000` è fra le basi coerenti. Da ora la base stampata dallo smoke permette di scegliere direttamente quella giusta.

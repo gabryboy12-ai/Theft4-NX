@@ -56,9 +56,11 @@ bool g_logging_ready = false;
 
 }  // namespace
 
-// Start of the NRO image; switch.ld places it at ELF address 0, so its runtime
-// address is the module base.
-extern "C" char __start__;
+// Start of the NRO image: libnx crt0's entry label, first thing in .text at
+// ELF address 0, so its runtime address is the module base. Not switch.ld's
+// __start__: that one is an absolute symbol (PROVIDE_HIDDEN(__start__ = 0x0)),
+// which a PIE link does not relocate, so &__start__ is 0 at run time.
+extern "C" char _start;
 int main(int argc, char** argv);
 
 namespace {
@@ -131,15 +133,28 @@ void StepLogging() {
 // Runtime addresses to match crash-report PCs against the ELF:
 // ELF address = runtime address - module base.
 void StepModuleBase() {
-  const u64 module_base = reinterpret_cast<u64>(&__start__);
+  const u64 module_base = reinterpret_cast<u64>(&_start);
   const u64 main_address = reinterpret_cast<u64>(&main);
   MemoryInfo info{};
   u32 page_info = 0;
   const Result rc = svcQueryMemory(&info, &page_info, main_address);
-  SMOKE_INFO("module base (__start__) 0x%" PRIx64 ", main 0x%" PRIx64 " = base + 0x%" PRIx64,
+  SMOKE_INFO("module base (_start) 0x%" PRIx64 ", main 0x%" PRIx64 " = base + 0x%" PRIx64,
              module_base, main_address, main_address - module_base);
-  SMOKE_INFO("  code block of main: 0x%" PRIx64 "+0x%" PRIx64 " (rc 0x%x)", info.addr, info.size,
-             rc);
+  SMOKE_INFO("  code block of main: 0x%" PRIx64 "+0x%" PRIx64 " type 0x%x perm %u (rc 0x%x)",
+             info.addr, info.size, info.type, info.perm, rc);
+  // The loaded image starts with crt0 (b startup; .word __nx_mod0 - _start)
+  // and the NRO header, magic "NRO0" at +0x10; the text segment is the
+  // R-X code block that starts at the base.
+  uint32_t nro_magic = 0;
+  std::memcpy(&nro_magic, reinterpret_cast<const void*>(module_base + 0x10), sizeof(nro_magic));
+  const bool ok = R_SUCCEEDED(rc) && info.addr == module_base && info.perm == Perm_Rx &&
+                  module_base % 0x1000 == 0 && nro_magic == 0x304F524Eu;  // "NRO0"
+  SMOKE_INFO("  base check: code block starts at the base, R-X, page aligned, \"NRO0\" at +0x10 "
+             "(%08X) -> %s",
+             nro_magic, ok ? "ok" : "MISMATCH");
+  if (!ok) {
+    Fail("module base", "_start " + Hex(module_base) + " is not the start of the NRO image");
+  }
 }
 
 // ── 2. Address space ────────────────────────────────────────────────────────
