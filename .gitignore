@@ -637,6 +637,11 @@ buttons_360.xtd
 # RexGlue GTA IV generated C++ is tracked so a fresh clone can build without
 # regenerating from a private game executable.
 glue/rexglue-sdk-main/gta4-recomp/assets/
+# Switch port: the generated C++ is translated from the game executable and
+# must be regenerated locally ('rexglue codegen gta4_manifest.toml'); it is
+# not committed here. Files already tracked upstream stay tracked until they
+# are removed from the index or from history.
+glue/rexglue-sdk-main/gta4-recomp/generated/
 
 tools/rage_fxc_extractor/build/
 *.exe
