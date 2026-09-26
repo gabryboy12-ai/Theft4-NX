@@ -14,7 +14,7 @@
 //      XThread::SetActiveCpu (soft and hard affinity, core 3 left to host
 //      workers)
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
-// followed by the exploratory probes T1-T9 in probes.cpp (alias primitives,
+// followed by the exploratory probes T1-T10 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
 //
 // Every smoke line is made durable before the next operation: the SDK logger

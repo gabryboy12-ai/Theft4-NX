@@ -488,7 +488,17 @@ ldr  w2, [x2, w5, uxtw]
 
 ### Rischi aperti
 
-- **Fault contemporanei su due thread.** Stack e dump di libnx sono globali, quindi due thread in fault nello stesso momento si corrompono a vicenda. Con il write-watch attivo (GPU + thread guest) può succedere. Servirebbe un punto d'ingresso delle eccezioni con contesto per thread al posto di `__libnx_exception_entry`: non fatto in questa fase.
+- **Fault contemporanei su due thread.** Stack e dump di libnx sono globali, ma il kernel non fa entrare due thread nel gestore insieme. In mesosphere (`kern_exception_handlers.cpp`, `KProcess::EnterUserException`) un thread in fault diventa l'`exception thread` del processo prima di ricevere l'eccezione in user mode. Un secondo thread in fault aspetta nel kernel finché il primo non esegue `svcReturnFromException` (`LeaveUserException`). Quindi stack e dump sono usati da un thread alla volta: **nessuna corruzione, ma i fault di tutto il processo vengono serializzati**.
+
+  Il rischio vero è il **deadlock**. Se il thread A è nel gestore e aspetta un lock tenuto dal thread B, e B va in fault mentre tiene quel lock, B aspetta nel kernel che A esca e A aspetta B. Il gestore prende `global_critical_region_` e il mutex dell'arena: nessun codice deve andare in fault su una pagina osservata mentre tiene uno dei due.
+
+  **T10** (`switch-smoke`) lo misura: 3 thread, uno per core, 10.000 fault di scrittura ciascuno su pagine fisiche osservate diverse. Verifica:
+  - che ogni scrittura riletta abbia il valore giusto;
+  - che ogni pagina abbia esattamente 10.000 callback di invalidazione;
+  - il numero massimo di thread presenti insieme nel callback, con un'attesa di 2 µs per allargare la finestra. Atteso 1: con 2 o più lo stack unico sarebbe un problema reale;
+  - il costo per fault quando i core sono in competizione.
+
+  Un blocco oltre 60 s viene riportato come `TIMEOUT` (possibile deadlock).
 - **Lock nei callback.** Una scrittura host su una pagina osservata ora va in fault, e i callback di invalidazione girano sul thread che scrive. Se quel thread tiene un lock che serve al callback (per esempio il mutex di `SharedMemory`), si ha un deadlock. Da verificare nei percorsi GPU che scrivono memoria guest tramite `TranslatePhysical`.
 - **Costo.** T9 misura il giro completo fault → gestore → ripresa.
 

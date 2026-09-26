@@ -1,4 +1,4 @@
-// switch-smoke probes T1-T9: open questions of the Horizon guest-memory designs
+// switch-smoke probes T1-T10: open questions of the Horizon guest-memory designs
 // (docs/switch-port/03-memory.md).
 //
 //   T1 svcMapProcessCodeMemory + svcSetProcessMemoryPermission as an RW alias
@@ -12,6 +12,8 @@
 //      with svcMapProcessCodeMemory, made RW, used, atomics, then unmapped
 //   T9 fault round trip on guest memory (read-only / no-access page, handler
 //      restores RW and resumes) and the runtime's physical write watch
+//   T10 concurrent write faults: 3 threads, one per core, 10,000 faults each
+//      on separate watched pages (is libnx's single exception stack a problem?)
 //
 // Rules: each probe logs BEGIN before doing anything; every syscall that may
 // fault or kill the process is preceded by an "about to" line (each line is
@@ -23,11 +25,13 @@
 #include "probes.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,6 +40,7 @@
 #include <rex/exception_handler.h>
 #include <rex/memory/utils.h>
 #include <rex/system/xmemory.h>
+#include <rex/thread.h>
 
 namespace {
 
@@ -1314,6 +1319,181 @@ void ProbeFaultRoundTrip(rex::memory::Memory* memory) {
   SMOKE_INFO("T9 END");
 }
 
+// ── T10 ─────────────────────────────────────────────────────────────────────
+
+// Concurrent write faults: three threads, one per core, each on its own
+// watched physical page, 10,000 times (arm the watch, write -> fault ->
+// runtime write watch -> invalidation callback -> page RW -> resume, read
+// back). libnx has one exception stack and one ThreadExceptionDump for the
+// process; the question is whether two faults ever run the handler at the
+// same time. The callback counts the threads inside it at once (with a short
+// spin to widen the window): a maximum of 1 means the handler never
+// overlapped with itself.
+constexpr int kT10Threads = 3;
+constexpr u32 kT10Rounds = 10000;
+
+struct T10Slot {
+  uint32_t physical = 0;
+  std::atomic<u32> calls{0};
+};
+
+struct T10Watch {
+  T10Slot slots[kT10Threads];
+  std::atomic<u32> in_flight{0};
+  std::atomic<u32> max_in_flight{0};
+  std::atomic<u32> stray_calls{0};
+};
+
+// Everything the worker threads touch; heap-allocated so it can be leaked
+// (with the threads) if they hang.
+struct T10Run {
+  T10Watch watch;
+  std::atomic<bool> go{false};
+  std::atomic<u32> bad_reads[kT10Threads] = {};
+  std::atomic<int> ran_on[kT10Threads] = {};
+  std::atomic<u64> ticks[kT10Threads] = {};
+  std::vector<std::unique_ptr<rex::thread::Thread>> threads;
+};
+
+std::pair<uint32_t, uint32_t> T10Invalidation(void* context, uint32_t physical_address_start,
+                                              uint32_t length, bool exact_range) {
+  (void)exact_range;
+  auto* watch = static_cast<T10Watch*>(context);
+  const u32 inside = watch->in_flight.fetch_add(1) + 1;
+  u32 seen = watch->max_in_flight.load();
+  while (inside > seen && !watch->max_in_flight.compare_exchange_weak(seen, inside)) {
+  }
+  bool matched = false;
+  for (T10Slot& slot : watch->slots) {
+    if (physical_address_start <= slot.physical &&
+        slot.physical - physical_address_start < length) {
+      slot.calls.fetch_add(1);
+      matched = true;
+    }
+  }
+  if (!matched) {
+    watch->stray_calls.fetch_add(1);
+  }
+  // ~2 us: long enough for another core's fault to arrive while this one is
+  // still inside the handler, if the kernel let it.
+  const u64 until = armGetSystemTick() + armNsToTicks(2000);
+  while (armGetSystemTick() < until) {
+  }
+  watch->in_flight.fetch_sub(1);
+  // Exact range: unwatching more would disarm the other threads' pages.
+  return {physical_address_start, length};
+}
+
+void ProbeConcurrentFaults(rex::memory::Memory* memory) {
+  SMOKE_INFO("T10 BEGIN concurrent write faults: %d threads x %u faults on separate watched "
+             "pages",
+             kT10Threads, kT10Rounds);
+  if (!memory) {
+    SMOKE_INFO("T10 SKIP no rex::memory::Memory (step 3 failed)");
+    return;
+  }
+  const uint64_t guest_cores = rex::thread::nx_guest_core_mask();
+  auto* vA = memory->LookupHeapByType(true, 64 * 1024);
+  auto run = std::make_unique<T10Run>();
+  T10Watch& watch = run->watch;
+  uint32_t guest[kT10Threads] = {};
+  for (int i = 0; i < kT10Threads; ++i) {
+    if (!vA->Alloc(0x10000, 0x10000,
+                   rex::memory::kMemoryAllocationReserve | rex::memory::kMemoryAllocationCommit,
+                   rex::memory::kMemoryProtectRead | rex::memory::kMemoryProtectWrite, false,
+                   &guest[i])) {
+      SMOKE_INFO("T10 SKIP cannot allocate 64 KiB of physical memory for thread %d", i);
+      for (int j = 0; j < i; ++j) {
+        vA->Release(guest[j]);
+      }
+      return;
+    }
+    watch.slots[i].physical = memory->GetPhysicalAddress(guest[i]);
+    SMOKE_INFO("T10 thread %d: guest %08X physical %08X host %p", i, guest[i],
+               watch.slots[i].physical, memory->TranslateVirtual(guest[i]));
+  }
+  void* handle = memory->RegisterPhysicalMemoryInvalidationCallback(T10Invalidation, &watch);
+
+  auto& threads = run->threads;
+  threads.resize(kT10Threads);
+  for (int i = 0; i < kT10Threads; ++i) {
+    rex::thread::Thread::CreationParameters params;
+    params.stack_size = 64 * 1024;
+    params.create_suspended = true;
+    const uint32_t physical = watch.slots[i].physical;
+    auto* word = reinterpret_cast<volatile u32*>(memory->TranslateVirtual(guest[i]) + 0x100);
+    T10Run* const r = run.get();
+    r->ran_on[i].store(-1);
+    threads[i] = rex::thread::Thread::Create(
+        params, [i, physical, word, memory, r] {
+          while (!r->go.load()) {
+          }
+          const u64 t0 = armGetSystemTick();
+          for (u32 k = 0; k < kT10Rounds; ++k) {
+            memory->EnablePhysicalMemoryAccessCallbacks(physical, 0x1000, true, false);
+            const u32 value = (u32(i) << 24) | k;
+            *word = value;  // write fault on the read-only page
+            if (*word != value) {
+              r->bad_reads[i].fetch_add(1);
+            }
+          }
+          r->ticks[i].store(armGetSystemTick() - t0);
+          r->ran_on[i].store(int(svcGetCurrentProcessorNumber()));
+        });
+    if (!threads[i]) {
+      SMOKE_INFO("T10 Thread::Create failed for thread %d", i);
+      continue;
+    }
+    if (guest_cores & (uint64_t(1) << i)) {
+      threads[i]->set_affinity_mask(uint64_t(1) << i);
+    }
+    threads[i]->Resume();
+  }
+  SMOKE_INFO("T10 about to release the threads (a hang here means a deadlock in the fault path)");
+  const u64 t0 = armGetSystemTick();
+  run->go.store(true);
+  bool timed_out = false;
+  for (int i = 0; i < kT10Threads; ++i) {
+    if (threads[i] && rex::thread::Wait(threads[i].get(), false, std::chrono::seconds(60)) !=
+                          rex::thread::WaitResult::kSuccess) {
+      timed_out = true;
+    }
+  }
+  const double total_ms = TicksToMs(armGetSystemTick() - t0);
+  bool ok = !timed_out && watch.stray_calls.load() == 0;
+  for (int i = 0; i < kT10Threads; ++i) {
+    const u32 calls = watch.slots[i].calls.load();
+    const bool thread_ok =
+        threads[i] && calls == kT10Rounds && run->bad_reads[i].load() == 0;
+    ok &= thread_ok;
+    SMOKE_INFO("T10 thread %d on core %d: %u callbacks for %u writes, %u bad read-backs, "
+               "%.2f us per fault -> %s",
+               i, run->ran_on[i].load(), calls, kT10Rounds, run->bad_reads[i].load(),
+               TicksToMs(run->ticks[i].load()) * 1000.0 / kT10Rounds,
+               thread_ok ? "ok" : "WRONG");
+  }
+  const u32 max_in_flight = watch.max_in_flight.load();
+  SMOKE_INFO("T10 RESULT %s in %.1f ms; %u stray callbacks; at most %u thread(s) inside the "
+             "handler at once -> %s",
+             timed_out ? "TIMEOUT (threads still stuck)" : "done", total_ms,
+             watch.stray_calls.load(), max_in_flight,
+             max_in_flight <= 1 ? "faults are serialised (one exception stack in use at a time)"
+                                : "OVERLAP: two faults shared the libnx exception stack");
+  SMOKE_INFO("T10 RESULT %s", ok ? "ok" : "UNEXPECTED");
+  if (timed_out) {
+    // The stuck threads still use the run state, the callback and the pages:
+    // leak all of them.
+    (void)run.release();
+    SMOKE_INFO("T10 END (threads, callback and pages left in place)");
+    return;
+  }
+  memory->UnregisterPhysicalMemoryInvalidationCallback(handle);
+  for (int i = 0; i < kT10Threads; ++i) {
+    vA->Release(guest[i]);
+  }
+  SMOKE_INFO("T10 END");
+}
+
 }  // namespace
 
 void RunProbes(rex::memory::Memory* memory) {
@@ -1327,5 +1507,6 @@ void RunProbes(rex::memory::Memory* memory) {
   ProbeTranslationTable();
   ProbeOnDemandCommit();
   ProbeFaultRoundTrip(memory);
+  ProbeConcurrentFaults(memory);
   SMOKE_INFO("PROBES DONE");
 }
