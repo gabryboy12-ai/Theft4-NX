@@ -92,6 +92,20 @@ uint32_t logical_processor_count();
 // Must be called at startup before attempting to set thread affinity.
 void EnableAffinityConfiguration();
 
+#if REX_PLATFORM_NX
+// Core split on Switch (docs/switch-port/04-threads-exit.md section 3):
+// guest threads run on cores 0-2, core 3 (when the process has it) is kept
+// for host workers (shader/pipeline compilation, audio decoding, streaming).
+// Cores of the process core mask that guest threads may use.
+uint64_t nx_guest_core_mask();
+// Cores of the process core mask reserved for host workers (0 without core 3).
+uint64_t nx_host_worker_core_mask();
+// Host core of Xbox 360 logical CPU `cpu_index` (0-5): each hardware-thread
+// pair shares a core, so 0,1 -> 0; 2,3 -> 1; 4,5 -> 2. Falls back to the
+// lowest guest core if that core is not in the process core mask.
+uint32_t nx_guest_cpu_core(uint32_t cpu_index);
+#endif
+
 // Gets a stable thread-specific ID, but may not be. Use for informative
 // purposes only.
 uint32_t current_thread_system_id();
@@ -437,6 +451,16 @@ class Thread : public WaitHandle {
   // mask must be a subset of the process affinity mask for the containing
   // process of a thread.
   virtual void set_affinity_mask(uint64_t new_affinity_mask) = 0;
+
+#if REX_PLATFORM_NX
+  // Horizon's two-part affinity: the thread prefers `ideal_core` and may run
+  // on any core of `mask` (which must contain it). set_affinity_mask uses the
+  // lowest core of the mask as the ideal core.
+  virtual void set_ideal_core(uint32_t ideal_core, uint64_t mask) = 0;
+
+  // Horizon's ideal core of the thread.
+  virtual int32_t ideal_core() = 0;
+#endif
 
   // Adds a user-mode asynchronous procedure call request to the thread queue.
   // When a user-mode APC is queued, the thread is not directed to call the APC

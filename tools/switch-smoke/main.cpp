@@ -10,7 +10,9 @@
 //      release
 //   4. four threads through rex::thread::Thread, one per core of the process
 //      core mask; each must run on its core, and logical_processor_count()
-//      must match the mask
+//      must match the mask; then the guest CPU -> core mapping of
+//      XThread::SetActiveCpu (soft and hard affinity, core 3 left to host
+//      workers)
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
 // followed by the exploratory probes T1-T9 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
@@ -41,6 +43,7 @@
 #include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/system/flags.h>
 #include <rex/system/xmemory.h>
 #include <rex/thread.h>
 
@@ -404,6 +407,101 @@ void StepGuestMemoryShutdown() {
 
 // ── 4. Threads ──────────────────────────────────────────────────────────────
 
+// The Switch core split XThread::SetActiveCpu applies (04-threads-exit.md
+// section 3): Xbox 360 CPUs 0,1 -> core 0, 2,3 -> 1, 4,5 -> 2, core 3 kept
+// for host workers; soft affinity (ideal core + every guest core) unless
+// nx_hard_thread_affinity. One thread per guest CPU with the soft setting,
+// one per guest core with the hard one.
+void StepGuestCpuMapping(uint64_t core_mask) {
+  const uint64_t guest_mask = rex::thread::nx_guest_core_mask();
+  const uint64_t host_mask = rex::thread::nx_host_worker_core_mask();
+  const bool masks_ok = guest_mask == (core_mask & 0x7) && host_mask == (core_mask & 0x8);
+  SMOKE_INFO("  guest cores %s, host worker cores %s -> %s", Hex(guest_mask).c_str(),
+             Hex(host_mask).c_str(), masks_ok ? "ok" : "MISMATCH");
+  if (!masks_ok) {
+    Fail("threads", "guest/host core masks " + Hex(guest_mask) + "/" + Hex(host_mask) +
+                        " for process core mask " + Hex(core_mask));
+  }
+  const bool ignore = REXCVAR_GET(ignore_thread_affinities);
+  SMOKE_INFO("  ignore_thread_affinities default %s -> %s", ignore ? "true" : "false",
+             ignore ? "WRONG (must be false on NX)" : "ok");
+  if (ignore) {
+    Fail("threads", "ignore_thread_affinities defaults to true on NX");
+  }
+
+  struct Case {
+    uint32_t cpu;
+    bool hard;
+  };
+  std::vector<Case> cases;
+  for (uint32_t cpu = 0; cpu < 6; ++cpu) {
+    cases.push_back({cpu, false});
+  }
+  for (uint32_t cpu = 0; cpu < 6; cpu += 2) {
+    cases.push_back({cpu, true});
+  }
+  std::vector<std::atomic<int>> ran(cases.size());
+  std::atomic<uint64_t> work{0};  // keeps the busy loop from being optimised out
+  std::vector<std::unique_ptr<rex::thread::Thread>> threads(cases.size());
+  for (size_t n = 0; n < cases.size(); ++n) {
+    const Case c = cases[n];
+    const uint32_t expected_core = c.cpu / 2;
+    const uint32_t core = rex::thread::nx_guest_cpu_core(c.cpu);
+    ran[n].store(-1);
+    rex::thread::Thread::CreationParameters params;
+    params.stack_size = 64 * 1024;
+    params.create_suspended = true;
+    auto thread = rex::thread::Thread::Create(params, [n, &ran, &work] {
+      uint64_t acc = 0;
+      for (uint64_t k = 0; k < 1000000; k++) {
+        acc = acc * 6364136223846793005ull + k;
+      }
+      work.fetch_add(acc);
+      ran[n].store(int(svcGetCurrentProcessorNumber()));
+    });
+    if (!thread) {
+      Fail("threads", "Thread::Create failed for guest CPU " + std::to_string(c.cpu));
+      continue;
+    }
+    const uint64_t mask = c.hard ? uint64_t(1) << core : guest_mask;
+    thread->set_ideal_core(core, mask);
+    const int32_t ideal = thread->ideal_core();
+    const uint64_t applied = thread->affinity_mask();
+    const bool ok = core == expected_core && ideal == int32_t(core) && applied == mask;
+    SMOKE_INFO("  guest CPU %u %s: core %u (expected %u), ideal %d, mask %s -> %s", c.cpu,
+               c.hard ? "hard" : "soft", core, expected_core, ideal, Hex(applied).c_str(),
+               ok ? "ok" : "MISMATCH");
+    if (!ok) {
+      Fail("threads", "guest CPU " + std::to_string(c.cpu) + (c.hard ? " hard" : " soft") +
+                          ": core " + std::to_string(core) + ", ideal " + std::to_string(ideal) +
+                          ", mask " + Hex(applied));
+    }
+    thread->Resume();
+    threads[n] = std::move(thread);
+  }
+  for (size_t n = 0; n < cases.size(); ++n) {
+    if (!threads[n]) {
+      continue;
+    }
+    if (rex::thread::Wait(threads[n].get(), false, std::chrono::milliseconds(10000)) !=
+        rex::thread::WaitResult::kSuccess) {
+      Fail("threads", "join timed out for guest CPU " + std::to_string(cases[n].cpu));
+    }
+    const Case c = cases[n];
+    const int core = ran[n].load();
+    const uint32_t expected = rex::thread::nx_guest_cpu_core(c.cpu);
+    // Soft affinity may migrate within the guest cores; never onto core 3.
+    const bool ok = core >= 0 && (guest_mask & (uint64_t(1) << core)) &&
+                    (!c.hard || uint32_t(core) == expected);
+    SMOKE_INFO("  guest CPU %u %s ran on core %d%s", c.cpu, c.hard ? "hard" : "soft", core,
+               ok ? "" : " -> WRONG");
+    if (!ok) {
+      Fail("threads", "guest CPU " + std::to_string(c.cpu) + (c.hard ? " hard" : " soft") +
+                          " ran on core " + std::to_string(core));
+    }
+  }
+}
+
 void StepThreads() {
   u64 core_mask = 0;
   svcGetInfo(&core_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
@@ -475,6 +573,8 @@ void StepThreads() {
       }
     }
   }
+
+  StepGuestCpuMapping(core_mask);
 }
 
 }  // namespace

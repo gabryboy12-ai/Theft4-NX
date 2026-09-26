@@ -45,8 +45,18 @@
 REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
                     "Ignores game-specified thread priorities");
 
+#if REX_PLATFORM_NX
+// On Switch the game's CPU choice maps onto the cores (XThread::SetActiveCpu),
+// so it is used by default.
+REXCVAR_DEFINE_BOOL(ignore_thread_affinities, false, "Kernel",
+                    "Ignores game-specified thread affinities");
+REXCVAR_DEFINE_BOOL(nx_hard_thread_affinity, false, "Kernel",
+                    "Switch: pin a guest thread to the core of its CPU instead of preferring it "
+                    "(soft affinity: ideal core plus every guest core)");
+#else
 REXCVAR_DEFINE_BOOL(ignore_thread_affinities, true, "Kernel",
                     "Ignores game-specified thread affinities");
+#endif
 
 namespace rex::system {
 
@@ -912,6 +922,19 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
     pcr.prcb_data.current_cpu = cpu_index;
   }
 
+#if REX_PLATFORM_NX
+  // Switch has 3 cores for guest threads (core 3, when granted, is kept for
+  // host workers): each Xbox 360 hardware-thread pair goes to one core. Soft
+  // by default: the core is the ideal one and the thread may run on any guest
+  // core; nx_hard_thread_affinity pins it. See 04-threads-exit.md section 3.
+  if (!REXCVAR_GET(ignore_thread_affinities) && thread_) {
+    const uint32_t core = rex::thread::nx_guest_cpu_core(cpu_index);
+    const uint64_t mask = REXCVAR_GET(nx_hard_thread_affinity)
+                              ? uint64_t(1) << core
+                              : rex::thread::nx_guest_core_mask();
+    thread_->set_ideal_core(core, mask);
+  }
+#else
   if (rex::thread::logical_processor_count() >= 6) {
     if (!REXCVAR_GET(ignore_thread_affinities)) {
       thread_->set_affinity_mask(uint64_t(1) << cpu_index);
@@ -919,6 +942,7 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
   } else {
     REXSYS_WARN("Too few processor cores - scheduling will be wonky");
   }
+#endif
 }
 
 bool XThread::GetTLSValue(uint32_t slot, uint32_t* value_out) {
