@@ -561,3 +561,79 @@ T9 (64 KiB in `0x40000000`) cadeva sugli stessi indirizzi, già referenziati dal
   - che dopo il rilascio pagine e riferimenti tornino ai valori post-`Initialize`.
 - **Dopo `~Memory`.** Pagine committed, riferimenti, blocchi mappati e blocchi ancora referenziati al rilascio devono essere tutti 0. Altrimenti lo smoke stampa `SMOKE FAIL at guest memory shutdown`.
 - **T9, passo 0.** Chiama `svcSetProcessMemoryPermission` sulla pagina RW dell'arena e registra il codice (atteso 0xD401): conferma la causa sulla console. Il resto di T9 usa `svcSetMemoryPermission`.
+
+## 12. MMIO nella finestra 0x7F con la tabella: analisi e proposta (NON implementata)
+
+### Cosa c'è nella finestra 0x7F
+
+- **Desktop** (`map_info` in `xmemory.cpp`): `0x7F000000–0x7FFFFFFF` è una vista dello stesso backing della fisica. L'offset del file è `0x100000000`, cioè fisica `0x00000000–0x00FFFFFF`, come i primi 16 MiB delle finestre 0xA/0xC/0xE. Nessun heap la gestisce: `LookupHeap` restituisce `nullptr` per `0x7F…`. Il commento di xenia dice "GPU writeback + 15mb of XPS?": nemmeno a monte è documentato con precisione cosa il gioco ci legga.
+- **`Memory::Initialize`** riserva e committa `0xC0000000` + 16 MiB ("GPU writeback"). La fisica 0–16 MiB è quindi presa dall'emulatore e nessuna allocazione del gioco ci finisce.
+- **Range MMIO registrati** (`AddVirtualMappedRange`, maschera `0xFFFF0000`, 64 KiB ciascuno):
+  - `0x7FC80000`: registri GPU (`graphics_system.cpp`; il commento dice fino a `0x7FCFFFFF`, ma ne viene registrato 64 KiB);
+  - `0x7FEA0000`: registri XMA/APU (`xma_decoder.cpp`).
+
+  Sotto questi indirizzi c'è la fisica `0x00C80000–0x00C8FFFF` e `0x00EA0000–0x00EAFFFF`, dentro i 16 MiB di writeback.
+- **Codice host.** Nessun punto dell'SDK accede a `0x7F…` tramite `TranslateVirtual`: ci sono solo le due registrazioni.
+
+### Come xenia separa MMIO e memoria
+
+La protezione è **per vista**. `AddVirtualMappedRange` porta a NoAccess i 64 KiB nella sola vista 0x7F: un accesso a `0x7FC8xxxx` va in fault, mentre la stessa fisica tramite `0xC0C8xxxx` resta memoria normale, perché è un'altra vista.
+
+`MMIOHandler::ExceptionCallback` cerca i range solo per fault sotto `physical_membase_`, cioè nelle viste virtuali. Converte host → guest con `HostToGuestVirtual` e confronta con `address/mask`.
+
+### Su NX oggi
+
+`rex_guest_table[0x7F]` punta alla fisica: la pagina host di `0x7FC80000` è la stessa di `0xC0C80000`. `AddVirtualMappedRange` registra solo il range, e `MMIOHandler` non cercherebbe comunque un range per un fault sopra `physical_membase_`.
+
+Gli accessi non riconosciuti dal generatore (senza `REX_MM_*`) leggono e scrivono **in silenzio** la fisica `0xC8xxxx` / `0xEAxxxx`.
+
+Granularità disponibili:
+
+| Meccanismo | Granularità |
+|---|---|
+| Voce della tabella | 16 MiB (un'intera finestra 0x7F) |
+| Protezione host (`svcSetMemoryPermission`, §11) | 4 KiB |
+
+### Opzione A: voce di tabella dedicata verso una zona senza backing
+
+`rex_guest_table[0x7F]` punta a un buco di 16 MiB riservato e mai mappato, per esempio 16 MiB in più nella prenotazione dell'arena senza commit. Ogni accesso a `0x7F…` va in fault. Il gestore:
+
+- per un range MMIO chiama il callback, come su desktop;
+- per il resto della finestra decodifica l'istruzione (`TryDecodeLoadStore` esiste già), esegue il load/store sulla fisica `addr & 0xFFFFFF` e avanza il PC.
+
+Serve anche:
+
+- `HostToGuest` deve mappare il buco su `0x7F…`, e la ricerca dei range in `MMIOHandler` deve coprirlo;
+- su NX `REX_MMIO_FALLBACK_HOST` degli `REX_MM_*` deve tradurre `0x7F…` direttamente sulla fisica, altrimenti anche il percorso riconosciuto andrebbe in fault.
+
+| Pro | Contro |
+|---|---|
+| Stessa semantica del desktop. La fisica `0xC8xxxx` resta memoria normale dalle altre finestre. | Ogni accesso al writeback tramite `0x7F` costa un fault (T9 misura il giro). Il gestore deve emulare load/store non MMIO: più codice nel percorso d'eccezione. Il fallback degli `REX_MM_*` cambia nel template. |
+
+### Opzione B: proteggere solo le pagine MMIO della fisica condivisa (consigliata)
+
+NoAccess a granularità 4 KiB su fisica `0x00C80000–0x00C8FFFF` e `0x00EA0000–0x00EAFFFF`. Si fa in `AddVirtualMappedRange` su NX, con `rex::memory::Protect` sulla pagina host di `physical_membase_`.
+
+Nel gestore:
+
+- un fault in quelle pagine da qualunque finestra è MMIO: si converte host → `0x7F000000 + offset fisico` e si cerca il range;
+- servono un caso in `HostToGuest` (o nel thunk `HostToGuestVirtual`) e l'estensione della condizione di ricerca range in `MMIOHandler` a quelle pagine fisiche;
+- il resto della finestra 0x7F resta tradotto sulla fisica, senza costi.
+
+| Pro | Contro |
+|---|---|
+| Nessun costo sul writeback. Nessun cambio al generatore o alla tabella. 128 KiB protetti in tutto. | Divergenza dal desktop: `0xA0C8xxxx` / `0xC0C8xxxx` / `0xE0C8…` diventano anch'essi MMIO. |
+
+La divergenza dovrebbe restare teorica: quella fisica è dentro i 16 MiB che l'emulatore si riserva all'init, quindi il gioco non la riceve da un'allocazione. Il rischio concreto è il codice host che copia un intervallo fisico che include quelle pagine: finirebbe nei callback dei registri.
+
+Salvaguardie proposte:
+
+1. mantenere quelle pagine fuori da qualunque allocazione fisica (oggi lo sono già, grazie al commit dei 16 MiB di writeback);
+2. nel gestore, accettare come MMIO solo fault con PC nel codice generato e trattare gli altri come errore con log;
+3. un controllo di debug in `TranslatePhysical` / `TranslateVirtual` per quegli intervalli.
+
+### Raccomandazione
+
+Partire da **B**: costo nullo sul writeback, granularità sufficiente, nessun cambio al codice generato. Passare ad **A** solo se i log in gioco mostrano accessi a quelle pagine come memoria tramite 0xA/0xC/0xE, oppure codice host che le tocca.
+
+In entrambi i casi il gestore dovrà prendere il minimo di lock (vedi §10, deadlock).
