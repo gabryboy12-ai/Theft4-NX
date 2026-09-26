@@ -17,19 +17,24 @@
 // followed by the exploratory probes T1-T10 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
 //
-// Every smoke line is made durable before the next operation: the SDK logger
-// is flushed, then the line is appended to smoke.log through its own fd,
-// fsync'd and closed. A crash therefore leaves the last attempted operation
-// as the last line of the log.
+// Every smoke line is made durable before the next operation: it is appended
+// to smoke.log through its own fd, fsync'd and closed. A crash therefore
+// leaves the last attempted operation as the last line of the log. The SDK
+// logger writes through the same path (DurableSink), in order with the smoke
+// lines: Horizon's FS refuses to open a file for writing while another
+// handle has it open for writing, so a second writer on smoke.log loses
+// every line (run 5 kept only the SDK's three).
 
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <cerrno>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -46,6 +51,8 @@
 #include <rex/system/flags.h>
 #include <rex/system/xmemory.h>
 #include <rex/thread.h>
+
+#include <spdlog/sinks/base_sink.h>
 
 #include "probes.h"
 
@@ -68,19 +75,44 @@ int main(int argc, char** argv);
 
 namespace {
 
-// Appends one line to smoke.log and forces it to storage: open, write, fsync,
-// close. The SDK logger is flushed first so its lines stay in order.
-void DurableAppend(const char* line) {
-  rex::FlushLogging();
+// Appends to smoke.log and forces it to storage: open, write, fsync, close.
+// One writer at a time (see the file header). The first failed open is
+// reported on screen instead of being lost.
+std::mutex g_log_file_mutex;
+
+void DurableWrite(const char* data, size_t size) {
+  std::lock_guard<std::mutex> lock(g_log_file_mutex);
   int fd = open(kLogPath, O_WRONLY | O_APPEND | O_CREAT, 0666);
   if (fd < 0) {
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      std::printf("smoke.log: open failed (errno %d); lines are on screen only\n", errno);
+      consoleUpdate(nullptr);
+    }
     return;
   }
-  (void)write(fd, line, std::strlen(line));
-  (void)write(fd, "\n", 1);
+  (void)write(fd, data, size);
   fsync(fd);
   close(fd);
 }
+
+void DurableAppend(const char* line) {
+  std::string text(line);
+  text += '\n';
+  DurableWrite(text.data(), text.size());
+}
+
+// The SDK logger's only sink: each formatted line goes through DurableWrite.
+class DurableSink final : public spdlog::sinks::base_sink<std::mutex> {
+ protected:
+  void sink_it_(const spdlog::details::log_msg& msg) override {
+    spdlog::memory_buf_t formatted;
+    formatter_->format(msg, formatted);
+    DurableWrite(formatted.data(), formatted.size());
+  }
+  void flush_() override {}
+};
 
 }  // namespace
 
@@ -124,10 +156,16 @@ void StepLogging() {
   // no-ops (the run-4 log had none of the SDK's own errors).
   std::string policy_error;
   const bool policy_ok = rex::diagnostics::Configure(true, "logging", &policy_error);
-  rex::InitLogging(kLogPath, spdlog::level::debug);
-  REXLOG_INFO("[smoke] SDK logger initialised");
+  // No file sink of its own: see the file header.
+  auto sink = std::make_shared<DurableSink>();
+  sink->set_pattern("[sdk] [%l] [%n] [t%t] %v");
+  rex::LogConfig config;
+  config.default_level = spdlog::level::debug;
+  config.extra_sinks.push_back(sink);
   g_logging_ready = true;
-  SMOKE_INFO("step 1 logging: SDK logger writing to %s", kLogPath);
+  rex::InitLogging(config);
+  REXLOG_INFO("[smoke] SDK logger initialised");
+  SMOKE_INFO("step 1 logging: SDK logger and smoke lines both appended to %s", kLogPath);
   if (!policy_ok) {
     Fail("logging", "diagnostics::Configure(logging): " + policy_error);
   }
