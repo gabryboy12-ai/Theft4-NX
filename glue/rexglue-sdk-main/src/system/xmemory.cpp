@@ -1048,6 +1048,13 @@ bool BaseHeap::NxCommitPages(uint32_t first_page, uint32_t last_page,
                                  size_t(page_number - run_first) << page_size_shift_,
                                  rex::memory::AllocationType::kCommit,
                                  rex::memory::PageAccess::kReadWrite)) {
+      REXSYS_ERROR("BaseHeap::NxCommitPages heap {:08X}: host commit of pages {}-{} failed",
+                   heap_base_, run_first, page_number - 1);
+      rex::memory::nx::TraceMemory("NxCommitPages heap %08X: AllocFixed(%p, 0x%zx) of pages "
+                                   "%u-%u failed",
+                                   heap_base_, TranslateRelative(run_first << page_size_shift_),
+                                   size_t(page_number - run_first) << page_size_shift_, run_first,
+                                   page_number - 1);
       // Undo the runs committed by this call (their table state is unchanged).
       if (run_first > first_page) {
         NxDecommitUncommitted(first_page, run_first - 1);
@@ -1058,8 +1065,19 @@ bool BaseHeap::NxCommitPages(uint32_t first_page, uint32_t last_page,
   }
   // Like the other backends' commit, the requested access applies to the
   // whole range, already committed pages included.
-  return rex::memory::Protect(TranslateRelative(first_page << page_size_shift_),
-                              size_t(last_page - first_page + 1) << page_size_shift_, access);
+  if (!rex::memory::Protect(TranslateRelative(first_page << page_size_shift_),
+                            size_t(last_page - first_page + 1) << page_size_shift_, access)) {
+    REXSYS_ERROR("BaseHeap::NxCommitPages heap {:08X}: protect of pages {}-{} failed", heap_base_,
+                 first_page, last_page);
+    rex::memory::nx::TraceMemory("NxCommitPages heap %08X: Protect(pages %u-%u, access %u) "
+                                 "failed, commit rolled back",
+                                 heap_base_, first_page, last_page, unsigned(access));
+    // The caller fails the allocation without touching the page table, so
+    // the references taken above must go.
+    NxDecommitUncommitted(first_page, last_page);
+    return false;
+  }
+  return true;
 }
 
 void BaseHeap::NxDecommitUncommitted(uint32_t first_page, uint32_t last_page) {

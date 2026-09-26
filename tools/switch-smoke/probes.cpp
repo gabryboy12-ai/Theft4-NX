@@ -1130,7 +1130,7 @@ void ProbeOnDemandCommit() {
 // ── T9 ──────────────────────────────────────────────────────────────────────
 
 // Fault round trip on guest memory: a page made read-only (or inaccessible)
-// with svcSetProcessMemoryPermission, a write, and an exception handler
+// with svcSetMemoryPermission, a write, and an exception handler
 // (installed through exception_handler_switch.cpp, after the runtime's
 // MMIOHandler) that restores RW and resumes the faulting instruction.
 struct T9State {
@@ -1158,7 +1158,7 @@ bool T9Handler(rex::arch::Exception* ex, void* data) {
   state->last_pc = ex->pc();
   state->last_address = address;
   // Signal-handler context: no logging here. rex::memory::Protect inside the
-  // arena is svcSetProcessMemoryPermission.
+  // arena is svcSetMemoryPermission.
   if (!rex::memory::Protect(state->page, 0x1000, rex::memory::PageAccess::kReadWrite)) {
     state->restore_failed = true;
     return false;
@@ -1206,12 +1206,24 @@ void ProbeFaultRoundTrip(rex::memory::Memory* memory) {
   state.page = memory->TranslateVirtual(guest);
   auto* word = reinterpret_cast<volatile u32*>(state.page + 0x40);
   SMOKE_INFO("T9 guest %08X -> host %p: %s", guest, state.page, QueryStr(state.page).c_str());
+  // 0. Run 4's failure: after the RW that follows svcMapProcessCodeMemory the
+  //    page is AliasCodeData, which has no FlagCode, so the kernel refuses
+  //    svcSetProcessMemoryPermission (expected 0xD401, InvalidCurrentMemory,
+  //    before any change). memory_switch.cpp now uses svcSetMemoryPermission.
+  SMOKE_INFO("T9 about to svcSetProcessMemoryPermission(%p, 0x1000, R) on the RW arena page",
+             state.page);
+  Result rc =
+      svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_R);
+  SMOKE_INFO("T9 svcSetProcessMemoryPermission on AliasCodeData %s (expected 0xD401): %s",
+             Rc(rc).c_str(), QueryStr(state.page).c_str());
+  if (R_SUCCEEDED(rc)) {
+    svcSetMemoryPermission(state.page, 0x1000, Perm_Rw);
+  }
   rex::arch::ExceptionHandler::Install(T9Handler, &state);
 
   // 1. One read-only page, one write.
-  SMOKE_INFO("T9 about to svcSetProcessMemoryPermission(%p, 0x1000, R)", state.page);
-  Result rc =
-      svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_R);
+  SMOKE_INFO("T9 about to svcSetMemoryPermission(%p, 0x1000, R)", state.page);
+  rc = svcSetMemoryPermission(state.page, 0x1000, Perm_R);
   SMOKE_INFO("T9 set R %s: %s", Rc(rc).c_str(), QueryStr(state.page).c_str());
   if (R_SUCCEEDED(rc)) {
     SMOKE_INFO("T9 about to write to the read-only page");
@@ -1231,15 +1243,15 @@ void ProbeFaultRoundTrip(rex::memory::Memory* memory) {
   SMOKE_INFO("T9 about to run %d x (set R, write -> fault -> set RW -> resume)", kRounds);
   u64 t0 = armGetSystemTick();
   for (int i = 0; i < kRounds; ++i) {
-    svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_R);
+    svcSetMemoryPermission(state.page, 0x1000, Perm_R);
     *word = u32(i);
   }
   const double round_ms = TicksToMs(armGetSystemTick() - t0);
   const u32 round_faults = state.faults - before;
   t0 = armGetSystemTick();
   for (int i = 0; i < kRounds; ++i) {
-    svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_R);
-    svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000, Perm_Rw);
+    svcSetMemoryPermission(state.page, 0x1000, Perm_R);
+    svcSetMemoryPermission(state.page, 0x1000, Perm_Rw);
   }
   const double svc_ms = TicksToMs(armGetSystemTick() - t0);
   SMOKE_INFO("T9 RESULT round trip: %u faults for %d writes, %.2f us each; the two SVCs alone "
@@ -1249,9 +1261,8 @@ void ProbeFaultRoundTrip(rex::memory::Memory* memory) {
              round_faults == u32(kRounds) && *word == u32(kRounds - 1) ? "ok" : "UNEXPECTED");
 
   // 3. No access at all (read fault).
-  SMOKE_INFO("T9 about to svcSetProcessMemoryPermission(%p, 0x1000, ---)", state.page);
-  rc = svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(state.page), 0x1000,
-                                     Perm_None);
+  SMOKE_INFO("T9 about to svcSetMemoryPermission(%p, 0x1000, ---)", state.page);
+  rc = svcSetMemoryPermission(state.page, 0x1000, Perm_None);
   SMOKE_INFO("T9 set --- %s: %s", Rc(rc).c_str(), QueryStr(state.page).c_str());
   if (R_SUCCEEDED(rc)) {
     before = state.faults;

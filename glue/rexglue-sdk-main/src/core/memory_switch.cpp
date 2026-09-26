@@ -27,8 +27,16 @@
  *   pages). A block is moved back to the heap and freed when none of its
  *   pages is referenced.
  *
- * - Protection: svcSetProcessMemoryPermission, 4 KiB granularity, on mapped
- *   blocks only. Unmapped blocks have no pages to protect.
+ * - Protection: svcSetMemoryPermission, 4 KiB granularity, on mapped blocks
+ *   only. Unmapped blocks have no pages to protect. svcSetProcessMemoryPermission
+ *   runs once per block, right after the move: it is the only call that takes
+ *   AliasCode (the state svcMapProcessCodeMemory leaves) to RW, and it turns
+ *   the block into AliasCodeData. The kernel accepts it only on states with
+ *   FlagCode (Code, AliasCode); AliasCodeData carries FlagsData instead
+ *   (FlagCanReprotect, no FlagCode), so every later change goes through
+ *   svcSetMemoryPermission. Both calls also require one state and permission
+ *   over the whole range (KPageTableBase::CheckMemoryState), so ranges are
+ *   split at kernel block boundaries.
  *
  * Addresses outside the arena (none in the runtime today) fall back to heap
  * memory for AllocFixed(nullptr) and plain svcSetMemoryPermission for Protect.
@@ -39,6 +47,9 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -96,6 +107,35 @@ struct Arena {
 
 Arena g_arena;
 
+std::atomic<nx::MemoryTraceSink> g_trace_sink{nullptr};
+
+}  // namespace
+
+namespace nx {
+
+void SetMemoryTraceSink(MemoryTraceSink sink) {
+  g_trace_sink.store(sink, std::memory_order_release);
+}
+
+void TraceMemory(const char* format, ...) {
+  const MemoryTraceSink sink = g_trace_sink.load(std::memory_order_acquire);
+  if (!sink) {
+    return;
+  }
+  char line[256];
+  va_list args;
+  va_start(args, format);
+  std::vsnprintf(line, sizeof(line), format, args);
+  va_end(args);
+  sink(line);
+}
+
+}  // namespace nx
+
+namespace {
+
+using nx::TraceMemory;
+
 inline size_t AlignUp(size_t value, size_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
@@ -142,6 +182,8 @@ bool MapBlock(size_t block) {
   if (!source) {
     REXSYS_ERROR("memory_switch: aligned_alloc(2 MiB) failed for arena block {} ({} mapped)",
                  block, g_arena.stats.mapped_blocks);
+    TraceMemory("MapBlock %zu: aligned_alloc(2 MiB) failed (%zu blocks mapped)", block,
+                g_arena.stats.mapped_blocks);
     return false;
   }
   std::memset(source, 0, kNxBlockSize);
@@ -149,8 +191,14 @@ bool MapBlock(size_t block) {
   const u64 t0 = armGetSystemTick();
   Result rc = svcMapProcessCodeMemory(g_arena.process, dst, reinterpret_cast<u64>(source),
                                       kNxBlockSize);
+  TraceMemory("MapBlock %zu: svcMapProcessCodeMemory(dst 0x%lx, src %p, 0x%zx) rc=0x%x", block,
+              dst, source, kNxBlockSize, rc);
   if (R_SUCCEEDED(rc)) {
+    // AliasCode -> AliasCodeData RW: the block's only
+    // svcSetProcessMemoryPermission (see the file header).
     rc = svcSetProcessMemoryPermission(g_arena.process, dst, kNxBlockSize, Perm_Rw);
+    TraceMemory("MapBlock %zu: svcSetProcessMemoryPermission(0x%lx, 0x%zx, RW) rc=0x%x", block,
+                dst, kNxBlockSize, rc);
     if (R_FAILED(rc)) {
       REXSYS_ERROR("memory_switch: svcSetProcessMemoryPermission(RW) block {} rc=0x{:x}", block,
                    rc);
@@ -173,14 +221,52 @@ bool MapBlock(size_t block) {
   return true;
 }
 
+// svcSetMemoryPermission(perm) on [address, address + length) of mapped
+// blocks, one call per kernel block whose permission differs: the kernel
+// wants one state and permission over the range it is given. Caller holds
+// g_arena.mutex.
+bool SetArenaPermission(uint8_t* address, size_t length, uint32_t perm) {
+  bool ok = true;
+  uint8_t* const end = address + length;
+  while (address < end) {
+    MemoryInfo info{};
+    u32 page_info = 0;
+    Result rc = svcQueryMemory(&info, &page_info, reinterpret_cast<u64>(address));
+    if (R_FAILED(rc)) {
+      REXSYS_ERROR("memory_switch: svcQueryMemory({}) rc=0x{:x}", static_cast<void*>(address), rc);
+      TraceMemory("SetArenaPermission: svcQueryMemory(%p) rc=0x%x", address, rc);
+      return false;
+    }
+    uint8_t* const run_end = std::min(end, reinterpret_cast<uint8_t*>(info.addr + info.size));
+    const size_t run = size_t(run_end - address);
+    if (info.perm != perm) {
+      rc = svcSetMemoryPermission(address, run, perm);
+      TraceMemory("SetArenaPermission: svcSetMemoryPermission(%p, 0x%zx, %u) on type 0x%x "
+                  "perm %u rc=0x%x",
+                  address, run, perm, info.type, info.perm, rc);
+      if (R_FAILED(rc)) {
+        REXSYS_ERROR(
+            "memory_switch: svcSetMemoryPermission({}, 0x{:x}, {}) on type 0x{:x} perm {} "
+            "rc=0x{:x}",
+            static_cast<void*>(address), run, perm, info.type, info.perm, rc);
+        ok = false;
+      }
+    }
+    address = run_end;
+  }
+  return ok;
+}
+
 // Moves a block back to the heap and frees it. Caller holds g_arena.mutex.
 void UnmapBlock(size_t block) {
   Block& b = g_arena.blocks[block];
   const u64 dst = reinterpret_cast<u64>(BlockAddress(block));
-  // Pages may have been protected R or none; the unmap wants the block as mapped.
-  svcSetProcessMemoryPermission(g_arena.process, dst, kNxBlockSize, Perm_Rw);
+  // Pages may have been protected R or none; hand the block back RW, as mapped.
+  SetArenaPermission(BlockAddress(block), kNxBlockSize, Perm_Rw);
   const Result rc = svcUnmapProcessCodeMemory(g_arena.process, dst,
                                               reinterpret_cast<u64>(b.source), kNxBlockSize);
+  TraceMemory("UnmapBlock %zu: svcUnmapProcessCodeMemory(dst 0x%lx, src %p) rc=0x%x", block, dst,
+              b.source, rc);
   if (R_FAILED(rc)) {
     // The source stays moved: it must not go back to malloc. Keep the block
     // mapped so a later commit can reuse it.
@@ -203,13 +289,7 @@ bool ProtectArena(uint8_t* address, size_t length, uint32_t perm) {
     const size_t block = size_t(address - g_arena.base) / kNxBlockSize;
     uint8_t* block_end = std::min(end, BlockAddress(block) + kNxBlockSize);
     if (g_arena.blocks[block].source) {
-      const Result rc = svcSetProcessMemoryPermission(
-          g_arena.process, reinterpret_cast<u64>(address), size_t(block_end - address), perm);
-      if (R_FAILED(rc)) {
-        REXSYS_ERROR("memory_switch: svcSetProcessMemoryPermission({}, 0x{:x}, {}) rc=0x{:x}",
-                     static_cast<void*>(address), size_t(block_end - address), perm, rc);
-        ok = false;
-      }
+      ok &= SetArenaPermission(address, size_t(block_end - address), perm);
     }
     address = block_end;
   }
@@ -239,14 +319,19 @@ bool CommitArena(uint8_t* address, size_t length) {
         // Reused page of a block that stayed mapped: give it zeroed contents
         // as a fresh commit would.
         uint8_t* p = g_arena.base + page * kNxPageSize;
-        svcSetProcessMemoryPermission(g_arena.process, reinterpret_cast<u64>(p), kNxPageSize,
-                                      Perm_Rw);
+        if (!SetArenaPermission(p, kNxPageSize, Perm_Rw)) {
+          if (page > first_page) {
+            DecommitArena(address, (page - first_page) * kNxPageSize);
+          }
+          return false;
+        }
         std::memset(p, 0, kNxPageSize);
       }
       ++b.referenced;
       ++g_arena.stats.committed_pages;
     }
     ++refs;
+    ++g_arena.stats.page_references;
   }
   return true;
 }
@@ -261,6 +346,7 @@ void DecommitArena(uint8_t* address, size_t length) {
     if (refs == 0) {
       continue;
     }
+    --g_arena.stats.page_references;
     if (--refs == 0) {
       const size_t block = page / kNxPagesPerBlock;
       Block& b = g_arena.blocks[block];
@@ -360,9 +446,22 @@ void ReleaseGuestArena() {
   size_t kept = 0;
   for (size_t block = 0; block < g_arena.blocks.size(); ++block) {
     if (g_arena.blocks[block].source) {
+      // The heaps dropped their references in Memory::~Memory, so a block
+      // still mapped here only holds leaked ones.
+      ++g_arena.stats.blocks_mapped_at_release;
       UnmapBlock(block);
       kept += g_arena.blocks[block].source != nullptr;
     }
+  }
+  if (g_arena.stats.blocks_mapped_at_release) {
+    REXSYS_ERROR(
+        "memory_switch: {} arena blocks still referenced at release ({} pages, {} references "
+        "leaked)",
+        g_arena.stats.blocks_mapped_at_release, g_arena.stats.committed_pages,
+        g_arena.stats.page_references);
+    TraceMemory("ReleaseGuestArena: %zu blocks still referenced (%zu pages, %zu references)",
+                g_arena.stats.blocks_mapped_at_release, g_arena.stats.committed_pages,
+                g_arena.stats.page_references);
   }
   if (kept) {
     // Still-moved blocks keep their addresses; leave the reservation in place.
@@ -412,9 +511,14 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
     }
     std::lock_guard<std::mutex> lock(g_arena.mutex);
     if (!CommitArena(address, page_len)) {
+      TraceMemory("AllocFixed(%p, 0x%zx): commit failed", static_cast<void*>(address), page_len);
       return nullptr;
     }
     if (!ProtectArena(address, page_len, ToNxPermission(access))) {
+      // Drop the references taken above: the caller sees a failed commit.
+      DecommitArena(address, page_len);
+      TraceMemory("AllocFixed(%p, 0x%zx): protect %u failed, commit rolled back",
+                  static_cast<void*>(address), page_len, ToNxPermission(access));
       return nullptr;
     }
     return base_address;
@@ -464,7 +568,12 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
   const size_t perm_len = AlignUp(length, kNxPageSize);
   if (InArena(base_address)) {
     std::lock_guard<std::mutex> lock(g_arena.mutex);
-    return ProtectArena(static_cast<uint8_t*>(base_address), perm_len, ToNxPermission(access));
+    const bool ok =
+        ProtectArena(static_cast<uint8_t*>(base_address), perm_len, ToNxPermission(access));
+    if (!ok) {
+      TraceMemory("Protect(%p, 0x%zx, %u) failed", base_address, perm_len, ToNxPermission(access));
+    }
+    return ok;
   }
   return R_SUCCEEDED(svcSetMemoryPermission(base_address, perm_len, ToNxPermission(access)));
 }

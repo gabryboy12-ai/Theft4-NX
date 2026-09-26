@@ -38,6 +38,7 @@
 #include <switch.h>
 
 #include <rex/chrono/clock.h>
+#include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/system/xmemory.h>
@@ -114,10 +115,17 @@ std::string Hex(uint64_t value) {
 void StepLogging() {
   mkdir("sdmc:/switch", 0777);
   mkdir(kLogDir, 0777);
+  // Without a diagnostics policy InitLogging and every REXSYS_* line are
+  // no-ops (the run-4 log had none of the SDK's own errors).
+  std::string policy_error;
+  const bool policy_ok = rex::diagnostics::Configure(true, "logging", &policy_error);
   rex::InitLogging(kLogPath, spdlog::level::debug);
   REXLOG_INFO("[smoke] SDK logger initialised");
   g_logging_ready = true;
   SMOKE_INFO("step 1 logging: SDK logger writing to %s", kLogPath);
+  if (!policy_ok) {
+    Fail("logging", "diagnostics::Configure(logging): " + policy_error);
+  }
 }
 
 // Runtime addresses to match crash-report PCs against the ELF:
@@ -190,13 +198,40 @@ void StepAddressSpace() {
 // docs/switch-port/03-memory.md). Kept alive for T9, destroyed at exit.
 std::unique_ptr<rex::memory::Memory> g_memory;
 
-void LogArenaStats(const char* when) {
+rex::memory::nx::GuestArenaStats LogArenaStats(const char* when) {
   const auto stats = rex::memory::nx::GetGuestArenaStats();
-  SMOKE_INFO("  arena %s: %zu blocks mapped (%zu MiB, peak %zu), %zu pages committed, "
-             "%" PRIu64 " maps / %" PRIu64 " unmaps, %.2f ms moving blocks in",
+  SMOKE_INFO("  arena %s: %zu blocks mapped (%zu MiB, peak %zu), %zu pages committed "
+             "(%zu references), %" PRIu64 " maps / %" PRIu64 " unmaps, %.2f ms moving blocks in",
              when, stats.mapped_blocks, stats.mapped_blocks * 2, stats.peak_mapped_blocks,
-             stats.committed_pages, stats.map_calls, stats.unmap_calls,
+             stats.committed_pages, stats.page_references, stats.map_calls, stats.unmap_calls,
              double(armTicksToNs(stats.map_ticks)) / 1e6);
+  return stats;
+}
+
+// memory_switch.cpp trace (every SVC of the commit/protect path with its
+// Result, and the failing step) into the smoke log, for the duration of a
+// scope. Not used around faults: the sink would run in the exception handler.
+void TraceLine(const char* line) {
+  SMOKE_INFO("    trace %s", line);
+}
+
+struct ScopedMemoryTrace {
+  ScopedMemoryTrace() { rex::memory::nx::SetMemoryTraceSink(TraceLine); }
+  ~ScopedMemoryTrace() { rex::memory::nx::SetMemoryTraceSink(nullptr); }
+};
+
+// The heap's own view of a page Initialize committed: a failed host commit
+// leaves the page table without the commit state.
+bool CheckCommitted(rex::memory::Memory& memory, uint32_t guest, const char* what) {
+  uint32_t protect = 0;
+  const bool ok = memory.LookupHeap(guest)->QueryProtect(guest, &protect) &&
+                  (protect & rex::memory::kMemoryProtectWrite);
+  SMOKE_INFO("  %08X (%s) committed by Initialize: protect %X -> %s", guest, what, protect,
+             ok ? "ok" : "NOT COMMITTED");
+  if (!ok) {
+    Fail("guest memory", Hex(guest) + " (" + what + ") not committed by Memory::Initialize");
+  }
+  return ok;
 }
 
 // Every guest window must land where rex_guest_table says, as seen by the
@@ -244,6 +279,7 @@ bool WriteRead32(const char* label, void* write_host, void* read_host, uint32_t 
 
 void StepGuestMemory() {
   SMOKE_INFO("step 3 guest memory: rex::memory::Memory::Initialize (runtime path, design A)");
+  ScopedMemoryTrace trace;
   g_memory = std::make_unique<rex::memory::Memory>();
   SMOKE_INFO("  about to Memory::Initialize");
   if (!g_memory->Initialize()) {
@@ -255,12 +291,15 @@ void StepGuestMemory() {
   SMOKE_INFO("  virtual_membase %p, physical_membase %p",
              static_cast<void*>(memory.virtual_membase()),
              static_cast<void*>(memory.physical_membase()));
-  LogArenaStats("after Initialize");
+  const auto initial = LogArenaStats("after Initialize");
   if (!CheckTranslation(memory)) {
     return;
   }
 
   bool ok = true;
+  // Memory::Initialize ignores the result of its own allocations.
+  ok &= CheckCommitted(memory, 0x80000000u, "XEX header page");
+  ok &= CheckCommitted(memory, 0xC0000000u, "GPU writeback 16 MiB");
   // XEX alias: Initialize writes 0x2a6e3f38 (big-endian) at 0x8000001C.
   const uint32_t xex80 = *memory.TranslateVirtual<volatile uint32_t*>(0x8000001C);
   const uint32_t xex90 = *memory.TranslateVirtual<volatile uint32_t*>(0x9000001C);
@@ -309,7 +348,16 @@ void StepGuestMemory() {
   SMOKE_INFO("  about to release both allocations");
   v40->Release(virtual_address);
   vE->Release(e_address);
-  LogArenaStats("after release");
+  const auto released = LogArenaStats("after release");
+  if (released.committed_pages != initial.committed_pages ||
+      released.page_references != initial.page_references) {
+    Fail("guest memory", "release left " + std::to_string(released.committed_pages) +
+                             " pages / " + std::to_string(released.page_references) +
+                             " references, expected the post-Initialize " +
+                             std::to_string(initial.committed_pages) + " / " +
+                             std::to_string(initial.page_references));
+    return;
+  }
   if (!ok) {
     Fail("guest memory", "write/read-back mismatch (see lines above)");
     return;
@@ -323,7 +371,20 @@ void StepGuestMemoryShutdown() {
   }
   SMOKE_INFO("about to destroy rex::memory::Memory");
   g_memory.reset();
-  LogArenaStats("after ~Memory");
+  // Every heap drops its references in ~Memory before the arena goes: nothing
+  // may be left committed, referenced or mapped.
+  const auto stats = LogArenaStats("after ~Memory");
+  if (stats.committed_pages || stats.page_references || stats.mapped_blocks ||
+      stats.blocks_mapped_at_release) {
+    Fail("guest memory shutdown",
+         std::to_string(stats.committed_pages) + " pages committed, " +
+             std::to_string(stats.page_references) + " references, " +
+             std::to_string(stats.mapped_blocks) + " blocks mapped, " +
+             std::to_string(stats.blocks_mapped_at_release) +
+             " blocks still referenced at release (all must be 0)");
+  } else {
+    SMOKE_INFO("  after ~Memory: 0 pages committed, 0 references, 0 blocks mapped -> ok");
+  }
 }
 
 // ── 4. Threads ──────────────────────────────────────────────────────────────
@@ -426,8 +487,13 @@ int main(int argc, char** argv) {
     Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
   }
 
+  const bool passed_before_shutdown = g_first_failure.empty();
   RunProbes(g_memory.get());
   StepGuestMemoryShutdown();
+  if (passed_before_shutdown && !g_first_failure.empty()) {
+    // The verdict above came before the arena was released.
+    Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
+  }
   std::printf("\nPress + to exit.\n");
   consoleUpdate(nullptr);
 

@@ -164,17 +164,30 @@ struct GuestArena {
   uint8_t* physical_base;  // host address of guest physical 0 (physical_membase)
   size_t size;
 };
+// Current values unless marked cumulative. ReleaseGuestArena leaves them in
+// place, so after ~Memory committed_pages and page_references are the leaked
+// ones (both 0 when every heap dropped what it took).
 struct GuestArenaStats {
   size_t mapped_blocks = 0;
   size_t peak_mapped_blocks = 0;
-  size_t committed_pages = 0;  // 4 KiB pages with at least one reference
-  uint64_t map_calls = 0;
-  uint64_t unmap_calls = 0;
-  uint64_t map_ticks = 0;  // armGetSystemTick() spent moving blocks in
+  size_t committed_pages = 0;   // 4 KiB pages with at least one reference
+  size_t page_references = 0;   // sum of the per-page reference counts
+  size_t blocks_mapped_at_release = 0;  // blocks ReleaseGuestArena found still referenced
+  uint64_t map_calls = 0;    // cumulative
+  uint64_t unmap_calls = 0;  // cumulative
+  uint64_t map_ticks = 0;    // cumulative armGetSystemTick() spent moving blocks in
 };
 bool ReserveGuestArena(GuestArena* out);
 void ReleaseGuestArena();
 GuestArenaStats GetGuestArenaStats();
+
+// Diagnostic trace of the commit/protect path: every SVC with its arguments
+// and Result, and the failing step of a commit. Off (nullptr) by default;
+// the sink is called on the calling thread, so it must not be set while
+// exception handlers may run Protect.
+using MemoryTraceSink = void (*)(const char* line);
+void SetMemoryTraceSink(MemoryTraceSink sink);
+void TraceMemory(const char* format, ...) __attribute__((format(printf, 1, 2)));
 }  // namespace nx
 #endif
 

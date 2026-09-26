@@ -491,3 +491,63 @@ ldr  w2, [x2, w5, uxtw]
 - **Fault contemporanei su due thread.** Stack e dump di libnx sono globali, quindi due thread in fault nello stesso momento si corrompono a vicenda. Con il write-watch attivo (GPU + thread guest) può succedere. Servirebbe un punto d'ingresso delle eccezioni con contesto per thread al posto di `__libnx_exception_entry`: non fatto in questa fase.
 - **Lock nei callback.** Una scrittura host su una pagina osservata ora va in fault, e i callback di invalidazione girano sul thread che scrive. Se quel thread tiene un lock che serve al callback (per esempio il mutex di `SharedMemory`), si ha un deadlock. Da verificare nei percorsi GPU che scrivono memoria guest tramite `TranslatePhysical`.
 - **Costo.** T9 misura il giro completo fault → gestore → ripresa.
+
+## 11. Run 4 sulla console: il commit fallisce dopo il primo RW
+
+Run dei commit `08ce38d8..b60da3d1` (`out/console-runs/run4/smoke.log`):
+
+- `Alloc(4 MiB)` nell'heap `0x40000000` fallisce, e T9 non riesce ad allocare 64 KiB;
+- dopo `~Memory` il log riporta "0 blocks mapped" ma "5200 pages committed".
+
+### Causa (dal codice di mesosphere, `kern_k_page_table_base.cpp`)
+
+`svcSetProcessMemoryPermission` verifica lo stato con `CheckMemoryState(..., KMemoryState_FlagCode, KMemoryState_FlagCode, ...)`: lo accettano solo gli stati con `FlagCode`, cioè `Code` e `AliasCode`.
+
+1. `svcMapProcessCodeMemory` lascia il blocco in `AliasCode` (tipo 0x08, `---`).
+2. `MapBlock` lo porta a RW con `svcSetProcessMemoryPermission`: il blocco diventa `AliasCodeData` (tipo 0x09). T1 lo mostra già nel run 4.
+3. `AliasCodeData` ha il gruppo di flag `FlagsData`: c'è `FlagCanReprotect`, **manca `FlagCode`**. Da qui in poi ogni `svcSetProcessMemoryPermission` sul blocco fallisce con `InvalidCurrentMemory` (0xD401), anche se chiede lo stesso RW.
+
+`AllocFixed` del backend, dopo il commit, chiama `ProtectArena`, che usava proprio `svcSetProcessMemoryPermission`. Quindi **ogni commit falliva dopo aver mappato i blocchi e preso i riferimenti**.
+
+Perché l'init sembrava funzionare:
+
+- `Memory::Initialize` ignora il risultato delle sue tre allocazioni con commit: i primi 64 KiB di `0x00000000`, i 16 MiB di writeback in `0xC0000000` (con la fisica sotto) e i 256 KiB XEX in `0x80000000`.
+- I blocchi erano comunque mappati RW, quindi la scrittura a `0x8000001C` e la traduzione passavano.
+- In quelle pagine la tabella degli heap però non registrava il commit.
+
+### Contabilità: una perdita, non un contatore cumulativo
+
+`committed_pages` è un valore corrente: scende in `DecommitArena` quando una pagina perde l'ultimo riferimento. Il 5200 del run 4 è formato così:
+
+| Riferimenti presi e mai rilasciati | Pagine |
+|---|---|
+| init: 16 (`0x00000000`) + 4096 (fisica 0–16 MiB) + 64 (XEX) | 4176 |
+| `Alloc(4 MiB)` fallita | 1024 |
+| **totale dopo `~Memory`** | **5200** |
+
+I rollback mancavano in due punti:
+
+- `AllocFixed` del backend restituiva `nullptr` dopo `ProtectArena` senza rilasciare i riferimenti;
+- `NxCommitPages` restituiva `false` dopo il `Protect` finale senza annullare il proprio commit.
+
+La tabella degli heap non aveva lo stato di commit, quindi `Dispose` non rilasciava niente. `ReleaseGuestArena` smontava poi i blocchi senza toccare i contatori: da qui "0 blocks mapped" con 5200 pagine.
+
+T9 (64 KiB in `0x40000000`) cadeva sugli stessi indirizzi, già referenziati dal commit perso. Il suo `Protect` falliva per la stessa ragione.
+
+### Correzione
+
+- **`memory_switch.cpp`.** `svcSetProcessMemoryPermission` resta solo in `MapBlock`, per il passaggio `AliasCode` → RW. Ogni altra protezione passa da `svcSetMemoryPermission` (serve `FlagCanReprotect`, che `AliasCodeData` ha) tramite `SetArenaPermission`.
+  - `SetArenaPermission` divide l'intervallo sui blocchi del kernel (`svcQueryMemory`), perché anche `svcSetMemoryPermission` richiede stato e permesso uniformi su tutto l'intervallo.
+  - Si applica ai percorsi `ProtectArena`, al riuso di una pagina e alla rimessa a RW prima dello smontaggio.
+- **Rollback.** `AllocFixed` del backend e `NxCommitPages` rilasciano i riferimenti presi se la protezione fallisce.
+- **Statistiche.** Nuovi campi `page_references` (somma dei conteggi) e `blocks_mapped_at_release` (blocchi ancora referenziati trovati da `ReleaseGuestArena`). `map_calls`, `unmap_calls` e `map_ticks` sono marcati come cumulativi.
+- **Trace.** `rex::memory::nx::SetMemoryTraceSink` riceve ogni SVC del percorso commit/protect con argomenti e `Result`, e il passo che fallisce (`AllocFixed`, `Protect`, `NxCommitPages` con heap e pagine).
+
+### Verifica in `switch-smoke`
+
+- **Step 1.** Configura la policy di diagnostica (`logging`). Senza, `InitLogging` e tutte le righe `REXSYS_*` erano no-op: il run 4 non ha nessuna riga dell'SDK.
+- **Step 3.** Gira con il trace attivo, quindi il log contiene la catena completa di SVC. Controlla anche:
+  - che `0x80000000` e `0xC0000000` risultino committed nella tabella dell'heap;
+  - che dopo il rilascio pagine e riferimenti tornino ai valori post-`Initialize`.
+- **Dopo `~Memory`.** Pagine committed, riferimenti, blocchi mappati e blocchi ancora referenziati al rilascio devono essere tutti 0. Altrimenti lo smoke stampa `SMOKE FAIL at guest memory shutdown`.
+- **T9, passo 0.** Chiama `svcSetProcessMemoryPermission` sulla pagina RW dell'arena e registra il codice (atteso 0xD401): conferma la causa sulla console. Il resto di T9 usa `svcSetMemoryPermission`.
