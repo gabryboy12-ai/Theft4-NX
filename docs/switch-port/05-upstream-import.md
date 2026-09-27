@@ -27,8 +27,8 @@ upstream, senza mai vedere i percorsi esclusi.
 | `LibertyRecomp/gpu/shader/**/*.spv`, `*.ir`, `*.metallib` | shader compilati (81 file) |
 | `glue/rexglue-sdk-main/gta4-recomp/generated/` | C++ tradotto dall'eseguibile, da rigenerare in locale |
 
-Il `.gitignore` alla radice elenca i primi nove (sezione "Theft4-NX: paths left
-out of the upstream import"); `generated/` ha la sua regola più su. I due
+Il `.gitignore` alla radice elenca tutti i percorsi tranne `generated/` (sezione "Theft4-NX: paths left
+out of the upstream import"), `generated/` ha la sua regola più su. I due
 `.gitignore` annidati di `LibertyRecompLib/private/` e `LibertyRecompLib/shader/`
 sono ridotti di conseguenza: in git le regole di un `.gitignore` più profondo
 vincono su quelle della radice, e i `!button_prompts/`, `!shader_cache.cpp`,

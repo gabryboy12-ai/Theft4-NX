@@ -802,3 +802,6 @@ tools/xtd_tools/
 tools/ghidra_projects/
 tools/ghidra_*/
 tools/GTAIV.EFLC.FusionFix-master/
+LibertyRecomp/gpu/shader/**/*.spv
+LibertyRecomp/gpu/shader/**/*.ir
+LibertyRecomp/gpu/shader/**/*.metallib
