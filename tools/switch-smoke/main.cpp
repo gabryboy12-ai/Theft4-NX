@@ -12,7 +12,7 @@
 //      core mask; each must run on its core, and logical_processor_count()
 //      must match the mask; then the guest CPU -> core mapping of
 //      XThread::SetActiveCpu (soft and hard affinity, core 3 left to host
-//      workers)
+//      workers), and with core 3 (mask 0xF) one host worker placed on it
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
 // followed by the exploratory probes T1-T10 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
@@ -235,6 +235,9 @@ void StepAddressSpace() {
     }
     SMOKE_INFO("  %-20s %s", item.name, Hex(value).c_str());
   }
+  // 0 = application (e.g. a forwarder or title takeover), 2 = library applet
+  // (album): the core mask and the memory above depend on it.
+  SMOKE_INFO("  %-20s %d", "applet type", int(appletGetAppletType()));
 
   // Memory SVCs a Horizon guest-memory design could rely on
   // (docs/switch-port/03-memory.md). "hinted" means the loader reports the
@@ -475,6 +478,41 @@ void StepGuestCpuMapping(uint64_t core_mask) {
     Fail("threads", "guest/host core masks " + Hex(guest_mask) + "/" + Hex(host_mask) +
                         " for process core mask " + Hex(core_mask));
   }
+  // A host worker as the runtime will place it (04-threads-exit.md section 3):
+  // ideal core 3, mask nx_host_worker_core_mask(). Only with core 3 (mask 0xF).
+  if (host_mask) {
+    std::atomic<int> host_ran{-1};
+    rex::thread::Thread::CreationParameters params;
+    params.stack_size = 64 * 1024;
+    params.create_suspended = true;
+    auto worker = rex::thread::Thread::Create(params, [&host_ran] {
+      uint64_t acc = 0;
+      for (uint64_t k = 0; k < 1000000; k++) {
+        acc = acc * 6364136223846793005ull + k;
+      }
+      host_ran.store(acc ? int(svcGetCurrentProcessorNumber()) : -2);
+    });
+    if (!worker) {
+      Fail("threads", "Thread::Create failed for the host worker");
+    } else {
+      worker->set_ideal_core(3, host_mask);
+      const int32_t ideal = worker->ideal_core();
+      const uint64_t applied = worker->affinity_mask();
+      worker->Resume();
+      const bool joined = rex::thread::Wait(worker.get(), false, std::chrono::milliseconds(10000)) ==
+                          rex::thread::WaitResult::kSuccess;
+      const bool ok = joined && ideal == 3 && applied == host_mask && host_ran.load() == 3;
+      SMOKE_INFO("  host worker: ideal %d, mask %s, ran on core %d -> %s", ideal,
+                 Hex(applied).c_str(), host_ran.load(), ok ? "ok" : "WRONG");
+      if (!ok) {
+        Fail("threads", "host worker on core 3: ideal " + std::to_string(ideal) + ", mask " +
+                            Hex(applied) + ", ran on core " + std::to_string(host_ran.load()));
+      }
+    }
+  } else {
+    SMOKE_INFO("  host worker: core 3 not in the process core mask, skipped");
+  }
+
   const bool ignore = REXCVAR_GET(ignore_thread_affinities);
   SMOKE_INFO("  ignore_thread_affinities default %s -> %s", ignore ? "true" : "false",
              ignore ? "WRONG (must be false on NX)" : "ok");
