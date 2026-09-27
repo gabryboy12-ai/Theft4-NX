@@ -22,7 +22,7 @@ sotto ne tengono conto. Sono stime in giorni di lavoro, non misure.
 
 | Componente | Raccomandazione | Motivo in una riga | Costo stimato |
 |---|---|---|---|
-| Memoria guest | **Tenere il nostro (design A)**, dopo un probe di confronto (T11) | nessun fault per mappare le viste, nessuna moltiplicazione del mappato, pagine R leggibili; il loro modello paga fault e soffitto del mappato | probe 1 g; tenere 0 |
+| Memoria guest | **Decidere con T11 fra A e D** (alias al commit, 03 §13) | il loro accesso è diretto su Switch (più veloce della nostra tabella), ma paga fault e tetto del mappato; D prende l'accesso diretto senza i fault, se entra nel tetto | probe 1 g |
 | Eccezioni e fault | **Tenere il nostro**, prendere il loro crash log | con il design A i fault sono rari; noi serializziamo con una sola eccezione, loro servono 8 slot e due eccezioni per fault | 0,5 g |
 | Priorità dei thread | **Adottare il loro** (guest 0x3B, host 0x2B–0x2D) | oggi i nostri thread guest sono a 0x2C, banda senza time-slicing: uno spin guest affama gli altri | 1 g |
 | Affinità e core | **Fondere**: tenere la nostra mappa morbida, niente affinità rigida | loro misurano che il core preferito non fissa e la maschera esclusiva peggiora i minimi; è già il nostro default | 0,5 g |
@@ -45,9 +45,11 @@ sotto ne tengono conto. Sono stime in giorni di lavoro, non misure.
 `sdk/src/core/guest_memory_switch.{h,cpp}`:
 
 - **Una finestra da 0x120000000 (4,5 GB)** riservata con `virtmemAddReservation`,
-  vuota. Il codice generato resta quello di upstream: `base + addr +
-  REX_PHYS_HOST_OFFSET(addr)` (`pch_h.inja`), cioè accesso diretto più il
-  +0x1000 per gli indirizzi ≥ 0xE0000000.
+  vuota. Il codice generato è `base + addr + REX_PHYS_HOST_OFFSET(addr)`
+  (`pch_h.inja`), ma su Switch `REX_PHYS_HOST_OFFSET` vale 0 (il +0x1000 si
+  applica solo su Windows e Mac ARM64): **accesso diretto**. Il +4 KiB della
+  finestra 0xE0 sta nella posizione della vista (offset fisico `0x100001000`
+  in `map_info` di `xmemory.cpp`).
 - **Alias veri.** Il commit è "memalign → `virtmemFindCodeMemory` →
   `svcMapProcessCodeMemory` → `svcSetProcessMemoryPermission(RW)` →
   `svcMapProcessMemory` in ogni vista". `svcMapProcessMemory` rifiuta come
@@ -88,7 +90,7 @@ riferimenti per pagina; protezione con `svcSetMemoryPermission` a 4 KiB.
 | Fault per mappare | uno per blocco e per vista | nessuno |
 | Pagina in sola lettura | smappata: anche le letture vanno in fault | leggibile (`svcSetMemoryPermission` R, run 6 T9) |
 | SVC nel gestore | evitate ("il gestore non può fare SVC") | usate e verificate (T9: 1000 round trip, 12,15 µs) |
-| Accesso nel codice generato | `base + addr + (addr ≥ 0xE0000000 ? 0x1000 : 0)` | `addr + rex_guest_table[addr >> 24]` |
+| Accesso nel codice generato | `base + addr` (su Switch) | `addr + rex_guest_table[addr >> 24]` |
 | Aritmetica host oltre 16 MiB | contigua (4,5 GB di finestra) | non contigua fra finestre (03 §8) |
 
 **Costo per accesso.** I nostri numeri (run 6, 100 M letture+scritture su 64
@@ -101,11 +103,12 @@ MiB):
 | tabella, 50 % finestre (T7) | 5,94 ns (+69,9 %) | 37,2 ns (+9,3 %) |
 | confronto + `csel` (T6 "A") | 6,72 / 7,83 ns (+92 / +124 %) | 36,6 / 39,2 ns (+7 / +15 %) |
 
-La loro macro non è il "diretto" di T6: aggiunge confronto, selezione e
-somma, una forma vicina alla variante "A" di T6. Non l'abbiamo misurata
-esattamente. Nel microbenchmark è probabile che la nostra tabella non sia più
-lenta della loro macro; nel gioco vero la differenza è piccola rispetto a
-tutto il resto (casuale: pochi punti percentuali in entrambi i casi).
+**Corretto dopo la prima versione di questo documento:** su Switch la loro
+macro è il "diretto" di T6/T7, non la variante con confronto e selezione
+(quella è la forma Windows/Mac). Il loro accesso costa quindi come il diretto:
+nel run 6 la nostra tabella è +48,6 % in sequenziale e +4,8 % in casuale
+rispetto a esso. Il vantaggio per accesso è loro; il costo lo pagano in fault
+e mappature (sotto). T11.3 lo misura sulla memoria vera, con le viste.
 
 ### Raccomandazione: tenere il design A, con un probe T11
 
@@ -118,7 +121,8 @@ tutto il resto (casuale: pochi punti percentuali in entrambi i casi).
 - **T11, prima di decidere definitivamente** (circa 1 giorno):
   1. `svcMapProcessMemory` da un nostro blocco `AliasCodeData` verso una
      seconda vista: funziona? e `svcSetMemoryPermission` sulla vista?
-  2. la loro macro esatta contro la nostra tabella nello stesso run (come T7);
+  2. la loro macro esatta (= diretto su Switch) contro la nostra tabella, sulla
+     memoria vera con le viste;
   3. il tetto `LimitableResource_Memory` letto con `svcGetInfo`.
 
   Se (1) funziona con permessi sulla vista, un modello ibrido (alias solo per

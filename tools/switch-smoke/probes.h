@@ -10,7 +10,7 @@ namespace rex::memory {
 class Memory;
 }
 
-// T1-T10: questions for the guest-memory designs in docs/switch-port/03-memory.md.
+// T1-T11: questions for the guest-memory designs in docs/switch-port/03-memory.md.
 // Results are measurements, not pass/fail: they do not change the SMOKE verdict.
 // `memory` is the runtime guest memory from step 3 (nullptr if it failed).
 void RunProbes(rex::memory::Memory* memory);

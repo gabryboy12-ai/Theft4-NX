@@ -641,3 +641,80 @@ Salvaguardie proposte:
 Partire da **B**: costo nullo sul writeback, granularità sufficiente, nessun cambio al codice generato. Passare ad **A** solo se i log in gioco mostrano accessi a quelle pagine come memoria tramite 0xA/0xC/0xE, oppure codice host che le tocca.
 
 In entrambi i casi il gestore dovrà prendere il minimo di lock (vedi §10, deadlock).
+
+## 13. Tre modelli a confronto: A, nfsmw-nx, D (T11, da completare con la console)
+
+Dopo la lettura di nfsmw-nx (08 §1) c'è un terzo modo di fare le finestre
+fisiche: **alias veri** con `svcMapProcessMemory`, usando come sorgente l'alias
+di codice creato da `svcMapProcessCodeMemory` (la SVC rifiuta la memoria del
+heap con 0xD401). Le conclusioni di §1–§3 ("nessun alias possibile") valevano
+per `svcMapProcessCodeMemory`, `CodeMemory` e `svcMapPhysicalMemory`: questa SVC
+non era stata provata.
+
+**Correzione a 08.** Su Switch la macro di nfsmw-nx è `base + addr` puro:
+`REX_PHYS_HOST_OFFSET` vale `0x1000` solo su Windows e Mac ARM64 (`pch_h.inja`),
+e il +4 KiB della finestra 0xE0 è nella posizione della vista (offset fisico
+`0x100001000` in `map_info`). Il loro costo per accesso è quindi quello del
+"diretto", non della variante con confronto e selezione.
+
+### I modelli
+
+| | A (attuale) | nfsmw-nx | D |
+|---|---|---|---|
+| Alias | no | sì, `svcMapProcessMemory` | sì, `svcMapProcessMemory` |
+| Quando si mappa una vista | — | al primo accesso da quella vista, dal gestore di eccezioni | al commit del blocco, tutte le viste insieme |
+| Codice generato | `addr + rex_guest_table[addr >> 24]` | `base + addr` | `base + addr` |
+| Viste della memoria fisica | nessuna (tabella) | 0x7F, 0xA0, 0xC0, 0xE0 (+4 KiB), fisica grezza | 0x7F (16 MiB), 0xA0, 0xC0, 0xE0 (+4 KiB); l'alias di codice fa da fisica grezza |
+| Memoria mappata per 512 MiB di fisica | 512 MiB | cresce con le viste toccate | 512 MiB di alias + ~1,5 GiB di viste, subito |
+| Fault per mappare | nessuno | uno per blocco e per vista | nessuno |
+| Pagina in sola lettura | leggibile (`svcSetMemoryPermission` sul blocco) | smappata: anche le letture vanno in fault | da misurare (T11.1: permessi su una vista) |
+| Aritmetica host oltre 16 MiB | non contigua fra finestre | contigua | contigua |
+| Rischio principale | bug di aritmetica fra finestre in hook e `function.h` | volume di fault, gestore concorrente, tetto del mappato | tetto del mappato (nfsmw: 472 MB reali → 1782 MB mappati, poi 2001-0103) |
+
+### T11 (switch-smoke)
+
+1. **T11.1, la primitiva sui nostri blocchi.** Un blocco da 2 MiB spostato con
+   `svcMapProcessCodeMemory` e reso RW, poi due viste RW con
+   `svcMapProcessMemory`. Scrittura da una vista e lettura dalle altre; `ldaxr/stlxr`
+   alternando le tre viste sulla stessa parola; CAS da una vista con verifica
+   dalle altre; tre thread su tre core, ciascuno sulla propria vista, sulla
+   stessa parola. Poi `svcSetMemoryPermission(R)` su una vista e sull'alias con
+   le viste mappate.
+2. **T11.2, modello D e tetto.** 256 blocchi (512 MiB) con le viste 0x7F, 0xA0,
+   0xC0, 0xE0 create al commit, tempo per blocco. Poi altri blocchi con le loro
+   viste in finestre da 4 GiB, e infine solo viste dei blocchi già impegnati,
+   finché il kernel rifiuta. Riporta memoria reale, memoria mappata, il result
+   code del rifiuto e `LimitableResource_Memory` (limite e valore corrente).
+3. **T11.3, costo per accesso sulla memoria vera.** 33 blocchi con le viste
+   reali, 100 M letture+scritture per variante, sequenziale e casuale, tutto
+   sotto 0xA0000000 oppure metà dalla finestra 0xE0: diretto (modello D), la
+   nostra tabella (modello A), la macro di nfsmw-nx copiata dal loro
+   `pch_h.inja` (su Switch = diretto) e, come riferimento, la loro forma
+   Windows/Mac con il confronto. I checksum devono coincidere: provano che le
+   quattro varianti toccano gli stessi byte.
+
+### Numeri dalla console
+
+Da riempire con il run di T11:
+
+| Misura | Valore |
+|---|---|
+| T11.1 alias RW a tre vie, atomiche su tutte le viste | |
+| T11.1 `svcSetMemoryPermission` su una vista / sull'alias | |
+| T11.2 tempo per blocco (commit + 4 viste) | |
+| T11.2 `LimitableResource_Memory` con 512 MiB in modello D | |
+| T11.2 tetto: memoria reale, mappata, result code | |
+| T11.3 sequenziale basso: tabella / nfsmw-nx vs diretto | |
+| T11.3 sequenziale misto | |
+| T11.3 casuale basso | |
+| T11.3 casuale misto | |
+
+### Come decidere
+
+- Se T11.2 mostra che D entra con margine nel tetto e T11.1 che le viste sono
+  coerenti anche per le atomiche, D dà il codice generato più semplice e
+  veloce (diretto) senza i fault di nfsmw-nx.
+- Se il tetto è vicino, nfsmw-nx (viste su richiesta) o A restano le scelte;
+  fra i due, A non ha fault né concorrenza nel gestore.
+- La scelta cambia le macro NX di `init_h.inja` (tabella o diretto), quindi va
+  fatta prima di compilare il codice generato per Switch.

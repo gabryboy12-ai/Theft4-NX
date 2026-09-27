@@ -1,4 +1,4 @@
-// switch-smoke probes T1-T10: open questions of the Horizon guest-memory designs
+// switch-smoke probes T1-T11: open questions of the Horizon guest-memory designs
 // (docs/switch-port/03-memory.md).
 //
 //   T1 svcMapProcessCodeMemory + svcSetProcessMemoryPermission as an RW alias
@@ -14,6 +14,9 @@
 //      restores RW and resumes) and the runtime's physical write watch
 //   T10 concurrent write faults: 3 threads, one per core, 10,000 faults each
 //      on separate watched pages (is libnx's single exception stack a problem?)
+//   T11 guest-memory models with svcMapProcessMemory aliases: the alias
+//      primitive on our 2 MiB blocks, model D (every view at commit) and its
+//      ceiling, and the access cost of direct / table / nfsmw-nx's macros
 //
 // Rules: each probe logs BEGIN before doing anything; every syscall that may
 // fault or kill the process is preceded by an "about to" line (each line is
@@ -1494,6 +1497,691 @@ void ProbeConcurrentFaults(rex::memory::Memory* memory) {
   SMOKE_INFO("T10 END");
 }
 
+// ── T11 ─────────────────────────────────────────────────────────────────────
+
+// Three guest-memory models side by side (docs/switch-port/03-memory.md §13):
+//   A      no aliases; guest -> host through rex_guest_table (current design)
+//   nfsmw  aliases with svcMapProcessMemory, each view mapped on its first
+//          access from the exception handler (StevensND/nfsmw-nx)
+//   D      the same aliases, every view mapped when the block is committed
+// T11.1 the alias primitive on one of our 2 MiB blocks; T11.2 model D for
+// 512 MiB of guest physical memory, then the ceiling; T11.3 the access cost of
+// direct, table and nfsmw-nx's macro on real aliased memory.
+
+constexpr u64 k4GiB = 0x100000000ull;
+
+// A block of backing memory moved to a code alias and made RW, as MapBlock in
+// memory_switch.cpp does: the source of every view.
+struct T11Block {
+  u8* backing = nullptr;
+  u8* shadow = nullptr;
+  bool moved = false;
+};
+
+// A view mapped with svcMapProcessMemory, kept for the unmap.
+struct T11View {
+  u8* dst = nullptr;
+  u64 src = 0;
+  u64 size = 0;
+};
+
+// Moves `b.backing` to `shadow` and makes it RW. Returns the failing Result.
+Result T11Commit(Handle process, T11Block& b, u8* shadow) {
+  b.shadow = shadow;
+  Result rc = svcMapProcessCodeMemory(process, reinterpret_cast<u64>(shadow),
+                                      reinterpret_cast<u64>(b.backing), k2MiB);
+  if (R_FAILED(rc)) {
+    return rc;
+  }
+  b.moved = true;
+  return svcSetProcessMemoryPermission(process, reinterpret_cast<u64>(shadow), k2MiB, Perm_Rw);
+}
+
+Result T11MapView(Handle process, std::vector<T11View>& views, u8* dst, u64 src, u64 size) {
+  const Result rc = svcMapProcessMemory(dst, process, src, size);
+  if (R_SUCCEEDED(rc)) {
+    views.push_back({dst, src, size});
+  }
+  return rc;
+}
+
+// Unmaps every view (newest first), then moves every block back and frees it.
+// Returns the number of failures; a block that stays moved is leaked.
+int T11Release(Handle process, std::vector<T11View>& views, std::vector<T11Block>& blocks) {
+  int failed = 0;
+  for (auto it = views.rbegin(); it != views.rend(); ++it) {
+    if (R_FAILED(svcUnmapProcessMemory(it->dst, process, it->src, it->size))) {
+      ++failed;
+    }
+  }
+  views.clear();
+  for (T11Block& b : blocks) {
+    if (b.moved) {
+      if (R_FAILED(svcUnmapProcessCodeMemory(process, reinterpret_cast<u64>(b.shadow),
+                                             reinterpret_cast<u64>(b.backing), k2MiB))) {
+        ++failed;
+        continue;  // still moved: must not go back to malloc
+      }
+      b.moved = false;
+    }
+    std::free(b.backing);
+    b.backing = nullptr;
+  }
+  blocks.clear();
+  return failed;
+}
+
+// Reserves `size` bytes (2 MiB aligned) in the ASLR region, like nfsmw-nx's
+// guest window, or in the code region for the code aliases.
+u8* T11Reserve(bool code, u64 size, VirtmemReservation** out) {
+  virtmemLock();
+  void* raw = code ? virtmemFindCodeMemory(size + k2MiB, 0) : virtmemFindAslr(size + k2MiB, 0);
+  u8* base = raw ? reinterpret_cast<u8*>((reinterpret_cast<u64>(raw) + k2MiB - 1) &
+                                         ~u64(k2MiB - 1))
+                 : nullptr;
+  *out = base ? virtmemAddReservation(base, size) : nullptr;
+  virtmemUnlock();
+  return *out ? base : nullptr;
+}
+
+struct T11Limits {
+  bool ok = false;
+  s64 limit = 0;
+  s64 current = 0;
+};
+
+// LimitableResource_Memory of this process: "how much memory can a process map".
+T11Limits T11ReadLimits() {
+  T11Limits l;
+  if (!envIsSyscallHinted(0x30) || !envIsSyscallHinted(0x31)) {
+    return l;
+  }
+  u64 handle = 0;
+  if (R_FAILED(svcGetInfo(&handle, InfoType_ResourceLimit, INVALID_HANDLE, 0)) || handle == 0) {
+    return l;
+  }
+  const Handle h = Handle(handle);
+  l.ok = R_SUCCEEDED(svcGetResourceLimitLimitValue(&l.limit, h, LimitableResource_Memory)) &&
+         R_SUCCEEDED(svcGetResourceLimitCurrentValue(&l.current, h, LimitableResource_Memory));
+  svcCloseHandle(h);
+  return l;
+}
+
+void T11LogMemory(const char* when) {
+  u64 total = 0, used = 0;
+  svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+  svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+  const T11Limits l = T11ReadLimits();
+  if (l.ok) {
+    SMOKE_INFO("T11 memory %s: total %" PRIu64 " MiB, used %" PRIu64
+               " MiB; resource limit Memory %" PRId64 " / %" PRId64 " MiB",
+               when, total >> 20, used >> 20, l.current >> 20, l.limit >> 20);
+  } else {
+    SMOKE_INFO("T11 memory %s: total %" PRIu64 " MiB, used %" PRIu64
+               " MiB; resource limit not readable",
+               when, total >> 20, used >> 20);
+  }
+}
+
+// ── T11.1: the alias primitive ──
+
+void T11ConcurrentAtomics(u8* const views[3], u64 offset) {
+  constexpr int kRounds = 100000;
+  Write64(views[0] + offset, 0);
+  std::atomic<u32> retries{0};
+  std::vector<std::unique_ptr<rex::thread::Thread>> threads;
+  const u64 guest_mask = rex::thread::nx_guest_core_mask();
+  for (int n = 0; n < 3; ++n) {
+    rex::thread::Thread::CreationParameters params;
+    params.stack_size = 64 * 1024;
+    params.create_suspended = true;
+    u64* word = reinterpret_cast<u64*>(views[n] + offset);
+    auto thread = rex::thread::Thread::Create(params, [word, &retries] {
+      u32 r = 0;
+      for (int i = 0; i < kRounds; ++i) {
+        r += ExclusiveAdd64(word, 0x100000001ull);
+      }
+      retries.fetch_add(r);
+    });
+    if (!thread) {
+      SMOKE_INFO("T11.1 Thread::Create failed; concurrent atomics skipped");
+      return;
+    }
+    const uint32_t core = uint32_t(n);
+    if (guest_mask & (u64(1) << core)) {
+      thread->set_ideal_core(core, u64(1) << core);
+    }
+    threads.push_back(std::move(thread));
+  }
+  SMOKE_INFO("T11.1 about to run 3 threads x %d ldaxr/stlxr adds on one word, each through its "
+             "own view",
+             kRounds);
+  for (auto& t : threads) {
+    t->Resume();
+  }
+  bool joined = true;
+  for (auto& t : threads) {
+    joined &= rex::thread::Wait(t.get(), false, std::chrono::milliseconds(20000)) ==
+              rex::thread::WaitResult::kSuccess;
+  }
+  const u64 expected = 3ull * kRounds * 0x100000001ull;
+  const u64 got = Read64(views[1] + offset);
+  SMOKE_INFO("T11.1 concurrent atomics through 3 views: 0x%016" PRIx64 " (expected 0x%016" PRIx64
+             "), %u retries%s -> %s",
+             got, expected, retries.load(), joined ? "" : ", TIMEOUT",
+             got == expected ? "ok" : "WRONG");
+}
+
+void T11AliasPrimitive(Handle process) {
+  SMOKE_INFO("T11.1 BEGIN svcMapProcessMemory with a svcMapProcessCodeMemory alias as source");
+  std::vector<T11Block> blocks(1);
+  std::vector<T11View> views;
+  VirtmemReservation* code_res = nullptr;
+  VirtmemReservation* view_res = nullptr;
+  u8* shadow = T11Reserve(true, k2MiB, &code_res);
+  u8* window = T11Reserve(false, 2 * k2MiB, &view_res);
+  blocks[0].backing = static_cast<u8*>(std::aligned_alloc(k2MiB, k2MiB));
+  if (!shadow || !window || !blocks[0].backing) {
+    SMOKE_INFO("T11.1 SKIP reservation or backing failed");
+    std::free(blocks[0].backing);
+    ReleaseReservation(code_res);
+    ReleaseReservation(view_res);
+    return;
+  }
+  std::memset(blocks[0].backing, 0, k2MiB);
+  SMOKE_INFO("T11.1 about to move %p to the code alias %p and make it RW", blocks[0].backing,
+             shadow);
+  Result rc = T11Commit(process, blocks[0], shadow);
+  SMOKE_INFO("T11.1 commit %s: alias %s", Rc(rc).c_str(), QueryStr(shadow).c_str());
+  u8* view[3] = {shadow, window, window + k2MiB};
+  if (R_SUCCEEDED(rc)) {
+    for (int n = 1; n < 3 && R_SUCCEEDED(rc); ++n) {
+      SMOKE_INFO("T11.1 about to svcMapProcessMemory(dst %p, own process, src %p, 2 MiB)",
+                 view[n], shadow);
+      rc = T11MapView(process, views, view[n], reinterpret_cast<u64>(shadow), k2MiB);
+      SMOKE_INFO("T11.1 view %d %s: %s", n + 1, Rc(rc).c_str(), QueryStr(view[n]).c_str());
+    }
+    SMOKE_INFO("T11.1 alias after the views: %s", QueryStr(shadow).c_str());
+  }
+  if (R_SUCCEEDED(rc)) {
+    // Every write through one view must show in the other two.
+    CrossCheck("T11.1", "alias", shadow + 0x100, "view2", view[1] + 0x100, kPattern1);
+    CrossCheck("T11.1", "view2", view[1] + 0x108, "view3", view[2] + 0x108, kPattern2);
+    CrossCheck("T11.1", "view3", view[2] + 0x110, "alias", shadow + 0x110, kPattern3);
+    CrossCheck("T11.1", "view2", view[1] + k2MiB - 8, "alias", shadow + k2MiB - 8, kPattern1);
+
+    if (CanWrite(shadow) && CanWrite(view[1]) && CanWrite(view[2])) {
+      // Exclusives and CAS through every view on the same words.
+      auto* w0 = reinterpret_cast<u32*>(shadow + 0x400);
+      *w0 = 0;
+      u32 retries = 0;
+      SMOKE_INFO("T11.1 about to run ldaxr/stlxr alternating the three views on one word");
+      for (int i = 0; i < 300000; ++i) {
+        retries += ExclusiveAdd32(reinterpret_cast<u32*>(view[i % 3] + 0x400), 1);
+      }
+      SMOKE_INFO("T11.1 alternating exclusives: 0x%08x (expected 0x%08x), %u retries -> %s",
+                 *w0, 300000u, retries, *w0 == 300000u ? "ok" : "WRONG");
+      Write64(shadow + 0x500, 0x2222222222222222ull);
+      const bool hit = __sync_bool_compare_and_swap(reinterpret_cast<u64*>(view[1] + 0x500),
+                                                    0x2222222222222222ull, 0x5555555555555555ull);
+      const bool miss = __sync_bool_compare_and_swap(reinterpret_cast<u64*>(view[2] + 0x500),
+                                                     0x2222222222222222ull, 0x6666666666666666ull);
+      const u64 seen = Read64(shadow + 0x500);
+      SMOKE_INFO("T11.1 CAS: hit through view2=%d, stale miss through view3=%d, alias reads "
+                 "0x%016" PRIx64 " -> %s",
+                 hit, miss, seen, hit && !miss && seen == 0x5555555555555555ull ? "ok" : "WRONG");
+      T11ConcurrentAtomics(view, 0x600);
+    } else {
+      SMOKE_INFO("T11.1 views not all writable; atomics skipped");
+    }
+
+    // Protection on a view, and on the alias with views mapped (nfsmw-nx:
+    // ProcessMem has no PermChangeAllowed). RW is restored at once.
+    SMOKE_INFO("T11.1 about to svcSetMemoryPermission(view2, 4 KiB, R)");
+    Result prc = svcSetMemoryPermission(view[1], 0x1000, Perm_R);
+    SMOKE_INFO("T11.1 view2 set R %s: %s", Rc(prc).c_str(), QueryStr(view[1]).c_str());
+    if (R_SUCCEEDED(prc)) {
+      prc = svcSetMemoryPermission(view[1], 0x1000, Perm_Rw);
+      SMOKE_INFO("T11.1 view2 back to RW %s", Rc(prc).c_str());
+    }
+    SMOKE_INFO("T11.1 about to svcSetMemoryPermission(alias, 4 KiB, R) with two views mapped");
+    prc = svcSetMemoryPermission(shadow, 0x1000, Perm_R);
+    SMOKE_INFO("T11.1 alias set R %s: alias %s; view2 %s", Rc(prc).c_str(),
+               QueryStr(shadow).c_str(), QueryStr(view[1]).c_str());
+    if (R_SUCCEEDED(prc)) {
+      prc = svcSetMemoryPermission(shadow, 0x1000, Perm_Rw);
+      SMOKE_INFO("T11.1 alias back to RW %s", Rc(prc).c_str());
+    }
+  }
+  SMOKE_INFO("T11.1 about to unmap %zu views and the alias", views.size());
+  const int failed = T11Release(process, views, blocks);
+  SMOKE_INFO("T11.1 release: %d failures", failed);
+  if (!failed) {
+    ReleaseReservation(code_res);
+    ReleaseReservation(view_res);
+  }
+  SMOKE_INFO("T11.1 END");
+}
+
+// ── T11.2: model D and the ceiling ──
+
+// nfsmw-nx's views of guest physical memory (xmemory.cpp map_info), as host
+// offsets from the window base: guest 0x7F (first 16 MiB), 0xA0, 0xC0 and
+// 0xE0 with the +4 KiB of PhysicalHeap, so generated code is base + addr.
+// Maps block `k` (physical k * 2 MiB) into every view that covers it; on a
+// refusal *failed_view names the view.
+Result T11MapBlockViews(Handle process, std::vector<T11View>& views, u8* window, u64 k,
+                        const T11Block& b, int* failed_view) {
+  const u64 phys = k * k2MiB;
+  const u64 src = reinterpret_cast<u64>(b.shadow);
+  struct View {
+    u64 guest;
+    bool covers;
+  };
+  const View kViews[] = {
+      {0x7F000000ull + phys, phys < 0x1000000ull},
+      {0xA0000000ull + phys, true},
+      {0xC0000000ull + phys, true},
+  };
+  for (int n = 0; n < 3; ++n) {
+    if (!kViews[n].covers) {
+      continue;
+    }
+    const Result rc = T11MapView(process, views, window + kViews[n].guest, src, k2MiB);
+    if (R_FAILED(rc)) {
+      *failed_view = n;
+      return rc;
+    }
+  }
+  // 0xE0: guest 0xE0000000 + x is physical x + 0x1000. Block 0 loses its
+  // first page (as in nfsmw-nx, the view starts at physical 0x1000).
+  const u64 e_src = k == 0 ? src + 0x1000 : src;
+  const u64 e_size = k == 0 ? k2MiB - 0x1000 : k2MiB;
+  u8* e_dst = window + 0xE0000000ull + (k == 0 ? 0 : phys - 0x1000);
+  const Result rc = T11MapView(process, views, e_dst, e_src, e_size);
+  if (R_FAILED(rc)) {
+    *failed_view = 3;
+  }
+  return rc;
+}
+
+void T11ModelD(Handle process) {
+  constexpr u64 kPhysBlocks = 256;       // 512 MiB, the guest physical memory
+  constexpr u64 kMaxBlocks = 1536;       // 3 GiB of backing at most
+  constexpr u64 kMaxExtraViewsGiB = 48;  // cap of the views-only phase
+  static const char* const kViewName[] = {"0x7F", "0xA0", "0xC0", "0xE0"};
+  SMOKE_INFO("T11.2 BEGIN model D: %" PRIu64 " x 2 MiB with the 0x7F/0xA0/0xC0/0xE0 views mapped "
+             "at commit, then more blocks and views until the kernel refuses",
+             kPhysBlocks);
+  T11LogMemory("before");
+
+  VirtmemReservation* code_res = nullptr;
+  VirtmemReservation* window_res = nullptr;
+  u8* shadows = T11Reserve(true, kMaxBlocks * k2MiB, &code_res);
+  u8* window = T11Reserve(false, k4GiB, &window_res);
+  if (!shadows || !window) {
+    SMOKE_INFO("T11.2 SKIP cannot reserve %" PRIu64 " MiB of code space or a 4 GiB window",
+               (kMaxBlocks * k2MiB) >> 20);
+    ReleaseReservation(code_res);
+    ReleaseReservation(window_res);
+    return;
+  }
+  SMOKE_INFO("T11.2 window %p (4 GiB), aliases %p", window, shadows);
+
+  // Heap kept aside so that logging and cleanup still have memory when the
+  // backing allocations exhaust the heap.
+  void* reserve = std::malloc(32u << 20);
+  std::vector<T11Block> blocks;
+  std::vector<T11View> views;
+  blocks.reserve(kMaxBlocks);
+  views.reserve(kMaxBlocks * 4 + 8192);
+  u64 backing_bytes = 0, mapped_view_bytes = 0;
+  double commit_ms_total = 0, views_ms_total = 0, min_ms = 1e9, max_ms = 0;
+  std::string stop = "limit of the probe reached";
+  bool kernel_refused = false;
+  // Blocks beyond 512 MiB get their views in further 4 GiB windows, 512 MiB of
+  // guest physical memory per window.
+  std::vector<std::pair<VirtmemReservation*, u8*>> extra_windows;
+
+  for (u64 k = 0; k < kMaxBlocks; ++k) {
+    u8* win = window;
+    u64 k_in_window = k;
+    if (k >= kPhysBlocks) {
+      const u64 w = (k - kPhysBlocks) / kPhysBlocks;
+      k_in_window = (k - kPhysBlocks) % kPhysBlocks;
+      if (w >= extra_windows.size()) {
+        VirtmemReservation* r = nullptr;
+        u8* base = T11Reserve(false, k4GiB, &r);
+        if (!base) {
+          stop = "no address space for another 4 GiB window (not a kernel refusal)";
+          break;
+        }
+        extra_windows.push_back({r, base});
+      }
+      win = extra_windows[w].second;
+    }
+    if (k == 0 || k == kPhysBlocks - 1 || k == kPhysBlocks || (k % 128) == 0) {
+      SMOKE_INFO("T11.2 about to commit block %" PRIu64 " and map its views", k);
+    }
+    T11Block b;
+    b.backing = static_cast<u8*>(std::aligned_alloc(k2MiB, k2MiB));
+    if (!b.backing) {
+      stop = "heap exhausted (aligned_alloc), not a kernel refusal";
+      break;
+    }
+    const u64 t0 = armGetSystemTick();
+    Result rc = T11Commit(process, b, shadows + k * k2MiB);
+    const u64 t1 = armGetSystemTick();
+    blocks.push_back(b);  // released below whether it moved or not
+    if (R_FAILED(rc)) {
+      SMOKE_INFO("T11.2 block %" PRIu64 " commit %s", k, Rc(rc).c_str());
+      stop = "commit refused: " + Rc(rc);
+      kernel_refused = true;
+      break;
+    }
+    backing_bytes += k2MiB;
+    const size_t views_before = views.size();
+    int failed_view = 0;
+    rc = T11MapBlockViews(process, views, win, k_in_window, blocks.back(), &failed_view);
+    const u64 t2 = armGetSystemTick();
+    for (size_t v = views_before; v < views.size(); ++v) {
+      mapped_view_bytes += views[v].size;
+    }
+    if (R_FAILED(rc)) {
+      SMOKE_INFO("T11.2 block %" PRIu64 " view %s %s", k, kViewName[failed_view], Rc(rc).c_str());
+      stop = std::string("view ") + kViewName[failed_view] + " of block " + std::to_string(k) +
+             " refused: " + Rc(rc);
+      kernel_refused = true;
+      break;
+    }
+    const double ms = TicksToMs(t2 - t0);
+    commit_ms_total += TicksToMs(t1 - t0);
+    views_ms_total += TicksToMs(t2 - t1);
+    min_ms = std::min(min_ms, ms);
+    max_ms = std::max(max_ms, ms);
+    if (k + 1 == kPhysBlocks) {
+      SMOKE_INFO("T11.2 RESULT model D, %" PRIu64 " blocks (512 MiB): commit %.2f ms + views %.2f "
+                 "ms; per block min %.3f avg %.3f max %.3f ms; %zu views, %" PRIu64
+                 " MiB mapped in views",
+                 kPhysBlocks, commit_ms_total, views_ms_total, min_ms,
+                 (commit_ms_total + views_ms_total) / double(kPhysBlocks), max_ms, views.size(),
+                 mapped_view_bytes >> 20);
+      T11LogMemory("with model D for 512 MiB");
+    }
+  }
+  u64 committed = 0;
+  for (const T11Block& b : blocks) {
+    committed += b.moved ? 1 : 0;
+  }
+
+  // Views only: more views of the committed blocks, no new backing, until the
+  // kernel refuses (skipped if it already did).
+  u64 extra_view_bytes = 0;
+  if (!kernel_refused && committed) {
+    std::free(reserve);
+    reserve = nullptr;
+    SMOKE_INFO("T11.2 about to add views of the %" PRIu64 " committed blocks only (no backing), "
+               "up to %" PRIu64 " GiB",
+               committed, kMaxExtraViewsGiB);
+    Result rc = 0;
+    while (R_SUCCEEDED(rc) && extra_view_bytes < (kMaxExtraViewsGiB << 30)) {
+      VirtmemReservation* r = nullptr;
+      u8* base = T11Reserve(false, k4GiB, &r);
+      if (!base) {
+        stop += "; views only: no address space left (not a kernel refusal)";
+        break;
+      }
+      extra_windows.push_back({r, base});
+      for (u64 k = 0; k < committed && k * k2MiB < k4GiB && R_SUCCEEDED(rc); ++k) {
+        rc = T11MapView(process, views, base + k * k2MiB,
+                        reinterpret_cast<u64>(blocks[k].shadow), k2MiB);
+        if (R_SUCCEEDED(rc)) {
+          extra_view_bytes += k2MiB;
+        }
+      }
+    }
+    if (R_FAILED(rc)) {
+      stop += "; views only refused: " + Rc(rc);
+    }
+  }
+  SMOKE_INFO("T11.2 RESULT ceiling: %" PRIu64 " blocks committed (%" PRIu64
+             " MiB real), %zu views, %" PRIu64 " MiB mapped in views (%" PRIu64
+             " MiB counting the aliases); stopped: %s",
+             committed, backing_bytes >> 20, views.size(),
+             (mapped_view_bytes + extra_view_bytes) >> 20,
+             (mapped_view_bytes + extra_view_bytes + backing_bytes) >> 20, stop.c_str());
+  T11LogMemory("at the ceiling");
+
+  SMOKE_INFO("T11.2 about to unmap %zu views and %zu blocks", views.size(), blocks.size());
+  const u64 t0 = armGetSystemTick();
+  const int failed = T11Release(process, views, blocks);
+  SMOKE_INFO("T11.2 release in %.1f ms: %d failures", TicksToMs(armGetSystemTick() - t0), failed);
+  std::free(reserve);
+  if (!failed) {
+    for (auto& [r, base] : extra_windows) {
+      (void)base;
+      ReleaseReservation(r);
+    }
+    ReleaseReservation(code_res);
+    ReleaseReservation(window_res);
+  }
+  T11LogMemory("after release");
+  SMOKE_INFO("T11.2 END");
+}
+
+// ── T11.3: access cost on real aliased memory ──
+
+// nfsmw-nx's generated-code macros, verbatim from
+// sdk/resources/templates/codegen/pch_h.inja of StevensND/nfsmw-nx (ReXGlue SDK
+// changes, BSD 3-Clause, Copyright (c) 2026 Tom Clay and contributors). On
+// Switch the #else branch applies: the +4 KiB of the 0xE0 window lives in the
+// view placement, and the macro is base + addr.
+#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
+#define T11_NFSMW_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
+#else
+#define T11_NFSMW_PHYS_HOST_OFFSET(addr) 0u
+#endif
+#define T11_NFSMW_LOAD_U32(x) \
+  __builtin_bswap32(*(volatile u32*)(base + (u32)(x) + T11_NFSMW_PHYS_HOST_OFFSET(x)))
+#define T11_NFSMW_STORE_U32(x, y) \
+  (*(volatile u32*)(base + (u32)(x) + T11_NFSMW_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
+// Their Windows / Apple Silicon form, for reference: compare + select.
+#define T11_PC_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
+
+enum T11Mode { kT11Direct, kT11Table, kT11Nfsmw, kT11NfsmwPc };
+
+// One read + one write of a big-endian u32 per iteration, as T6/T7. Low:
+// every address below 0xA0000000; mixed: half of them through the 0xE0 window.
+template <T11Mode kMode, bool kMixed, bool kRandom>
+__attribute__((noinline)) u64 T11Loop(u8* base, const u64* table, u64 iterations) {
+  u32 x = 0x12345678u;
+  u32 off = 0;
+  u64 sum = 0;
+  for (u64 i = 0; i < iterations; ++i) {
+    u32 window;
+    if constexpr (kRandom) {
+      x = x * 1664525u + 1013904223u;
+      off = x & kBenchMask;
+      window = x >> 31;
+    } else {
+      off = (off + 4) & kBenchMask;
+      window = u32(i) & 1;
+    }
+    u32 guest = kMixed ? (off | (window ? 0xE0000000u : 0u)) : off;
+    asm volatile("" : "+r"(guest));  // the window is unknown at compile time
+    u32 v;
+    if constexpr (kMode == kT11Nfsmw) {
+      v = T11_NFSMW_LOAD_U32(guest);
+      T11_NFSMW_STORE_U32(guest, v + 1);
+    } else {
+      u8* host;
+      if constexpr (kMode == kT11Direct) {
+        host = base + guest;
+      } else if constexpr (kMode == kT11Table) {
+        host = reinterpret_cast<u8*>(u64(guest) + table[guest >> 24]);
+      } else {
+        host = base + guest + T11_PC_PHYS_HOST_OFFSET(guest);
+      }
+      volatile u32* p = reinterpret_cast<volatile u32*>(host);
+      v = __builtin_bswap32(*p);
+      *p = __builtin_bswap32(v + 1);
+    }
+    sum += v;
+  }
+  return sum;
+}
+
+template <T11Mode kMode, bool kMixed, bool kRandom>
+double T11Bench(u8* base, const u64* table, u8* shadows, u64 phys_bytes, const char* name,
+                u64* checksum) {
+  std::memset(shadows, 0, phys_bytes);  // same start for every variant
+  SMOKE_INFO("T11.3 running %s ...", name);
+  const u64 t0 = armGetSystemTick();
+  *checksum = T11Loop<kMode, kMixed, kRandom>(base, table, kBenchIterations);
+  const double ms = TicksToMs(armGetSystemTick() - t0);
+  SMOKE_INFO("T11.3   %-40s %9.1f ms  (%.2f ns/iter, checksum %" PRIx64 ")", name, ms,
+             ms * 1e6 / double(kBenchIterations), *checksum);
+  return ms;
+}
+
+void T11AccessCost(Handle process) {
+  constexpr u64 kBlocks = 33;  // 64 MiB + the 4 KiB shift of the 0xE0 window
+  SMOKE_INFO("T11.3 BEGIN access cost on aliased memory: direct (model D, and nfsmw-nx's macro "
+             "on Switch), table (model A), nfsmw-nx's PC macro; 100M read+write each");
+  VirtmemReservation* code_res = nullptr;
+  VirtmemReservation* d_res = nullptr;
+  VirtmemReservation* pc_res = nullptr;
+  u8* shadows = T11Reserve(true, kBlocks * k2MiB, &code_res);
+  u8* d_base = T11Reserve(false, k4GiB, &d_res);
+  u8* pc_base = T11Reserve(false, k4GiB, &pc_res);
+  std::vector<T11Block> blocks;
+  std::vector<T11View> views;
+  bool ok = shadows && d_base && pc_base;
+  if (ok) {
+    SMOKE_INFO("T11.3 about to commit %" PRIu64 " blocks and map their views", kBlocks);
+  }
+  for (u64 k = 0; ok && k < kBlocks; ++k) {
+    T11Block b;
+    b.backing = static_cast<u8*>(std::aligned_alloc(k2MiB, k2MiB));
+    if (!b.backing) {
+      ok = false;
+      break;
+    }
+    const Result rc = T11Commit(process, b, shadows + k * k2MiB);
+    blocks.push_back(b);
+    if (R_FAILED(rc)) {
+      SMOKE_INFO("T11.3 block %" PRIu64 " commit %s", k, Rc(rc).c_str());
+      ok = false;
+      break;
+    }
+    const u64 src = reinterpret_cast<u64>(blocks.back().shadow);
+    const u64 phys = k * k2MiB;
+    // Low guest addresses: the same physical memory at base + 0 (benchmark
+    // only), in both windows.
+    Result vrc = T11MapView(process, views, d_base + phys, src, k2MiB);
+    if (R_SUCCEEDED(vrc)) {
+      vrc = T11MapView(process, views, pc_base + phys, src, k2MiB);
+    }
+    // 0xE0 of model D and nfsmw-nx on Switch: the view is shifted by 4 KiB.
+    if (R_SUCCEEDED(vrc)) {
+      vrc = k == 0 ? T11MapView(process, views, d_base + 0xE0000000ull, src + 0x1000,
+                                k2MiB - 0x1000)
+                   : T11MapView(process, views, d_base + 0xE0000000ull + phys - 0x1000, src,
+                                k2MiB);
+    }
+    // 0xE0 of the PC form: an unshifted view, the macro adds the 4 KiB.
+    if (R_SUCCEEDED(vrc)) {
+      vrc = T11MapView(process, views, pc_base + 0xE0000000ull + phys, src, k2MiB);
+    }
+    if (R_FAILED(vrc)) {
+      SMOKE_INFO("T11.3 block %" PRIu64 " view %s", k, Rc(vrc).c_str());
+      ok = false;
+    }
+  }
+  if (!ok) {
+    SMOKE_INFO("T11.3 SKIP setup failed");
+  } else {
+    alignas(64) static u64 table[256];
+    for (u32 i = 0; i < 256; ++i) {
+      table[i] = i >= 0xE0 ? reinterpret_cast<u64>(shadows) - 0xE0000000ull + 0x1000
+                           : reinterpret_cast<u64>(shadows);
+    }
+    // Every variant must reach the same bytes: guest 0xE0000008 is physical
+    // 0x1008 in each of them.
+    const u32 probe_guest = 0xE0000008u;
+    Write64(shadows + 0x1008, kPattern2);
+    const u64 via_d = Read64(d_base + probe_guest);
+    const u64 via_table = Read64(reinterpret_cast<u8*>(probe_guest + table[probe_guest >> 24]));
+    const u64 via_pc = Read64(pc_base + probe_guest + T11_PC_PHYS_HOST_OFFSET(probe_guest));
+    const bool same = via_d == kPattern2 && via_table == kPattern2 && via_pc == kPattern2;
+    SMOKE_INFO("T11.3 guest 0xE0000008 through D, table and PC form: %s",
+               same ? "same physical bytes -> ok" : "DIFFERENT");
+    u8* db = d_base;
+    u8* pb = pc_base;
+    const u64* t = table;
+    asm volatile("" : "+r"(db), "+r"(pb), "+r"(t));
+    const u64 bytes = kBlocks * k2MiB;
+    u64 c[16] = {};
+    double ms[16] = {};
+    ms[0] = T11Bench<kT11Direct, false, false>(db, t, shadows, bytes, "direct seq low", &c[0]);
+    ms[1] = T11Bench<kT11Table, false, false>(db, t, shadows, bytes, "table seq low", &c[1]);
+    ms[2] = T11Bench<kT11Nfsmw, false, false>(db, t, shadows, bytes, "nfsmw-nx Switch seq low", &c[2]);
+    ms[3] = T11Bench<kT11NfsmwPc, false, false>(pb, t, shadows, bytes, "nfsmw-nx PC form seq low", &c[3]);
+    ms[4] = T11Bench<kT11Direct, true, false>(db, t, shadows, bytes, "direct seq mixed", &c[4]);
+    ms[5] = T11Bench<kT11Table, true, false>(db, t, shadows, bytes, "table seq mixed", &c[5]);
+    ms[6] = T11Bench<kT11Nfsmw, true, false>(db, t, shadows, bytes, "nfsmw-nx Switch seq mixed", &c[6]);
+    ms[7] = T11Bench<kT11NfsmwPc, true, false>(pb, t, shadows, bytes, "nfsmw-nx PC form seq mixed", &c[7]);
+    ms[8] = T11Bench<kT11Direct, false, true>(db, t, shadows, bytes, "direct rnd low", &c[8]);
+    ms[9] = T11Bench<kT11Table, false, true>(db, t, shadows, bytes, "table rnd low", &c[9]);
+    ms[10] = T11Bench<kT11Nfsmw, false, true>(db, t, shadows, bytes, "nfsmw-nx Switch rnd low", &c[10]);
+    ms[11] = T11Bench<kT11NfsmwPc, false, true>(pb, t, shadows, bytes, "nfsmw-nx PC form rnd low", &c[11]);
+    ms[12] = T11Bench<kT11Direct, true, true>(db, t, shadows, bytes, "direct rnd mixed", &c[12]);
+    ms[13] = T11Bench<kT11Table, true, true>(db, t, shadows, bytes, "table rnd mixed", &c[13]);
+    ms[14] = T11Bench<kT11Nfsmw, true, true>(db, t, shadows, bytes, "nfsmw-nx Switch rnd mixed", &c[14]);
+    ms[15] = T11Bench<kT11NfsmwPc, true, true>(pb, t, shadows, bytes, "nfsmw-nx PC form rnd mixed", &c[15]);
+    static const char* const kRow[] = {"sequential low", "sequential mixed", "random low",
+                                       "random mixed"};
+    for (int r = 0; r < 4; ++r) {
+      const double* m = ms + r * 4;
+      const u64* s = c + r * 4;
+      const bool same_sum = s[0] == s[1] && s[0] == s[2] && s[0] == s[3];
+      SMOKE_INFO("T11.3 RESULT %-16s direct %.1f ms; table %+.1f%%; nfsmw-nx Switch %+.1f%%; "
+                 "nfsmw-nx PC form %+.1f%%; checksums %s",
+                 kRow[r], m[0], Pct(m[1], m[0]), Pct(m[2], m[0]), Pct(m[3], m[0]),
+                 same_sum ? "equal" : "DIFFERENT");
+    }
+  }
+  SMOKE_INFO("T11.3 about to unmap %zu views and %zu blocks", views.size(), blocks.size());
+  const int failed = T11Release(process, views, blocks);
+  SMOKE_INFO("T11.3 release: %d failures", failed);
+  if (!failed) {
+    ReleaseReservation(code_res);
+    ReleaseReservation(d_res);
+    ReleaseReservation(pc_res);
+  }
+  SMOKE_INFO("T11.3 END");
+}
+
+void ProbeAliasModels() {
+  const char* p = "T11";
+  SMOKE_INFO("T11 BEGIN guest-memory models A / nfsmw-nx / D (svcMapProcessMemory aliases)");
+  if (!Hinted(p, 0x74, "svcMapProcessMemory") || !Hinted(p, 0x75, "svcUnmapProcessMemory") ||
+      !Hinted(p, 0x77, "svcMapProcessCodeMemory") ||
+      !Hinted(p, 0x78, "svcUnmapProcessCodeMemory") ||
+      !Hinted(p, 0x73, "svcSetProcessMemoryPermission")) {
+    return;
+  }
+  const Handle process = envGetOwnProcessHandle();
+  if (process == INVALID_HANDLE) {
+    SMOKE_INFO("T11 SKIP envGetOwnProcessHandle() returned no handle");
+    return;
+  }
+  T11AliasPrimitive(process);
+  T11ModelD(process);
+  T11AccessCost(process);
+  SMOKE_INFO("T11 END");
+}
+
 }  // namespace
 
 void RunProbes(rex::memory::Memory* memory) {
@@ -1508,5 +2196,6 @@ void RunProbes(rex::memory::Memory* memory) {
   ProbeOnDemandCommit();
   ProbeFaultRoundTrip(memory);
   ProbeConcurrentFaults(memory);
+  ProbeAliasModels();
   SMOKE_INFO("PROBES DONE");
 }
