@@ -88,6 +88,7 @@ these presets yet.
 - [03 – Guest memory](docs/switch-port/03-memory.md): Horizon's constraints, the designs considered, design A, console results, MMIO and write watch.
 - [04 – Threads and exit](docs/switch-port/04-threads-exit.md): affinity, processor count, CPU→core mapping, the exit crash, module base for crash reports.
 - [05 – Upstream import](docs/switch-port/05-upstream-import.md): which upstream paths this repository leaves out and how to import upstream updates without them.
+- [06 – Game boot plan](docs/switch-port/06-game-boot-plan.md): which executable the generator expects, building the host `rexglue` tool, regenerating with the NX macros, and the first headless game NRO (plan only).
 
 ## Credits
 
