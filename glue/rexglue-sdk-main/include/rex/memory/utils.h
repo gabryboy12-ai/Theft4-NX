@@ -175,16 +175,17 @@ struct GuestArenaStats {
   size_t blocks_mapped_at_release = 0;  // blocks ReleaseGuestArena found still referenced
   uint64_t map_calls = 0;    // cumulative
   uint64_t unmap_calls = 0;  // cumulative
-  uint64_t map_ticks = 0;    // cumulative armGetSystemTick() spent moving blocks in
+  uint64_t map_ticks = 0;    // cumulative armGetSystemTick() in the two SVCs that move a block in
 };
 bool ReserveGuestArena(GuestArena* out);
 void ReleaseGuestArena();
 GuestArenaStats GetGuestArenaStats();
 
 // Diagnostic trace of the commit/protect path: every SVC with its arguments
-// and Result, and the failing step of a commit. Off (nullptr) by default;
-// the sink is called on the calling thread, so it must not be set while
-// exception handlers may run Protect.
+// and Result, and the failing step of a commit. Off by default: lines reach
+// the sink only when the cvar nx_memory_trace is true and a sink is set
+// (nullptr by default). The sink is called on the calling thread, so it must
+// not be set while exception handlers may run Protect.
 using MemoryTraceSink = void (*)(const char* line);
 void SetMemoryTraceSink(MemoryTraceSink sink);
 void TraceMemory(const char* format, ...) __attribute__((format(printf, 1, 2)));

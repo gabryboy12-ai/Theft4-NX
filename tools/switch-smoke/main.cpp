@@ -45,6 +45,7 @@
 #include <switch.h>
 
 #include <rex/chrono/clock.h>
+#include <rex/cvar.h>
 #include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
@@ -60,6 +61,8 @@ namespace {
 
 constexpr const char* kLogDir = "sdmc:/switch/theft4";
 constexpr const char* kLogPath = "sdmc:/switch/theft4/smoke.log";
+// Optional cvars, e.g. "nx_memory_trace = true"; argv (nxlink) works too.
+constexpr const char* kConfigPath = "sdmc:/switch/theft4/smoke.toml";
 
 std::string g_first_failure;
 bool g_logging_ready = false;
@@ -72,6 +75,8 @@ bool g_logging_ready = false;
 // which a PIE link does not relocate, so &__start__ is 0 at run time.
 extern "C" char _start;
 int main(int argc, char** argv);
+
+REXCVAR_DECLARE(bool, nx_memory_trace);
 
 namespace {
 
@@ -166,6 +171,10 @@ void StepLogging() {
   rex::InitLogging(config);
   REXLOG_INFO("[smoke] SDK logger initialised");
   SMOKE_INFO("step 1 logging: SDK logger and smoke lines both appended to %s", kLogPath);
+  rex::cvar::LoadConfig(kConfigPath);
+  rex::cvar::FinalizeInit();
+  SMOKE_INFO("  cvars (argv, then %s): nx_memory_trace %s", kConfigPath,
+             REXCVAR_GET(nx_memory_trace) ? "on" : "off");
   if (!policy_ok) {
     Fail("logging", "diagnostics::Configure(logging): " + policy_error);
   }
@@ -257,7 +266,7 @@ std::unique_ptr<rex::memory::Memory> g_memory;
 rex::memory::nx::GuestArenaStats LogArenaStats(const char* when) {
   const auto stats = rex::memory::nx::GetGuestArenaStats();
   SMOKE_INFO("  arena %s: %zu blocks mapped (%zu MiB, peak %zu), %zu pages committed "
-             "(%zu references), %" PRIu64 " maps / %" PRIu64 " unmaps, %.2f ms moving blocks in",
+             "(%zu references), %" PRIu64 " maps / %" PRIu64 " unmaps, %.2f ms in the map SVCs",
              when, stats.mapped_blocks, stats.mapped_blocks * 2, stats.peak_mapped_blocks,
              stats.committed_pages, stats.page_references, stats.map_calls, stats.unmap_calls,
              double(armTicksToNs(stats.map_ticks)) / 1e6);
@@ -266,13 +275,19 @@ rex::memory::nx::GuestArenaStats LogArenaStats(const char* when) {
 
 // memory_switch.cpp trace (every SVC of the commit/protect path with its
 // Result, and the failing step) into the smoke log, for the duration of a
-// scope. Not used around faults: the sink would run in the exception handler.
+// scope, when the cvar nx_memory_trace is on (off by default: each line is a
+// durable append to the SD card). Not used around faults: the sink would run
+// in the exception handler.
 void TraceLine(const char* line) {
   SMOKE_INFO("    trace %s", line);
 }
 
 struct ScopedMemoryTrace {
-  ScopedMemoryTrace() { rex::memory::nx::SetMemoryTraceSink(TraceLine); }
+  ScopedMemoryTrace() {
+    if (REXCVAR_GET(nx_memory_trace)) {
+      rex::memory::nx::SetMemoryTraceSink(TraceLine);
+    }
+  }
   ~ScopedMemoryTrace() { rex::memory::nx::SetMemoryTraceSink(nullptr); }
 };
 
@@ -618,8 +633,7 @@ void StepThreads() {
 }  // namespace
 
 int main(int argc, char** argv) {
-  (void)argc;
-  (void)argv;
+  rex::cvar::Init(argc, argv);
   consoleInit(nullptr);
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
   PadState pad;

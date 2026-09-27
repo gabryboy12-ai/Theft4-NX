@@ -54,6 +54,10 @@ Copy the NRO to the SD card and start it from the Homebrew Menu. It needs no
 game files. Its log is written to `sdmc:/switch/theft4/smoke.log`; press + to
 exit.
 
+The trace of every guest-memory SVC is off by default (each line is a durable
+write to the SD card). To turn it on, put `nx_memory_trace = true` in
+`sdmc:/switch/theft4/smoke.toml`, or pass `--nx_memory_trace` through nxlink.
+
 On Windows, the libmspack submodule stores 15 files as git symlinks. With
 `core.symlinks=false` they are checked out as text files holding the link
 path and `mspack`/`rexruntime` fail to compile (`lzxd.c:1:1: error`). Fix the

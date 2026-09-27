@@ -56,6 +56,7 @@
 #include <vector>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/guest_table.h>
 #include <rex/memory/utils.h>
@@ -74,6 +75,12 @@ alignas(64) uint64_t rex_guest_table[256];
 uint8_t* rex_guest_virtual_base;
 uint8_t* rex_guest_physical_base;
 }
+
+// Every commit and protect goes through here in the game, so the trace (one
+// sink call per SVC) stays off unless asked for.
+REXCVAR_DEFINE_BOOL(nx_memory_trace, false, "Memory",
+                    "Switch: send every guest-arena SVC and its Result to the memory trace sink "
+                    "(diagnostics only; slow when the sink writes to storage)");
 
 namespace rex {
 namespace memory {
@@ -118,6 +125,9 @@ void SetMemoryTraceSink(MemoryTraceSink sink) {
 }
 
 void TraceMemory(const char* format, ...) {
+  if (!REXCVAR_GET(nx_memory_trace)) {
+    return;
+  }
   const MemoryTraceSink sink = g_trace_sink.load(std::memory_order_acquire);
   if (!sink) {
     return;
@@ -188,15 +198,19 @@ bool MapBlock(size_t block) {
   }
   std::memset(source, 0, kNxBlockSize);
   const u64 dst = reinterpret_cast<u64>(BlockAddress(block));
-  const u64 t0 = armGetSystemTick();
+  // Only the two SVCs are timed: the trace sink may write to storage.
+  u64 t0 = armGetSystemTick();
   Result rc = svcMapProcessCodeMemory(g_arena.process, dst, reinterpret_cast<u64>(source),
                                       kNxBlockSize);
+  u64 svc_ticks = armGetSystemTick() - t0;
   TraceMemory("MapBlock %zu: svcMapProcessCodeMemory(dst 0x%lx, src %p, 0x%zx) rc=0x%x", block,
               dst, source, kNxBlockSize, rc);
   if (R_SUCCEEDED(rc)) {
     // AliasCode -> AliasCodeData RW: the block's only
     // svcSetProcessMemoryPermission (see the file header).
+    t0 = armGetSystemTick();
     rc = svcSetProcessMemoryPermission(g_arena.process, dst, kNxBlockSize, Perm_Rw);
+    svc_ticks += armGetSystemTick() - t0;
     TraceMemory("MapBlock %zu: svcSetProcessMemoryPermission(0x%lx, 0x%zx, RW) rc=0x%x", block,
                 dst, kNxBlockSize, rc);
     if (R_FAILED(rc)) {
@@ -212,7 +226,7 @@ bool MapBlock(size_t block) {
     std::free(source);
     return false;
   }
-  g_arena.stats.map_ticks += armGetSystemTick() - t0;
+  g_arena.stats.map_ticks += svc_ticks;
   b.source = source;
   ++g_arena.stats.mapped_blocks;
   ++g_arena.stats.map_calls;
