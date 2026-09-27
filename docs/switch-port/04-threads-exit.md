@@ -214,3 +214,60 @@ Verificato nel link: crt0 salta al nuovo `__libnx_exception_entry` e `libnx.a(ex
 Il log conteneva solo 3 righe, tutte dell'SDK. Dal run 5 lo smoke configura la policy di diagnostica, quindi il file sink dell'SDK tiene `smoke.log` aperto in scrittura. Il FS di Horizon rifiuta di aprire in scrittura un file già aperto in scrittura da un altro handle, quindi ogni `open()` di `DurableAppend` falliva in silenzio.
 
 Ora l'SDK non ha un file sink proprio: un sink (`DurableSink`) scrive ogni riga con lo stesso percorso open/write/fsync/close delle righe dello smoke, sotto un mutex, nello stesso ordine. Un'apertura fallita viene segnalata a schermo.
+
+## 7. Priorità dei thread (schema di nfsmw-nx)
+
+### Il problema
+
+Su Horizon **solo la priorità 0x3B ha il time-slicing** (fette di circa 10 ms).
+Ogni altra banda è cooperativa: un thread che non si blocca tiene il suo core
+contro i thread di pari o minore priorità, anche se altri core sono liberi
+(misure di nfsmw-nx, `docs/platform-notes.md`; vedi 08). Il codice ricompilato
+fa spin (attese attive del D3D del gioco, `Sleep(0)`), quindi i thread guest
+devono stare nell'unica banda con time-slicing, e i thread host sopra di loro
+per non restare affamati.
+
+Prima di questa modifica `MapToSwitchPriority` metteva 0x2C a ogni thread
+senza priorità esplicita e saliva verso 0x20 con quella generica dell'SDK: i
+thread guest finivano a 0x2C o sopra, cioè proprio nella situazione descritta.
+
+### Bande
+
+| Priorità | Thread | Perché |
+|---|---|---|
+| 0x2B | `Audio Worker`, `XMA Decoder` | la scadenza più dura: il server audio del gioco ha un ring di due pacchetti da 256 campioni (10,7 ms); se il worker arriva tardi il mix esce con la voce muta ("audio robotico" in nfsmw-nx). Deve poter interrompere tutto il resto del runtime |
+| 0x2C | `GPU VSync`, `Kernel Host Tasks`, ogni altro thread host (anche quelli creati con `rex::thread::Thread` senza priorità, per esempio il TimerQueue) | lavoro breve su cui i thread guest aspettano: l'interrupt di vblank a 60 Hz (se ritarda si sposta il pacing), APC/DPC e compiti del kernel |
+| 0x2D | `GPU Commands` | lavoro CPU pesante per frame: sotto vblank, audio e compiti del kernel per non affamarli; sopra i guest che lo aspettano |
+| 0x3B | tutti i thread guest; `Vulkan Pipelines`, `D3D12 Pipelines`, `Shader Translation`, `* Storage writer` | i guest per il time-slicing; la creazione delle pipeline e la scrittura delle cache sono lavoro di massa: nella banda cooperativa terrebbero un core intero contro i guest |
+
+I nomi si confrontano per **prefisso**: `XThread::set_name` aggiunge
+` (F80000xx)` con l'handle, e con un confronto esatto (bug trovato da nfsmw-nx)
+audio e XMA restavano nella banda 0x2C. I thread delle pipeline non esistono
+ancora su Switch (renderer non portato): la regola è già pronta.
+
+### Codice
+
+- **`rex/thread.h`** (solo NX): `kNxPriorityAudio` 0x2B, `kNxPriorityHost` 0x2C,
+  `kNxPriorityGpu` 0x2D, `kNxPriorityGuest` 0x3B;
+  `nx_priority_for_thread(guest, name)`; `Thread::set_nx_priority(p)`, che
+  imposta la priorità Horizon così com'è, senza la mappatura generica.
+- **`threading_switch.cpp`.** `ThreadStartRoutine` imposta **sempre** una
+  priorità esplicita: quella richiesta con `initial_priority` (mappata come
+  prima) oppure 0x2C, invece del default di pthread di libnx.
+- **`xthread.cpp`.** `XThread::Create`, ramo NX:
+  `set_nx_priority(nx_priority_for_thread(is_guest_thread(), thread_name_))`,
+  dopo che il nome è stato assegnato. `XThread::SetPriority` (le chiamate
+  `KeSetBasePriorityThread` del gioco) su NX aggiorna solo il `KTHREAD`: ogni
+  XThread resta nella banda del suo ruolo, i guest a 0x3B qualunque cosa
+  chiedano. Le altre
+  piattaforme non cambiano.
+
+### Verifica in `switch-smoke` (step 4)
+
+- la tabella delle bande su nomi con suffisso d'handle;
+- un `rex::thread::Thread` senza priorità parte a 0x2C (`svcGetThreadPriority`
+  dal thread stesso);
+- `set_nx_priority(0x3B)` letto con `priority()` e dal thread;
+- **la premessa, misurata:** due thread che fanno spin per 200 ms sullo stesso
+  core. A 0x3B il secondo deve partire entro 50 ms dal primo (time-slicing);
+  a 0x2C deve partire dopo almeno 150 ms, cioè quando il primo ha finito.

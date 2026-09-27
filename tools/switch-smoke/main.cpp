@@ -12,7 +12,9 @@
 //      core mask; each must run on its core, and logical_processor_count()
 //      must match the mask; then the guest CPU -> core mapping of
 //      XThread::SetActiveCpu (soft and hard affinity, core 3 left to host
-//      workers), and with core 3 (mask 0xF) one host worker placed on it
+//      workers), and with core 3 (mask 0xF) one host worker placed on it;
+//      then the Horizon priority bands (guest 0x3B, host 0x2B-0x2D) and a
+//      measurement that only 0x3B is time-sliced
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
 // followed by the exploratory probes T1-T10 in probes.cpp (alias primitives,
 // heap size, cost of the guest-memory design A). Press + to exit.
@@ -463,6 +465,135 @@ void StepGuestMemoryShutdown() {
 
 // ── 4. Threads ──────────────────────────────────────────────────────────────
 
+// Horizon priority bands (04-threads-exit.md section 7): the policy table,
+// the explicit default of a runtime thread, set_nx_priority read back, and
+// the premise itself: two threads spinning on one core start together at 0x3B
+// (time-sliced) and one after the other at 0x2C (cooperative).
+int64_t NxSecondStartDelayMs(int32_t priority, uint32_t core) {
+  constexpr uint64_t kSpinMs = 200;
+  std::atomic<uint64_t> start_ticks[2] = {};
+  std::vector<std::unique_ptr<rex::thread::Thread>> threads;
+  for (int n = 0; n < 2; ++n) {
+    rex::thread::Thread::CreationParameters params;
+    params.stack_size = 64 * 1024;
+    params.create_suspended = true;
+    auto thread = rex::thread::Thread::Create(params, [n, &start_ticks] {
+      const uint64_t t0 = armGetSystemTick();
+      start_ticks[n].store(t0);
+      const uint64_t spin = armNsToTicks(kSpinMs * 1000000ull);
+      while (armGetSystemTick() - t0 < spin) {
+      }
+    });
+    if (!thread) {
+      return -1;
+    }
+    thread->set_nx_priority(priority);
+    thread->set_ideal_core(core, uint64_t(1) << core);
+    threads.push_back(std::move(thread));
+  }
+  for (auto& thread : threads) {
+    thread->Resume();
+  }
+  for (auto& thread : threads) {
+    if (rex::thread::Wait(thread.get(), false, std::chrono::milliseconds(5000)) !=
+        rex::thread::WaitResult::kSuccess) {
+      return -1;
+    }
+  }
+  const uint64_t a = start_ticks[0].load(), b = start_ticks[1].load();
+  return int64_t(armTicksToNs(a > b ? a - b : b - a) / 1000000ull);
+}
+
+void StepThreadPriorities(uint64_t core_mask) {
+  struct Expect {
+    bool guest;
+    const char* name;
+    int32_t priority;
+  };
+  const Expect kExpect[] = {
+      {true, "XThread0004 (F8000010)", rex::thread::kNxPriorityGuest},
+      {false, "Audio Worker (F8000014)", rex::thread::kNxPriorityAudio},
+      {false, "XMA Decoder (F8000018)", rex::thread::kNxPriorityAudio},
+      {false, "GPU Commands (F800001C)", rex::thread::kNxPriorityGpu},
+      {false, "GPU VSync (F8000020)", rex::thread::kNxPriorityHost},
+      {false, "Kernel Host Tasks (F8000004)", rex::thread::kNxPriorityHost},
+      {false, "Vulkan Pipelines", rex::thread::kNxPriorityGuest},
+      {false, "some host thread", rex::thread::kNxPriorityHost},
+  };
+  bool table_ok = true;
+  for (const Expect& e : kExpect) {
+    const int32_t got = rex::thread::nx_priority_for_thread(e.guest, e.name);
+    if (got != e.priority) {
+      table_ok = false;
+      Fail("threads", std::string("priority for '") + e.name + "' " + Hex(uint64_t(got)) +
+                          ", expected " + Hex(uint64_t(e.priority)));
+    }
+  }
+  SMOKE_INFO("  priority bands: guest 0x3B, audio 0x2B, host 0x2C, GPU commands 0x2D, "
+             "pipelines 0x3B -> %s", table_ok ? "ok" : "MISMATCH");
+
+  std::atomic<int32_t> default_priority{-1};
+  rex::thread::Thread::CreationParameters params;
+  params.stack_size = 64 * 1024;
+  params.create_suspended = true;
+  auto thread = rex::thread::Thread::Create(params, [&default_priority] {
+    s32 prio = -1;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    default_priority.store(prio);
+  });
+  if (!thread) {
+    Fail("threads", "Thread::Create failed for the priority check");
+    return;
+  }
+  thread->Resume();
+  rex::thread::Wait(thread.get(), false, std::chrono::milliseconds(5000));
+  const bool default_ok = default_priority.load() == rex::thread::kNxPriorityHost;
+  SMOKE_INFO("  runtime thread default priority %s (expected 0x2C) -> %s",
+             Hex(uint64_t(default_priority.load())).c_str(), default_ok ? "ok" : "WRONG");
+  if (!default_ok) {
+    Fail("threads", "runtime thread default priority " + Hex(uint64_t(default_priority.load())));
+  }
+
+  params.create_suspended = true;
+  std::atomic<int32_t> seen{-1};
+  auto guest_like = rex::thread::Thread::Create(params, [&seen] {
+    s32 prio = -1;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    seen.store(prio);
+  });
+  if (guest_like) {
+    guest_like->set_nx_priority(rex::thread::kNxPriorityGuest);
+    const int32_t read_back = guest_like->priority();
+    guest_like->Resume();
+    rex::thread::Wait(guest_like.get(), false, std::chrono::milliseconds(5000));
+    const bool ok = read_back == rex::thread::kNxPriorityGuest &&
+                    seen.load() == rex::thread::kNxPriorityGuest;
+    SMOKE_INFO("  set_nx_priority(0x3B): priority() %s, seen by the thread %s -> %s",
+               Hex(uint64_t(read_back)).c_str(), Hex(uint64_t(seen.load())).c_str(),
+               ok ? "ok" : "WRONG");
+    if (!ok) {
+      Fail("threads", "set_nx_priority(0x3B) read back " + Hex(uint64_t(read_back)));
+    }
+  }
+
+  // Time slicing, measured: the core is the highest guest core, away from
+  // the smoke's own thread where possible.
+  const uint64_t guest_mask = core_mask & 0x7;
+  const uint32_t core = guest_mask ? 63 - uint32_t(__builtin_clzll(guest_mask)) : 0;
+  SMOKE_INFO("  about to spin two threads on core %u at 0x3B, then at 0x2C (200 ms each)",
+             core);
+  const int64_t sliced = NxSecondStartDelayMs(rex::thread::kNxPriorityGuest, core);
+  const int64_t cooperative = NxSecondStartDelayMs(rex::thread::kNxPriorityHost, core);
+  const bool slicing_ok = sliced >= 0 && sliced < 50 && cooperative >= 150;
+  SMOKE_INFO("  second spinner started %lld ms after the first at 0x3B, %lld ms at 0x2C -> %s",
+             (long long)sliced, (long long)cooperative,
+             slicing_ok ? "ok (only 0x3B is time-sliced)" : "UNEXPECTED");
+  if (!slicing_ok) {
+    Fail("threads", "time slicing: second start " + std::to_string(sliced) + " ms at 0x3B, " +
+                        std::to_string(cooperative) + " ms at 0x2C");
+  }
+}
+
 // The Switch core split XThread::SetActiveCpu applies (04-threads-exit.md
 // section 3): Xbox 360 CPUs 0,1 -> core 0, 2,3 -> 1, 4,5 -> 2, core 3 kept
 // for host workers; soft affinity (ideal core + every guest core) unless
@@ -666,6 +797,7 @@ void StepThreads() {
   }
 
   StepGuestCpuMapping(core_mask);
+  StepThreadPriorities(core_mask);
 }
 
 }  // namespace

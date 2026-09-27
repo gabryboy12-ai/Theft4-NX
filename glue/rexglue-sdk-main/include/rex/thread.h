@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -104,6 +105,21 @@ uint64_t nx_host_worker_core_mask();
 // pair shares a core, so 0,1 -> 0; 2,3 -> 1; 4,5 -> 2. Falls back to the
 // lowest guest core if that core is not in the process core mask.
 uint32_t nx_guest_cpu_core(uint32_t cpu_index);
+
+// Horizon thread priorities (docs/switch-port/04-threads-exit.md section 7).
+// Lower is higher. Only 0x3B is time-sliced; every other band is cooperative,
+// so a thread that never blocks keeps its core against threads of the same or
+// lower priority. Guest code spins, so guests run at 0x3B and host service
+// threads above them, by role (scheme of nfsmw-nx / MarathonRecomp-NX).
+constexpr int32_t kNxPriorityAudio = 0x2B;  // Audio Worker, XMA Decoder
+constexpr int32_t kNxPriorityHost = 0x2C;   // vblank, kernel host tasks, other host threads
+constexpr int32_t kNxPriorityGpu = 0x2D;    // GPU command processor
+constexpr int32_t kNxPriorityGuest = 0x3B;  // guest threads and bulk host work
+
+// Horizon priority for a runtime thread: kNxPriorityGuest for guest threads,
+// otherwise by the name its owner gave it (compared by prefix: XThread names
+// carry a " (F80000xx)" handle suffix).
+int32_t nx_priority_for_thread(bool guest_thread, std::string_view name);
 #endif
 
 // Gets a stable thread-specific ID, but may not be. Use for informative
@@ -460,6 +476,10 @@ class Thread : public WaitHandle {
 
   // Horizon's ideal core of the thread.
   virtual int32_t ideal_core() = 0;
+
+  // Sets the Horizon priority (0x00-0x3F) as is, without the generic
+  // ThreadPriority mapping of set_priority. priority() reads it back.
+  virtual void set_nx_priority(int32_t hos_priority) = 0;
 #endif
 
   // Adds a user-mode asynchronous procedure call request to the thread queue.

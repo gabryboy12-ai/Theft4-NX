@@ -485,9 +485,15 @@ X_STATUS XThread::Create() {
     set_name(fmt::format("XThread{:04X}", thread_->system_id()));
   }
 
+#if REX_PLATFORM_NX
+  // Horizon bands by role, not the guest's own priority: only 0x3B is
+  // time-sliced (docs/switch-port/04-threads-exit.md section 7).
+  thread_->set_nx_priority(rex::thread::nx_priority_for_thread(is_guest_thread(), thread_name_));
+#else
   if (creation_params_.creation_flags & 0x60) {
     thread_->set_priority(creation_params_.creation_flags & 0x20 ? 1 : 0);
   }
+#endif
 
   // Assign the newly created thread to the logical processor, and also set up
   // the current CPU in KPCR and KTHREAD.
@@ -881,9 +887,15 @@ void XThread::SetPriority(int32_t increment) {
   } else {
     target_priority = rex::thread::ThreadPriority::kNormal;
   }
+#if REX_PLATFORM_NX
+  // Guest threads stay at 0x3B whatever the guest asks: any other band stops
+  // time-slicing, and a spinning guest thread would starve its core.
+  (void)target_priority;
+#else
   if (!REXCVAR_GET(ignore_thread_priorities)) {
     thread_->set_priority(target_priority);
   }
+#endif
 }
 
 void XThread::SetAffinity(uint32_t affinity) {

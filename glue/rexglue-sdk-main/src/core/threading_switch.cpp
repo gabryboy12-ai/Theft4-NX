@@ -135,6 +135,32 @@ uint64_t nx_guest_core_mask() { return NxProcessCoreMask() & kNxGuestCores; }
 
 uint64_t nx_host_worker_core_mask() { return NxProcessCoreMask() & kNxHostWorkerCores; }
 
+int32_t nx_priority_for_thread(bool guest_thread, std::string_view name) {
+  if (guest_thread) {
+    return kNxPriorityGuest;
+  }
+  // Audio has the hardest deadline (a 10.7 ms packet ring in the game's XAudio
+  // voice): it must preempt everything else the runtime runs.
+  if (name.starts_with("Audio Worker") || name.starts_with("XMA Decoder")) {
+    return kNxPriorityAudio;
+  }
+  // The command processor does bulk CPU work per frame; below vblank and host
+  // tasks so it cannot starve them, above the guests that wait on it.
+  if (name.starts_with("GPU Commands")) {
+    return kNxPriorityGpu;
+  }
+  // Pipeline creation and cache writing are bulk work: time-sliced with the
+  // guests instead of holding a core against them.
+  if (name.starts_with("Vulkan Pipelines") || name.starts_with("D3D12 Pipelines") ||
+      name.starts_with("Shader Translation") || name.starts_with("Vulkan Storage writer") ||
+      name.starts_with("D3D12 Storage writer")) {
+    return kNxPriorityGuest;
+  }
+  // GPU VSync, Kernel Host Tasks and every other host thread: short work that
+  // guest threads wait on.
+  return kNxPriorityHost;
+}
+
 uint32_t nx_guest_cpu_core(uint32_t cpu_index) {
   const uint32_t core = cpu_index / 2;  // 0,1 -> 0; 2,3 -> 1; 4,5 -> 2
   const uint64_t guest_mask = nx_guest_core_mask();
@@ -763,6 +789,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
     svcSetThreadPriority(nx_handle_, hos_prio);
   }
 
+  void set_nx_priority(int32_t hos_priority) {
+    WaitStarted();
+    svcSetThreadPriority(nx_handle_, static_cast<u32>(hos_priority));
+  }
+
   void QueueUserCallback(std::function<void()> callback) {
     WaitStarted();
     {
@@ -1288,6 +1319,7 @@ class PosixThread : public PosixConditionHandle<Thread> {
 
   int priority() override { return handle_.priority(); }
   void set_priority(int new_priority) override { handle_.set_priority(new_priority); }
+  void set_nx_priority(int32_t hos_priority) override { handle_.set_nx_priority(hos_priority); }
 
   void QueueUserCallback(std::function<void()> callback) override {
     handle_.QueueUserCallback(std::move(callback));
@@ -1331,10 +1363,13 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   // deferred priority that Initialize() stashed (pthread_attr scheduling
   // isn't available on newlib).
   thread->handle_.nx_handle_ = threadGetCurHandle();
-  if (thread->handle_.nx_deferred_priority_ != 0) {
-    u32 hos_prio = MapToSwitchPriority(thread->handle_.nx_deferred_priority_);
-    svcSetThreadPriority(thread->handle_.nx_handle_, hos_prio);
-  }
+  // Without a requested priority a thread gets the host band explicitly, not
+  // whatever libnx's pthread default is. XThread then applies its role's band
+  // (nx_priority_for_thread).
+  const u32 hos_prio = thread->handle_.nx_deferred_priority_ != 0
+                           ? MapToSwitchPriority(thread->handle_.nx_deferred_priority_)
+                           : static_cast<u32>(kNxPriorityHost);
+  svcSetThreadPriority(thread->handle_.nx_handle_, hos_prio);
   {
     std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
     thread->handle_.suspend_count_ = create_suspended ? 1 : 0;
