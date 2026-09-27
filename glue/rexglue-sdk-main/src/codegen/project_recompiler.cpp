@@ -187,7 +187,39 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
                                  entryXexPath.string(), gameRoot.string()));
   }
 
-  auto runtime = std::make_unique<Runtime>(gameRoot.string());
+  // The game folder is input only. With no user root the Runtime uses the game
+  // root for user, marketplace and saved-game data, and the tool-mode setup
+  // writes there (liberty_live_identity.bin). Give it a scratch folder of its
+  // own, outside the game root.
+  std::error_code workError;
+  const fs::path workRoot =
+      fs::temp_directory_path(workError) / "rexglue-codegen" / manifest_.projectName;
+  if (workError) {
+    return Err<void>(ErrorCategory::IO,
+                     fmt::format("No temporary directory for the codegen work folder: {}",
+                                 workError.message()));
+  }
+  const fs::path workRel = fs::weakly_canonical(workRoot).lexically_relative(gameRoot);
+  if (!workRel.empty() && *workRel.begin() != "..") {
+    return Err<void>(ErrorCategory::Validation,
+                     fmt::format("Codegen work folder '{}' is inside the game root '{}'",
+                                 workRoot.string(), gameRoot.string()));
+  }
+  const fs::path userRoot = workRoot / "user";
+  const fs::path cacheRoot = workRoot / "cache";
+  const fs::path marketplaceRoot = workRoot / "marketplace";
+  const fs::path savesRoot = workRoot / "saves";
+  for (const auto& dir : {userRoot, cacheRoot, marketplaceRoot, savesRoot}) {
+    fs::create_directories(dir, workError);
+    if (workError) {
+      return Err<void>(ErrorCategory::IO,
+                       fmt::format("Cannot create codegen work folder '{}': {}", dir.string(),
+                                   workError.message()));
+    }
+  }
+
+  auto runtime = std::make_unique<Runtime>(gameRoot, userRoot, fs::path{}, cacheRoot, fs::path{},
+                                           marketplaceRoot, savesRoot);
   auto rtStatus = runtime->Setup(rex::RuntimeConfig{
       .kernel_init = rex::kernel::InitializeKernel,
       .tool_mode = true,

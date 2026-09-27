@@ -250,8 +250,11 @@ copiato. L'output va in `gta4-recomp/generated/eu-base/`, ignorata da git.
   **0 errori**, 36.643 funzioni, 85 file, 172,6 MB. `gta4_init.h` contiene il
   ramo `#if REX_PLATFORM_NX`. Per confronto, il codice generato di upstream
   dalla v8 USA ha 38.351 funzioni in 89 file (178,3 MB).
-- **Effetto collaterale.** In modalità strumento il generatore crea il
-  `Runtime` con la sola radice del gioco, che fa anche da radice utente: il
-  runtime ci scrive `liberty_live_identity.bin` (identità Live, 88 byte).
-  Il file va cancellato dopo ogni run, finché `project_recompiler.cpp` non
-  passa una radice utente separata.
+- **Effetto collaterale, corretto.** In modalità strumento il generatore
+  creava il `Runtime` con la sola radice del gioco, che faceva anche da radice
+  utente: il runtime ci scriveva `liberty_live_identity.bin` (identità Live,
+  88 byte). Ora `project_recompiler.cpp` passa una cartella di lavoro separata
+  (`%TEMP%/rexglue-codegen/<progetto>/{user,cache,marketplace,saves}`) e
+  rifiuta una cartella di lavoro dentro la radice del gioco. Terzo run dopo la
+  correzione: nessun file nuovo nella cartella del gioco, output identico
+  (36.643 funzioni, 0 errori).
