@@ -218,6 +218,26 @@ riconosciuto in 0x7F (03 §12).
    `LoadXexImage` (come iOS), poi `Resume` del thread principale.
 5. Implementare 03 §12 (MMIO 0x7F) se il run si ferma lì.
 
+## 5b. Obbligatorio per la fase grafica: Mesa
+
+Prima di disegnare con NVK, il driver va costruito da noi con queste parti del
+patch di nfsmw-nx (`mesa/mesa-switch-nfsmw.patch`, vedi 08 §7). Il Mesa
+installato nei portlibs (build di NaGa, 26.2.1) non le ha:
+
+1. **Fix `FADD32I` + `.SAT` in NAK (`sm50.rs`).** Correttezza, non
+   prestazioni: su Maxwell `FADD32I` non ha il bit di saturazione e il flag
+   veniva perso in silenzio (in NFS il mare nero). La legalizzazione deve
+   spostare l'immediato lungo in un registro quando l'add satura.
+2. **ZCULL sul percorso Vulkan**: geometria chiesta al kernel in
+   `nvkmd_switch_pdev.c`, contesto ZCULL legato al canale 3D, buffer ZCULL
+   azzerato, immagini depth senza `TRANSFER_DST`.
+3. **Latenze di scheduling di NAK**: texture e load globali da 32 a 200 cicli;
+   `peephole_select` di NIR da 0 a 8 (controllare con `NVK_SHADER_STATS=1` che
+   la memoria locale resti a 0).
+
+Ogni modifica a NAK alza la revisione nella chiave della cache degli shader,
+altrimenti la console riusa i binari vecchi.
+
 ## 6. Esito: strada C, generazione del 2026-09-27
 
 Configurazione: `gta4-recomp/config-eu-base/` (manifest e config senza hook,
@@ -258,3 +278,18 @@ copiato. L'output va in `gta4-recomp/generated/eu-base/`, ignorata da git.
   rifiuta una cartella di lavoro dentro la radice del gioco. Terzo run dopo la
   correzione: nessun file nuovo nella cartella del gioco, output identico
   (36.643 funzioni, 0 errori).
+- **Registri come locali e chiamate dirette** (patch `share_registers` di
+  nfsmw-nx nel generatore, `tools/switch-codegen/`). Config: `cr_as_local`,
+  `xer_as_local`, `ctr_as_local`, `non_volatile_as_local` a `true`.
+  - Primo run: `read_before_write.py` segnala 736 funzioni, di cui 730 falsi
+    positivi dello script originale (spill `stvx128` di v64–v127 sulla pila,
+    righe di sincronizzazione emesse dal patch, `cr6.setFromMask` dei `vcmp.`),
+    corretti nella nostra versione. Restano 6: 5 frammenti veri, marcati
+    `share_registers` nel config, e `0x829A88C0` (`r30 ^ r30`, azzeramento),
+    falso positivo lasciato.
+  - Secondo run: 45,7 s, picco 439 MB, **0 errori**, 36.643 funzioni, 1 sola
+    segnalazione (il falso positivo), 888 righe di sincronizzazione emesse.
+  - `direct_calls.py`: **123.940 chiamate dirette su 123.948 (99,99 %)**;
+    restano deboli le 8 verso i 18 indirizzi del config, contati come agganciati
+    per prudenza. Output: 84 file, 170,7 MB.
+  - Non compilato per Switch: le macro di memoria dipendono dall'esito di T11.
