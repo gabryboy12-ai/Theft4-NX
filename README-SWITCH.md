@@ -89,6 +89,7 @@ these presets yet.
 - [04 – Threads and exit](docs/switch-port/04-threads-exit.md): affinity, processor count, CPU→core mapping, the exit crash, module base for crash reports.
 - [05 – Upstream import](docs/switch-port/05-upstream-import.md): which upstream paths this repository leaves out and how to import upstream updates without them.
 - [06 – Game boot plan](docs/switch-port/06-game-boot-plan.md): which executable the generator expects, building the host `rexglue` tool, regenerating with the NX macros, and the first headless game NRO (plan only).
+- [07 – References](docs/switch-port/07-references.md): rexglue-nx and UnleashedRecomp/XenosRecomp compared with this port (memory, threads, faults, graphics, audio, input, shader and pipeline caches).
 
 ## Credits
 
