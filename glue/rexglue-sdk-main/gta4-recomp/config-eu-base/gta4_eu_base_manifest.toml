@@ -1,0 +1,18 @@
+# GTA IV Europe, base default.xex without a title update (media ID 4A53F9F6,
+# version 0.0.0.6). Only for reaching the executable's entry point on Switch:
+# no hooks, no [rexcrt], no TU. See docs/switch-port/06-game-boot-plan.md,
+# option C.
+#
+# The executable is read in place and never copied into the repository. Its
+# folder must not contain a default.xexp: the loader would apply it.
+# Output goes to gta4-recomp/generated/eu-base/ (ignored by git).
+#
+#   rexglue codegen config-eu-base/gta4_eu_base_manifest.toml
+[project]
+name = "gta4"
+sdk_version = "0.9.0"
+
+[entrypoint]
+file_path = "D:/Mod Switch/gta4/Grand Theft Auto IV (Europe) (En,Fr,De,Es,It)/default.xex"
+out_directory_path = "../generated/eu-base"
+includes = ["gta4_eu_base_config.toml"]

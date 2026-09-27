@@ -217,3 +217,41 @@ riconosciuto in 0x7F (03 §12).
 4. `tools/switch-game` con `main.cpp` minimo; prima solo `Setup` +
    `LoadXexImage` (come iOS), poi `Resume` del thread principale.
 5. Implementare 03 §12 (MMIO 0x7F) se il run si ferma lì.
+
+## 6. Esito: strada C, generazione del 2026-09-27
+
+Configurazione: `gta4-recomp/config-eu-base/` (manifest e config senza hook,
+senza `[rexcrt]`, senza TU). L'eseguibile europeo è letto dove sta e non viene
+copiato. L'output va in `gta4-recomp/generated/eu-base/`, ignorata da git.
+
+- **Strumento.** `rexglue` costruito con il preset `win-amd64-release` e il
+  clang 22.1.3 di Visual Studio (vcvars64 + `VC/Tools/Llvm/x64/bin` in testa al
+  `PATH`, CMake e Ninja di Visual Studio). Serve
+  `-DCMAKE_CXX_SCAN_FOR_MODULES=OFF` al configure: con CMake 4.3 e Ninja
+  Multi-Config (`CMAKE_CROSS_CONFIGS=all`) la scansione dei moduli C++ genera
+  due volte lo stesso `.modmap` di SDL3 e ninja si ferma subito. Configure
+  146 s la prima volta, build del solo target `rexglue` 6 min (717 passi).
+- **Primo run** (solo opzioni globali e `[analysis]`): 47,8 s, picco 429 MB,
+  36.646 funzioni, 4 errori `UnresolvedCall` (`b` verso una destinazione fuori
+  da ogni funzione).
+- **Corrispondenze con la v8 USA**, trovate confrontando finestre di
+  istruzioni normalizzate del codice generato:
+
+  | Voce del config USA | Equivalente EU | Come l'ha trattata l'analisi EU |
+  |---|---|---|
+  | `0x8217C108` (destinazione da `sub_8217C5A8`) | `0x82154100` (salto da `0x821545A0`: stessa distanza, 0x4A0) | non risolta |
+  | `0x82A77E28` (thunk `b sub_82812248`) | `0x82A05828` (salto da `0x8274D070`) | non risolta |
+  | `0x8219E410` (destinazione da `sub_821A2EDC`) | `0x82176BE0` | trovata da sola (`sub_82176BE0`) |
+
+  Gli altri due errori EU non hanno una voce nel config USA: `0x82518A40`
+  corrisponde a `0x824FF7C0`, che l'analisi USA trova da sola. Per
+  `0x826EA240` il codice è ripetitivo e ci sono più candidati USA.
+- **Secondo run**, con quelle 4 voci in `[functions]`: 45,6 s, picco 442 MB,
+  **0 errori**, 36.643 funzioni, 85 file, 172,6 MB. `gta4_init.h` contiene il
+  ramo `#if REX_PLATFORM_NX`. Per confronto, il codice generato di upstream
+  dalla v8 USA ha 38.351 funzioni in 89 file (178,3 MB).
+- **Effetto collaterale.** In modalità strumento il generatore crea il
+  `Runtime` con la sola radice del gioco, che fa anche da radice utente: il
+  runtime ci scrive `liberty_live_identity.bin` (identità Live, 88 byte).
+  Il file va cancellato dopo ogni run, finché `project_recompiler.cpp` non
+  passa una radice utente separata.
