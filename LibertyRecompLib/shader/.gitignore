@@ -4,10 +4,8 @@
 # Track the gitignore itself
 !.gitignore
 
-# Track shader cache files (game shaders — required to build)
+# Track shader cache headers. Theft4-NX: the shader_cache.cpp and
+# postprocess_cache.cpp blobs tracked upstream (game shaders) are left out of
+# this repository, see docs/switch-port/05-upstream-import.md.
 !shader_cache.h
-!shader_cache.cpp
-
-# Track postprocess shader cache (postfx shader registry — required to build)
 !postprocess_cache.h
-!postprocess_cache.cpp

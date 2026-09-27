@@ -786,3 +786,19 @@ CMakeUserPresets.json
 !/tests/ios/test_xcode_generator.py
 !/docs/THEFT4_LAB_PACING_CAPTURE.md
 !/tools/analyze_lab_pacing.py
+
+# Theft4-NX: paths left out of the upstream import (game-derived data, keys,
+# bundled third-party tools). Keep them out of this repository; see
+# docs/switch-port/05-upstream-import.md. The nested .gitignore files in
+# LibertyRecompLib/private/ and LibertyRecompLib/shader/ are trimmed to match,
+# because their negations would otherwise win over these rules.
+LibertyRecompLib/aes_key.bin
+LibertyRecompLib/private/*
+!LibertyRecompLib/private/.gitignore
+LibertyRecompLib/shader/*_cache.cpp
+LibertyRecompLib/font_atlases/
+LibertyRecomp/res/ps4/
+tools/xtd_tools/
+tools/ghidra_projects/
+tools/ghidra_*/
+tools/GTAIV.EFLC.FusionFix-master/
