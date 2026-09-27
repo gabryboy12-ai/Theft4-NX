@@ -54,6 +54,16 @@ Copy the NRO to the SD card and start it from the Homebrew Menu. It needs no
 game files. Its log is written to `sdmc:/switch/theft4/smoke.log`; press + to
 exit.
 
+On Windows, the libmspack submodule stores 15 files as git symlinks. With
+`core.symlinks=false` they are checked out as text files holding the link
+path and `mspack`/`rexruntime` fail to compile (`lzxd.c:1:1: error`). Fix the
+submodule checkout once:
+
+```sh
+git -C glue/rexglue-sdk-main/thirdparty/libmspack config core.symlinks true
+git -C glue/rexglue-sdk-main/thirdparty/libmspack checkout -- cabextract/mspack
+```
+
 ### SDK only
 
 [01-first-build.md](docs/switch-port/01-first-build.md) has the commands to

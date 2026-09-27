@@ -5,7 +5,7 @@
 #
 #   cmake -S tools/switch-smoke -B out/build/switch-smoke -G Ninja \
 #         -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja \
-#         -DCMAKE_TOOLCHAIN_FILE=/c/dev/Theft4/toolchains/switch-libnx.cmake \
+#         -DCMAKE_TOOLCHAIN_FILE=$PWD/toolchains/switch-libnx.cmake \
 #         -DCMAKE_BUILD_TYPE=Release
 #   ninja -C out/build/switch-smoke   # -> out/build/switch-smoke/switch-smoke.nro
 
