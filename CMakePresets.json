@@ -1,0 +1,628 @@
+{
+    "version": 8,
+    "configurePresets": [
+        {
+            "name": "windows-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "installDir": "${sourceDir}/out/install/${presetName}",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang-cl.exe",
+                "CMAKE_CXX_COMPILER": "clang-cl.exe",
+                "CMAKE_LINKER": "lld-link.exe",
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                    "type": "FILEPATH"
+                },
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "environment": {
+                "VCPKG_ROOT": "${sourceDir}/thirdparty/vcpkg",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            }
+        },
+        {
+            "name": "x64-Clang-Debug",
+            "displayName": "Debug",
+            "inherits": "windows-base",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "VCPKG_TARGET_TRIPLET": {
+                    "value": "x64-windows-static",
+                    "type": "STRING"
+                }
+            }
+        },
+        {
+            "name": "x64-Clang-RelWithDebInfo",
+            "displayName": "RelWithDebInfo",
+            "inherits": "x64-Clang-Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
+            "name": "x64-Clang-Release",
+            "displayName": "Release",
+            "inherits": "x64-Clang-Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": true
+            }
+        },
+        {
+            "name": "arm64-Clang-Debug",
+            "displayName": "ARM64 Debug",
+            "inherits": "windows-base",
+            "architecture": {
+                "value": "arm64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "VCPKG_TARGET_TRIPLET": {
+                    "value": "arm64-windows-static",
+                    "type": "STRING"
+                }
+            }
+        },
+        {
+            "name": "arm64-Clang-RelWithDebInfo",
+            "displayName": "ARM64 RelWithDebInfo",
+            "inherits": "arm64-Clang-Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
+            "name": "arm64-Clang-Release",
+            "displayName": "ARM64 Release",
+            "inherits": "arm64-Clang-Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": true
+            }
+        },
+        {
+            "name": "linux-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "installDir": "${sourceDir}/out/install/${presetName}",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                    "type": "FILEPATH"
+                },
+                "VCPKG_TARGET_TRIPLET": {
+                    "value": "x64-linux",
+                    "type": "STRING"
+                },
+                "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/toolchains/linux-clang.cmake",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "environment": {
+                "VCPKG_ROOT": "${sourceDir}/thirdparty/vcpkg",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "vendor": {
+                "microsoft.com/VisualStudioRemoteSettings/CMake/2.0": {
+                    "remoteSourceRootDir": "$env{HOME}/.vs/$ms{projectDirName}"
+                }
+            }
+        },
+        {
+            "name": "linux-debug",
+            "displayName": "Linux-Debug",
+            "inherits": "linux-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "linux-relwithdebinfo",
+            "displayName": "Linux-RelWithDebInfo",
+            "inherits": "linux-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
+            "name": "linux-release",
+            "displayName": "Linux-Release",
+            "inherits": "linux-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": true
+            }
+        },
+        {
+            "name": "macos-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "installDir": "${sourceDir}/out/install/${presetName}",
+            "cacheVariables": {
+                "CMAKE_OSX_ARCHITECTURES": "arm64",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/FindHostLLVM.cmake"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
+            "vendor": {
+                "microsoft.com/VisualStudioRemoteSettings/CMake/2.0": {
+                    "remoteSourceRootDir": "$env{HOME}/.vs/$ms{projectDirName}"
+                }
+            },
+            "environment": {
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            }
+        },
+        {
+            "name": "macos-debug",
+            "displayName": "macOS-Debug",
+            "inherits": "macos-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "macos-relwithdebinfo",
+            "displayName": "macOS-RelWithDebInfo",
+            "inherits": "macos-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
+            "name": "macos-release",
+            "displayName": "macOS-Release",
+            "inherits": "macos-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "ios-base",
+            "hidden": true,
+            "generator": "Xcode",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "installDir": "${sourceDir}/out/install/${presetName}",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "${sourceDir}/toolchains/ios.cmake",
+                    "type": "FILEPATH"
+                },
+                "LIBERTY_RECOMP_TARGET_PLATFORM": {
+                    "value": "ios",
+                    "type": "STRING"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_GAME_PATH": {
+                    "value": "${sourceDir}/tools/local_game_payload",
+                    "type": "PATH"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_ASSETS": {
+                    "value": "ON",
+                    "type": "BOOL"
+                },
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
+            "environment": {
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            }
+        },
+        {
+            "name": "ios-device-debug",
+            "inherits": "ios-base",
+            "cacheVariables": {
+                "LIBERTY_RECOMP_IOS_CORE_ONLY": "ON",
+                "CMAKE_OSX_SYSROOT": "iphoneos",
+                "CMAKE_CONFIGURATION_TYPES": "Debug",
+                "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED": "NO"
+            }
+        },
+        {
+            "name": "ios-device-release",
+            "displayName": "iOS Device Release",
+            "inherits": "ios-base",
+            "cacheVariables": {
+                "LIBERTY_RECOMP_IOS_CORE_ONLY": "ON",
+                "CMAKE_OSX_SYSROOT": "iphoneos",
+                "CMAKE_CONFIGURATION_TYPES": "Release",
+                "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG",
+                "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
+                "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED": "NO"
+            }
+        },
+        {
+            "name": "ios-simulator-debug",
+            "inherits": "ios-device-debug",
+            "cacheVariables": {
+                "CMAKE_OSX_SYSROOT": "iphonesimulator"
+            }
+        },
+        {
+            "name": "ios-debug",
+            "displayName": "iOS-Debug",
+            "inherits": "ios-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "ios-release",
+            "displayName": "iOS-Release",
+            "inherits": "ios-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "android-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "installDir": "${sourceDir}/out/install/${presetName}",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "${sourceDir}/toolchains/android.cmake",
+                    "type": "FILEPATH"
+                },
+                "LIBERTY_RECOMP_TARGET_PLATFORM": {
+                    "value": "android",
+                    "type": "STRING"
+                },
+                "ANDROID_ABI": {
+                    "value": "arm64-v8a",
+                    "type": "STRING"
+                },
+                "ANDROID_PLATFORM": {
+                    "value": "android-26",
+                    "type": "STRING"
+                },
+                "ANDROID_STL": {
+                    "value": "c++_static",
+                    "type": "STRING"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_GAME_PATH": {
+                    "value": "${sourceDir}/tools/local_game_payload",
+                    "type": "PATH"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_ASSETS": {
+                    "value": "ON",
+                    "type": "BOOL"
+                },
+                "LIBERTY_RECOMP_ANDROID_RUNTIME_ASSETS": {
+                    "value": "ON",
+                    "type": "BOOL"
+                },
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "environment": {
+                "ANDROID_NDK": "$penv{ANDROID_NDK}",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "condition": {
+                "type": "inList",
+                "string": "${hostSystemName}",
+                "list": [
+                    "Darwin",
+                    "Linux"
+                ]
+            }
+        },
+        {
+            "name": "android-debug",
+            "displayName": "Android-Debug",
+            "inherits": "android-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "android-release",
+            "displayName": "Android-Release",
+            "inherits": "android-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "ps4-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "installDir": "${sourceDir}/out/install/${presetName}",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "${sourceDir}/toolchains/ps4-openorbis.cmake",
+                    "type": "FILEPATH"
+                },
+                "LIBERTY_RECOMP_TARGET_PLATFORM": {
+                    "value": "ps4",
+                    "type": "STRING"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_GAME_PATH": {
+                    "value": "${sourceDir}/tools/local_game_payload",
+                    "type": "PATH"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_ASSETS": {
+                    "value": "ON",
+                    "type": "BOOL"
+                },
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "environment": {
+                "OO_PS4_TOOLCHAIN": "$penv{OO_PS4_TOOLCHAIN}",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "condition": {
+                "type": "inList",
+                "string": "${hostSystemName}",
+                "list": [
+                    "Darwin",
+                    "Linux"
+                ]
+            }
+        },
+        {
+            "name": "ps4-debug",
+            "displayName": "PS4-Debug",
+            "inherits": "ps4-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "ps4-release",
+            "displayName": "PS4-Release",
+            "inherits": "ps4-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "switch-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "installDir": "${sourceDir}/out/install/${presetName}",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "${sourceDir}/toolchains/switch-libnx.cmake",
+                    "type": "FILEPATH"
+                },
+                "LIBERTY_RECOMP_TARGET_PLATFORM": {
+                    "value": "switch",
+                    "type": "STRING"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_GAME_PATH": {
+                    "value": "${sourceDir}/tools/local_game_payload",
+                    "type": "PATH"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_DLC_PATH": {
+                    "value": "${sourceDir}/tools/local_game_payload/dlc",
+                    "type": "PATH"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_AES_KEY": {
+                    "value": "${sourceDir}/tools/local_game_payload/aes_key.bin",
+                    "type": "FILEPATH"
+                },
+                "LIBERTY_RECOMP_EMBEDDED_ASSETS": {
+                    "value": "ON",
+                    "type": "BOOL"
+                },
+                "LIBERTY_SWITCH_ROMFS_DIR": {
+                    "value": "${sourceDir}/out/build/${presetName}/switch_romfs",
+                    "type": "PATH"
+                },
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "environment": {
+                "DEVKITPRO": "$penv{DEVKITPRO}",
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            },
+            "condition": {
+                "type": "inList",
+                "string": "${hostSystemName}",
+                "list": [
+                    "Darwin",
+                    "Linux"
+                ]
+            }
+        },
+        {
+            "name": "switch-debug",
+            "displayName": "Switch-Debug",
+            "inherits": "switch-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "switch-release",
+            "displayName": "Switch-Release",
+            "inherits": "switch-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "linux-arm64-debug",
+            "displayName": "Linux ARM64 debug",
+            "inherits": "linux-debug",
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "arm64-linux"
+            }
+        },
+        {
+            "name": "linux-arm64-relwithdebinfo",
+            "displayName": "Linux ARM64 relwithdebinfo",
+            "inherits": "linux-relwithdebinfo",
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "arm64-linux"
+            }
+        },
+        {
+            "name": "linux-arm64-release",
+            "displayName": "Linux ARM64 release",
+            "inherits": "linux-release",
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "arm64-linux"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "theft4-device-debug",
+            "configurePreset": "ios-device-debug",
+            "configuration": "Debug",
+            "targets": ["Theft4"]
+        },
+        {
+            "name": "theft4-device-release",
+            "configurePreset": "ios-device-release",
+            "configuration": "Release",
+            "targets": ["Theft4"]
+        },
+        {
+            "name": "theft4-simulator-debug",
+            "configurePreset": "ios-simulator-debug",
+            "configuration": "Debug",
+            "targets": ["Theft4", "theft4_bridge_tests"]
+        },
+        {
+            "name": "ios-device-debug",
+            "configurePreset": "ios-device-debug",
+            "configuration": "Debug",
+            "targets": ["rexcore_link_smoke"]
+        },
+        {
+            "name": "ios-simulator-debug",
+            "configurePreset": "ios-simulator-debug",
+            "configuration": "Debug",
+            "targets": ["rexcore_link_smoke"]
+        },
+        {
+            "name": "x64-Clang-Debug",
+            "configurePreset": "x64-Clang-Debug"
+        },
+        {
+            "name": "x64-Clang-RelWithDebInfo",
+            "configurePreset": "x64-Clang-RelWithDebInfo"
+        },
+        {
+            "name": "x64-Clang-Release",
+            "configurePreset": "x64-Clang-Release"
+        },
+        {
+            "name": "arm64-Clang-Debug",
+            "configurePreset": "arm64-Clang-Debug"
+        },
+        {
+            "name": "arm64-Clang-RelWithDebInfo",
+            "configurePreset": "arm64-Clang-RelWithDebInfo"
+        },
+        {
+            "name": "arm64-Clang-Release",
+            "configurePreset": "arm64-Clang-Release"
+        },
+        {
+            "name": "linux-debug",
+            "configurePreset": "linux-debug"
+        },
+        {
+            "name": "linux-relwithdebinfo",
+            "configurePreset": "linux-relwithdebinfo"
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release"
+        },
+        {
+            "name": "macos-debug",
+            "configurePreset": "macos-debug"
+        },
+        {
+            "name": "macos-relwithdebinfo",
+            "configurePreset": "macos-relwithdebinfo"
+        },
+        {
+            "name": "macos-release",
+            "configurePreset": "macos-release"
+        },
+        {
+            "name": "ios-debug",
+            "configurePreset": "ios-debug"
+        },
+        {
+            "name": "ios-release",
+            "configurePreset": "ios-release"
+        },
+        {
+            "name": "android-debug",
+            "configurePreset": "android-debug"
+        },
+        {
+            "name": "android-release",
+            "configurePreset": "android-release"
+        },
+        {
+            "name": "ps4-debug",
+            "configurePreset": "ps4-debug"
+        },
+        {
+            "name": "ps4-release",
+            "configurePreset": "ps4-release"
+        },
+        {
+            "name": "switch-debug",
+            "configurePreset": "switch-debug"
+        },
+        {
+            "name": "switch-release",
+            "configurePreset": "switch-release"
+        },
+        {
+            "name": "linux-arm64-debug",
+            "configurePreset": "linux-arm64-debug"
+        },
+        {
+            "name": "linux-arm64-relwithdebinfo",
+            "configurePreset": "linux-arm64-relwithdebinfo"
+        },
+        {
+            "name": "linux-arm64-release",
+            "configurePreset": "linux-arm64-release"
+        }
+    ],
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 29,
+        "patch": 0
+    }
+}

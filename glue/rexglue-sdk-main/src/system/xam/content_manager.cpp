@@ -1,0 +1,841 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ *
+ * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ */
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <queue>
+#include <string>
+#include <unordered_set>
+
+#include <fmt/format.h>
+
+#include <rex/filesystem.h>
+#include <rex/filesystem/devices/host_path_device.h>
+#include <rex/filesystem/devices/stfs_container_device.h>
+#include <rex/logging.h>
+#include <rex/string.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xam/content_device.h>
+#include <rex/system/xam/content_manager.h>
+#include <rex/system/xfile.h>
+#include <rex/system/xobject.h>
+
+namespace rex {
+namespace system {
+namespace xam {
+
+static const char* kThumbnailFileName = "__thumbnail.png";
+
+static const char* kGameUserContentDirName = "profile";
+
+static const char* kGameContentHeaderDirName = "Headers";
+
+static int content_device_id_ = 0;
+
+ContentPackage::ContentPackage(KernelState* kernel_state, const std::string_view root_name,
+                               const XCONTENT_AGGREGATE_DATA& data,
+                               const std::filesystem::path& package_path)
+    : kernel_state_(kernel_state), root_name_(root_name), package_path_(package_path), license_(0) {
+  device_path_ = fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_);
+  content_data_ = data;
+
+  auto fs = kernel_state_->file_system();
+  const bool trace_io = data.content_type == XContentType::kSavedGame;
+  auto device = std::make_unique<rex::filesystem::HostPathDevice>(device_path_, package_path, false,
+                                                                  /*allow_share_delete=*/true,
+                                                                  trace_io);
+  device->Initialize();
+  fs->RegisterDevice(std::move(device));
+  fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
+}
+
+ContentPackage::~ContentPackage() {
+  auto fs = kernel_state_->file_system();
+  fs->UnregisterSymbolicLink(root_name_ + ":");
+  fs->UnregisterDevice(device_path_);
+}
+
+void ContentPackage::LoadPackageLicenseMask(const std::filesystem::path header_path) {
+  if (!std::filesystem::exists(header_path)) {
+    return;
+  }
+
+  auto file = rex::filesystem::OpenFile(header_path, "rb");
+  if (!file) {
+    return;
+  }
+
+  auto file_size = std::filesystem::file_size(header_path);
+  if (file_size < sizeof(XCONTENT_AGGREGATE_DATA) + sizeof(license_)) {
+    fclose(file);
+    return;
+  }
+
+  fseek(file, sizeof(XCONTENT_AGGREGATE_DATA), SEEK_SET);
+  fread(&license_, 1, sizeof(license_), file);
+  fclose(file);
+}
+
+ContentManager::ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path,
+                               const std::filesystem::path& marketplace_content_root,
+                               const std::filesystem::path& saved_game_root)
+    : kernel_state_(kernel_state),
+      root_path_(root_path),
+      marketplace_content_root_(marketplace_content_root),
+      saved_game_root_(saved_game_root) {
+  REXSYS_INFO("ContentManager roots: user='{}', marketplace='{}', saved-games='{}'",
+              root_path_.string(),
+              (marketplace_content_root_.empty() ? root_path_ : marketplace_content_root_).string(),
+              (saved_game_root_.empty() ? root_path_ : saved_game_root_).string());
+}
+
+ContentManager::~ContentManager() = default;
+
+void ContentManager::SetMarketplacePackageAllowlist(
+    std::optional<std::unordered_set<std::string>> allowlist) {
+  std::lock_guard lock(marketplace_allowlist_mutex_);
+  marketplace_package_allowlist_ = std::move(allowlist);
+}
+
+bool ContentManager::IsMarketplacePackageAuthorized(
+    const XCONTENT_AGGREGATE_DATA& data) const {
+  if (data.content_type != XContentType::kMarketplaceContent) return true;
+  std::lock_guard lock(marketplace_allowlist_mutex_);
+  return !marketplace_package_allowlist_ ||
+         marketplace_package_allowlist_->contains(data.file_name());
+}
+
+std::filesystem::path ContentManager::ResolvePackageRoot(uint64_t xuid, XContentType content_type,
+                                                         uint32_t title_id) {
+  const auto& content_root =
+      content_type == XContentType::kSavedGame && !saved_game_root_.empty() ? saved_game_root_
+                                                                           : root_path_;
+  if (content_type == XContentType::kMarketplaceContent &&
+      !marketplace_content_root_.empty()) {
+    return marketplace_content_root_;
+  }
+
+  if (title_id == kCurrentlyRunningTitleId) {
+    title_id = kernel_state_->title_id();
+  }
+  auto xuid_str = fmt::format("{:016X}", xuid);
+  auto title_id_str = fmt::format("{:08X}", title_id);
+  auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
+
+  // Package root path:
+  // content_root/xuid/title_id/content_type/
+  return content_root / xuid_str / title_id_str / content_type_str;
+}
+
+std::filesystem::path ContentManager::ResolvePackagePath(uint64_t xuid,
+                                                         const XCONTENT_AGGREGATE_DATA& data) {
+  uint64_t used_xuid = (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+
+  // DLCs are stored in common directory
+  if (data.content_type == XContentType::kMarketplaceContent) {
+    used_xuid = 0;
+  }
+
+  // Content path:
+  // content_root/xuid/title_id/content_type/data_file_name/
+  auto package_root = ResolvePackageRoot(used_xuid, data.content_type, data.title_id);
+  return package_root / rex::to_path(data.file_name());
+}
+
+std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string_view file_name,
+                                                               uint64_t xuid, uint32_t title_id,
+                                                               XContentType content_type) const {
+  if (title_id == kCurrentlyRunningTitleId) {
+    title_id = kernel_state_->title_id();
+  }
+
+  if (content_type == XContentType::kMarketplaceContent) {
+    xuid = 0;
+  }
+
+  auto xuid_str = fmt::format("{:016X}", xuid);
+  auto title_id_str = fmt::format("{:08X}", title_id);
+  auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
+  std::string final_name = std::string(file_name) + ".header";
+  const auto& content_root =
+      content_type == XContentType::kSavedGame && !saved_game_root_.empty() ? saved_game_root_
+                                                                           : root_path_;
+
+  // Header root path:
+  // content_root/xuid/title_id/Headers/content_type/filename.header
+  return content_root / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
+         final_name;
+}
+
+std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device_id, uint64_t xuid,
+                                                                 XContentType content_type,
+                                                                 uint32_t title_id) {
+  std::vector<XCONTENT_AGGREGATE_DATA> result;
+
+  if (title_id == kCurrentlyRunningTitleId) {
+    title_id = kernel_state_->title_id();
+  }
+
+  // Search path:
+  // content_root/xuid/title_id/type_name/*
+  auto package_root = ResolvePackageRoot(xuid, content_type, title_id);
+  auto file_infos = rex::filesystem::ListFiles(package_root);
+  for (const auto& file_info : file_infos) {
+    if (file_info.type != rex::filesystem::FileInfo::Type::kDirectory) {
+      // Directories only.
+      continue;
+    }
+
+    XCONTENT_AGGREGATE_DATA content_data{};
+    if (ReadContentHeaderFile(rex::path_to_utf8(file_info.name), xuid, title_id, content_type,
+                              content_data) == X_ERROR_SUCCESS) {
+      if (IsMarketplacePackageAuthorized(content_data)) {
+        result.emplace_back(std::move(content_data));
+      }
+    } else {
+      content_data.device_id = device_id;
+      content_data.content_type = content_type;
+      content_data.set_display_name(rex::path_to_utf16(file_info.name));
+      content_data.set_file_name(rex::path_to_utf8(file_info.name));
+      content_data.title_id = title_id;
+      content_data.xuid = xuid;
+      if (IsMarketplacePackageAuthorized(content_data)) {
+        result.emplace_back(std::move(content_data));
+      }
+    }
+  }
+
+  std::sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.file_name() < rhs.file_name();
+  });
+
+  if (content_type == XContentType::kSavedGame) {
+    REXSYS_DEBUG("[PortableSave] Enumerated {} package(s) beneath '{}'", result.size(),
+                 package_root.string());
+  }
+
+  return result;
+}
+
+std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContentForUser(
+    uint32_t device_id, uint64_t xuid, XContentType content_type, uint32_t title_id) {
+  if (content_type == XContentType::kMarketplaceContent) {
+    auto result = ListContent(device_id, 0, content_type, title_id);
+    REXSYS_INFO("Marketplace content enumeration found {} package(s)", result.size());
+    for (const auto& content : result) {
+      REXSYS_INFO("  Marketplace package: '{}'", content.file_name());
+    }
+    return result;
+  }
+
+  auto result = ListContent(device_id, xuid, content_type, title_id);
+  if (xuid == 0) {
+    return result;
+  }
+
+  auto common = ListContent(device_id, 0, content_type, title_id);
+  result.insert(result.end(), std::make_move_iterator(common.begin()),
+                std::make_move_iterator(common.end()));
+  return result;
+}
+
+std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
+    const std::string_view root_name, uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+  if (!IsMarketplacePackageAuthorized(data)) return nullptr;
+  auto package_path = ResolvePackagePath(xuid, data);
+  if (!std::filesystem::exists(package_path)) {
+    return nullptr;
+  }
+  auto package = std::make_unique<ContentPackage>(kernel_state_, root_name, data, package_path);
+  return package;
+}
+
+bool ContentManager::ContentExists(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+  if (!IsMarketplacePackageAuthorized(data)) return false;
+  auto path = ResolvePackagePath(xuid, data);
+  const bool exists = std::filesystem::exists(path);
+  if (data.content_type == XContentType::kSavedGame) {
+    REXSYS_DEBUG("[PortableSave] Probe package='{}' path='{}' exists={}", data.file_name(),
+                 path.string(), exists);
+  }
+  return exists;
+}
+
+X_RESULT ContentManager::WriteContentHeaderFile(uint64_t xuid, XCONTENT_AGGREGATE_DATA data,
+                                                uint32_t license_mask) {
+  if (data.title_id == uint32_t(-1)) {
+    data.title_id = kernel_state_->title_id();
+  }
+  if (data.xuid == uint64_t(-1)) {
+    data.xuid = xuid;
+  }
+  uint64_t used_xuid = (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+
+  auto header_path =
+      ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type);
+  auto parent_path = header_path.parent_path();
+
+  if (!std::filesystem::exists(parent_path)) {
+    if (!std::filesystem::create_directories(parent_path)) {
+      return X_ERROR_ACCESS_DENIED;
+    }
+  }
+
+  rex::filesystem::CreateEmptyFile(header_path);
+
+  auto file = rex::filesystem::OpenFile(header_path, "wb");
+  if (!file) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+  fwrite(&data, 1, sizeof(XCONTENT_AGGREGATE_DATA), file);
+  if (license_mask != 0) {
+    fwrite(&license_mask, 1, sizeof(license_mask), file);
+  }
+  fclose(file);
+  if (data.content_type == XContentType::kSavedGame) {
+    REXSYS_TRACE("[PortableSave] Wrote header '{}'", header_path.string());
+  }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::ReadContentHeaderFile(const std::string_view file_name, uint64_t xuid,
+                                               uint32_t title_id, XContentType content_type,
+                                               XCONTENT_AGGREGATE_DATA& data) const {
+  auto header_file_path = ResolvePackageHeaderPath(file_name, xuid, title_id, content_type);
+  constexpr uint32_t header_size = sizeof(XCONTENT_AGGREGATE_DATA);
+
+  if (!std::filesystem::exists(header_file_path)) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  auto file = rex::filesystem::OpenFile(header_file_path, "rb");
+  if (!file) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  auto file_size = std::filesystem::file_size(header_file_path);
+  if (file_size < header_size) {
+    fclose(file);
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  std::array<uint8_t, header_size> buffer;
+  size_t result = fread(buffer.data(), 1, header_size, file);
+  fclose(file);
+
+  if (result != header_size) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  std::memcpy(&data, buffer.data(), buffer.size());
+  if (content_type == XContentType::kSavedGame) {
+    REXSYS_TRACE("[PortableSave] Read header '{}'", header_file_path.string());
+  }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_t xuid,
+                                       const XCONTENT_AGGREGATE_DATA& data) {
+  if (!IsMarketplacePackageAuthorized(data)) return X_ERROR_ACCESS_DENIED;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    if (open_packages_.count(string::string_key_case(root_name))) {
+      return X_ERROR_ALREADY_EXISTS;
+    }
+  }
+
+  auto package_path = ResolvePackagePath(xuid, data);
+  if (std::filesystem::exists(package_path)) {
+    return X_ERROR_ALREADY_EXISTS;
+  }
+  if (!std::filesystem::create_directories(package_path)) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+  auto package = ResolvePackage(root_name, xuid, data);
+  assert_not_null(package);
+
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    if (open_packages_.count(string::string_key_case(root_name))) {
+      return X_ERROR_ALREADY_EXISTS;
+    }
+    open_packages_.insert({string::string_key_case::create(root_name), package.release()});
+  }
+  if (data.content_type == XContentType::kSavedGame) {
+    REXSYS_INFO("[PortableSave] Created and mounted '{}' as '{}:' from '{}'", data.file_name(),
+                root_name, package_path.string());
+  } else {
+    REXSYS_INFO("Mounted content package '{}' as '{}:' from '{}'", data.file_name(), root_name,
+                package_path.string());
+  }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::OpenContent(const std::string_view root_name, uint64_t xuid,
+                                     const XCONTENT_AGGREGATE_DATA& data,
+                                     uint32_t& content_license) {
+  if (!IsMarketplacePackageAuthorized(data)) return X_ERROR_ACCESS_DENIED;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    if (open_packages_.count(string::string_key_case(root_name))) {
+      return X_ERROR_ALREADY_EXISTS;
+    }
+  }
+
+  auto package_path = ResolvePackagePath(xuid, data);
+  if (!std::filesystem::exists(package_path)) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+  auto package = ResolvePackage(root_name, xuid, data);
+  assert_not_null(package);
+  package->LoadPackageLicenseMask(ResolvePackageHeaderPath(
+      data.file_name(), xuid, data.title_id, data.content_type));
+  content_license = package->GetPackageLicense();
+
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    if (open_packages_.count(string::string_key_case(root_name))) {
+      return X_ERROR_ALREADY_EXISTS;
+    }
+    open_packages_.insert({string::string_key_case::create(root_name), package.release()});
+  }
+  if (data.content_type == XContentType::kSavedGame) {
+    REXSYS_INFO("[PortableSave] Opened and mounted '{}' as '{}:' from '{}'", data.file_name(),
+                root_name, package_path.string());
+  } else {
+    REXSYS_INFO("Mounted content package '{}' as '{}:' from '{}'", data.file_name(), root_name,
+                package_path.string());
+  }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
+  ContentPackage* package = nullptr;
+  bool is_saved_game = false;
+  std::string package_name;
+  std::filesystem::path package_path;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    // Some games use different casing between Create and Close (e.g. "save" vs "SAVE")
+    auto it = open_packages_.find(string::string_key_case(root_name));
+    if (it == open_packages_.end()) {
+      return X_ERROR_FILE_NOT_FOUND;
+    }
+    is_saved_game = it->second->GetPackageContentData().content_type == XContentType::kSavedGame;
+    package_name = it->second->GetPackageContentData().file_name();
+    package_path = it->second->package_path();
+    package = DetachPackage(it);
+  }
+  delete package;
+  if (is_saved_game) {
+    REXSYS_INFO("[PortableSave] Closed '{}' and unmounted '{}:' from '{}'", package_name,
+                root_name, package_path.string());
+  } else {
+    REXSYS_INFO("Unmounted content root '{}:'", root_name);
+  }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::GetContentThumbnail(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data,
+                                             std::vector<uint8_t>* buffer) {
+  auto global_lock = global_critical_region_.Acquire();
+  auto package_path = ResolvePackagePath(xuid, data);
+  auto thumb_path = package_path / kThumbnailFileName;
+  if (std::filesystem::exists(thumb_path)) {
+    auto file = rex::filesystem::OpenFile(thumb_path, "rb");
+    fseek(file, 0, SEEK_END);
+    size_t file_len = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    buffer->resize(file_len);
+    fread(const_cast<uint8_t*>(buffer->data()), 1, buffer->size(), file);
+    fclose(file);
+    return X_ERROR_SUCCESS;
+  } else {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+}
+
+X_RESULT ContentManager::SetContentThumbnail(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data,
+                                             std::vector<uint8_t> buffer) {
+  auto global_lock = global_critical_region_.Acquire();
+  auto package_path = ResolvePackagePath(xuid, data);
+  std::filesystem::create_directories(package_path);
+  if (std::filesystem::exists(package_path)) {
+    auto thumb_path = package_path / kThumbnailFileName;
+    auto file = rex::filesystem::OpenFile(thumb_path, "wb");
+    fwrite(buffer.data(), 1, buffer.size(), file);
+    fclose(file);
+    return X_ERROR_SUCCESS;
+  } else {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+}
+
+X_RESULT ContentManager::DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+  auto global_lock = global_critical_region_.Acquire();
+
+  if (IsContentOpen(data)) {
+    // TODO(Gliniak): Get real error code for this case.
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  auto package_path = ResolvePackagePath(xuid, data);
+  std::error_code ec;
+  auto dir_removed = std::filesystem::remove_all(package_path, ec);
+  if (ec) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  uint64_t used_xuid = (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+  auto header_path =
+      ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type);
+  std::error_code ec2;
+  bool header_removed = std::filesystem::remove(header_path, ec2);
+
+  if (dir_removed > 0 || header_removed) {
+    if (data.content_type == XContentType::kSavedGame) {
+      REXSYS_INFO("[PortableSave] Deleted '{}' from '{}'", data.file_name(),
+                  package_path.string());
+    }
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FILE_NOT_FOUND;
+}
+
+X_RESULT ContentManager::UnmountContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+  ContentPackage* package = nullptr;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    auto it = FindOpenPackageByData(data);
+    if (it == open_packages_.end()) {
+      return X_ERROR_FILE_NOT_FOUND;
+    }
+    package = DetachPackage(it);
+  }
+  delete package;
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+                                                 const XCONTENT_AGGREGATE_DATA& data) {
+  // Unmount phase: tolerant of not-mounted state
+  ContentPackage* package = nullptr;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    auto it = FindOpenPackageByData(data);
+    if (it != open_packages_.end()) {
+      package = DetachPackage(it);
+    }
+  }
+  delete package;
+
+  // Delete phase: remove package directory and .header file
+  auto package_path = ResolvePackagePath(xuid, data);
+
+  uint64_t used_xuid = (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+  auto header_path =
+      ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type);
+
+  std::error_code ec;
+  auto dir_removed = std::filesystem::remove_all(package_path, ec);
+  if (ec) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  std::error_code ec2;
+  bool header_removed = std::filesystem::remove(header_path, ec2);
+
+  if (dir_removed > 0 || header_removed) {
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FILE_NOT_FOUND;
+}
+
+std::filesystem::path ContentManager::ResolveGameUserContentPath() {
+  auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
+  const auto profile_root = root_path_ / title_id / kGameUserContentDirName;
+  const auto stable_id = rex::to_path(kernel_state_->user_profile()->storage_id());
+  const auto stable_path = profile_root / stable_id;
+
+  std::error_code error;
+  const bool stable_is_directory = std::filesystem::is_directory(stable_path, error);
+  error.clear();
+  const bool stable_profile_exists =
+      stable_is_directory && !std::filesystem::is_empty(stable_path, error);
+  if (!stable_profile_exists) {
+    // Migrate the most recently active naming scheme first, then the two known
+    // historical defaults. The copy is intentionally non-destructive: legacy
+    // directories remain as recovery sources and existing stable data wins.
+    std::array<std::string, 3> legacy_names = {
+        kernel_state_->user_profile()->name(), "Player", "User"};
+    std::unordered_set<std::string> visited;
+    for (const auto& legacy_name : legacy_names) {
+      if (legacy_name.empty() || !visited.insert(legacy_name).second) {
+        continue;
+      }
+      const auto legacy_path = profile_root / rex::to_path(legacy_name);
+      error.clear();
+      if (!std::filesystem::is_directory(legacy_path, error)) {
+        continue;
+      }
+
+      const auto temporary_path = profile_root / rex::to_path(
+          kernel_state_->user_profile()->storage_id() + ".migrating");
+      error.clear();
+      std::filesystem::remove_all(temporary_path, error);
+      error.clear();
+      std::filesystem::create_directories(temporary_path, error);
+      if (error) {
+        REXSYS_ERROR("Could not create title-profile migration directory '{}': {}",
+                     temporary_path.string(), error.message());
+        break;
+      }
+      std::filesystem::copy(legacy_path, temporary_path,
+                            std::filesystem::copy_options::recursive |
+                                std::filesystem::copy_options::skip_existing,
+                            error);
+      if (error) {
+        REXSYS_ERROR("Could not migrate title profile '{}' to '{}': {}",
+                     legacy_path.string(), stable_path.string(), error.message());
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(temporary_path, cleanup_error);
+      } else {
+        error.clear();
+        const bool destination_exists = std::filesystem::exists(stable_path, error);
+        if (!error && destination_exists) {
+          const bool destination_is_empty_directory =
+              std::filesystem::is_directory(stable_path, error) &&
+              std::filesystem::is_empty(stable_path, error);
+          if (!error && destination_is_empty_directory) {
+            std::filesystem::remove(stable_path, error);
+          } else if (!error) {
+            error = std::make_error_code(std::errc::file_exists);
+          }
+        }
+        if (!error) {
+          std::filesystem::rename(temporary_path, stable_path, error);
+        }
+        if (error) {
+          REXSYS_ERROR("Could not publish migrated title profile '{}': {}",
+                       stable_path.string(), error.message());
+          std::error_code cleanup_error;
+          std::filesystem::remove_all(temporary_path, cleanup_error);
+        } else {
+          REXSYS_INFO("Migrated title profile '{}' to stable XUID namespace '{}'",
+                      legacy_path.string(), stable_path.string());
+        }
+      }
+      break;
+    }
+  }
+
+  // Per-game profile data is keyed by stable XUID, independently of the
+  // multiplayer display name returned by XamUserGetName.
+  return stable_path;
+}
+
+std::unordered_map<string::string_key_case, ContentPackage*,
+                   string::string_key_case::Hash>::iterator
+ContentManager::FindOpenPackageByData(const XCONTENT_AGGREGATE_DATA& data) {
+  // Resolve kCurrentlyRunningTitleId so both sides compare actual title IDs.
+  uint32_t query_title = data.title_id;
+  if (query_title == kCurrentlyRunningTitleId) {
+    query_title = kernel_state_->title_id();
+  }
+
+  for (auto it = open_packages_.begin(); it != open_packages_.end(); ++it) {
+    const auto& pkg = it->second->GetPackageContentData();
+
+    uint32_t pkg_title = pkg.title_id;
+    if (pkg_title == kCurrentlyRunningTitleId) {
+      pkg_title = kernel_state_->title_id();
+    }
+
+    // Match on content_type + file_name + resolved title_id.
+    // device_id is a virtual storage selector, not a content identifier.
+    if (data.content_type == pkg.content_type && data.file_name() == pkg.file_name() &&
+        query_title == pkg_title) {
+      return it;
+    }
+  }
+  return open_packages_.end();
+}
+
+ContentPackage* ContentManager::DetachPackage(
+    std::unordered_map<string::string_key_case, ContentPackage*,
+                       string::string_key_case::Hash>::iterator it) {
+  CloseOpenedFilesFromContent(it->first.view());
+  ContentPackage* package = it->second;
+  open_packages_.erase(it);
+  return package;
+}
+
+bool ContentManager::IsContentOpen(const XCONTENT_AGGREGATE_DATA& data) const {
+  return std::any_of(open_packages_.cbegin(), open_packages_.cend(), [&data](const auto& content) {
+    return data == content.second->GetPackageContentData();
+  });
+}
+
+std::filesystem::path ContentManager::GetOpenPackagePath(const std::string_view root_name) const {
+  auto it = open_packages_.find(string::string_key_case(root_name));
+  if (it == open_packages_.end()) {
+    return {};
+  }
+  return it->second->package_path();
+}
+
+void ContentManager::CloseOpenedFilesFromContent(const std::string_view root_name) {
+  // TODO(Gliniak): Cleanup this code to care only about handles
+  // related to provided content
+  const std::vector<object_ref<XFile>> all_files_handles =
+      kernel_state_->object_table()->GetObjectsByType<XFile>(XObject::Type::File);
+
+  std::string resolved_path = "";
+  kernel_state_->file_system()->FindSymbolicLink(std::string(root_name) + ':', resolved_path);
+
+  for (const object_ref<XFile>& file : all_files_handles) {
+    std::string file_path = file->entry()->absolute_path();
+    bool is_file_inside_content = rex::string::utf8_starts_with(file_path, resolved_path);
+
+    if (is_file_inside_content) {
+      file->ReleaseHandle();
+    }
+  }
+}
+
+static X_RESULT ExtractEntry(rex::filesystem::Entry* entry,
+                             const std::filesystem::path& base_path) {
+  auto dest_path = base_path / rex::to_path(rex::string::utf8_fix_path_separators(entry->path()));
+
+  if (entry->attributes() & rex::filesystem::kFileAttributeDirectory) {
+    std::error_code ec;
+    std::filesystem::create_directories(dest_path, ec);
+    if (ec) {
+      return X_ERROR_ACCESS_DENIED;
+    }
+    return X_ERROR_SUCCESS;
+  }
+
+  // Ensure parent directory exists
+  std::error_code ec;
+  std::filesystem::create_directories(dest_path.parent_path(), ec);
+
+  rex::filesystem::File* in_file = nullptr;
+  X_STATUS status = entry->Open(rex::filesystem::FileAccess::kFileReadData, &in_file);
+  if (status != X_STATUS_SUCCESS) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  auto out_file = rex::filesystem::OpenFile(dest_path, "wb");
+  if (!out_file) {
+    in_file->Destroy();
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  constexpr size_t kBufferSize = 4 * 1024 * 1024;  // 4 MiB
+  auto buffer = std::make_unique<uint8_t[]>(kBufferSize);
+  size_t remaining = entry->size();
+  size_t offset = 0;
+
+  while (remaining > 0) {
+    size_t bytes_read = 0;
+    size_t to_read = std::min(remaining, kBufferSize);
+    in_file->ReadSync(std::span<uint8_t>(buffer.get(), to_read), offset, &bytes_read);
+    if (bytes_read == 0) {
+      break;
+    }
+    fwrite(buffer.get(), 1, bytes_read, out_file);
+    offset += bytes_read;
+    remaining -= bytes_read;
+  }
+
+  fclose(out_file);
+  in_file->Destroy();
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::InstallContent(const std::filesystem::path& package_path) {
+  if (!std::filesystem::exists(package_path)) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  // Mount the STFS package as a virtual filesystem device
+  auto device = std::make_unique<rex::filesystem::StfsContainerDevice>("", package_path);
+  if (!device->Initialize()) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  // Derive the install destination using the configured marketplace layout.
+  auto file_name = rex::path_to_utf8(package_path.filename());
+
+  XCONTENT_AGGREGATE_DATA content_data{};
+  content_data.device_id = static_cast<uint32_t>(DummyDeviceId::HDD);
+  content_data.content_type = XContentType::kMarketplaceContent;
+  content_data.title_id = kernel_state_->title_id();
+  content_data.xuid = 0;
+  content_data.set_file_name(file_name);
+
+  // Read display name from STFS metadata
+  auto display_name = device->header().metadata.display_name(rex::system::XLanguage::kEnglish);
+  if (!display_name.empty()) {
+    content_data.set_display_name(display_name);
+  } else {
+    content_data.set_display_name(rex::path_to_utf16(package_path.filename()));
+  }
+
+  auto install_path = ResolvePackagePath(0, content_data);
+
+  // Create destination directory
+  std::error_code ec;
+  std::filesystem::create_directories(install_path, ec);
+  if (ec) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  // Extract all files breadth-first
+  auto* root = device->ResolvePath("");
+  if (!root) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  std::queue<rex::filesystem::Entry*> queue;
+  queue.push(root);
+
+  while (!queue.empty()) {
+    auto* entry = queue.front();
+    queue.pop();
+
+    for (auto& child : entry->children()) {
+      queue.push(child.get());
+    }
+
+    auto result = ExtractEntry(entry, install_path);
+    if (result != X_ERROR_SUCCESS) {
+      return result;
+    }
+  }
+
+  // Compute license mask from STFS header licenses
+  uint32_t license_mask = 0;
+  for (size_t i = 0; i < 0x10; i++) {
+    if (device->header().header.licenses[i].license_flags) {
+      license_mask |= device->header().header.licenses[i].license_bits;
+    }
+  }
+
+  // Write .header file
+  return WriteContentHeaderFile(0, content_data, license_mask);
+}
+
+}  // namespace xam
+}  // namespace system
+}  // namespace rex

@@ -1,0 +1,21 @@
+{
+	email {$COMMUNITY_ACME_EMAIL}
+}
+
+(api_upstreams) {
+	reverse_proxy {
+		dynamic a api 8080
+		lb_policy round_robin
+		fail_duration 30s
+		max_fails 2
+	}
+}
+
+{$COMMUNITY_DOMAIN} {
+	encode zstd gzip
+	import api_upstreams
+}
+
+http://127.0.0.1:8080, http://localhost:8080 {
+	import api_upstreams
+}

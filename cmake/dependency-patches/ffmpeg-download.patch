@@ -1,0 +1,46 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 329b16c4f51548abf9eb07ffc17aee27313cd337..34d13579a8db4c30e077991b3ef8e9dd58981fe4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -43,13 +43,34 @@ execute_process(
+ set(FFMPEG_ZIP_PATH "${CMAKE_BINARY_DIR}/external/ffmpeg-${FFMPEG_GIT_SHA}.zip")
+ if(NOT EXISTS "${FFMPEG_ZIP_PATH}")
+ 	message(STATUS "Downloading FFMPEG prebuilts...")
+-	file(DOWNLOAD https://github.com/IsaacMarovitz/ffmpeg-core/releases/download/${FFMPEG_GIT_SHA}/${FFMPEG_PREBUILTS_NAME}
+-			"${FFMPEG_ZIP_PATH}" SHOW_PROGRESS
+-		STATUS FILE_STATUS)
+-	list(GET FILE_STATUS 0 STATUS_CODE)
+-	if (NOT STATUS_CODE EQUAL 0)
+-		file(REMOVE "${FFMPEG_ZIP_PATH}") # CMake create 0 byte file even if URL is invalid. So need to delete it.
+-		message(FATAL_ERROR "No FFMPEG prebuilt found with corresponding commit SHA (${FFMPEG_GIT_SHA})")
++	set(FFMPEG_DOWNLOAD_URLS
++		"https://github.com/sonicnext-dev/ffmpeg-core/releases/download/${FFMPEG_GIT_SHA}/${FFMPEG_PREBUILTS_NAME}"
++		"https://github.com/IsaacMarovitz/ffmpeg-core/releases/download/${FFMPEG_GIT_SHA}/${FFMPEG_PREBUILTS_NAME}"
++		"https://github.com/shadps4-emu/ext-ffmpeg-core/releases/download/${FFMPEG_GIT_SHA}/${FFMPEG_PREBUILTS_NAME}")
++	set(FFMPEG_DOWNLOAD_SUCCESS FALSE)
++	set(FFMPEG_DOWNLOAD_ERROR "")
++
++	foreach(FFMPEG_DOWNLOAD_URL IN LISTS FFMPEG_DOWNLOAD_URLS)
++		file(DOWNLOAD "${FFMPEG_DOWNLOAD_URL}"
++				"${FFMPEG_ZIP_PATH}" SHOW_PROGRESS
++			STATUS FILE_STATUS
++			LOG FILE_LOG)
++		list(GET FILE_STATUS 0 STATUS_CODE)
++		list(GET FILE_STATUS 1 STATUS_TEXT)
++		if (STATUS_CODE EQUAL 0)
++			set(FFMPEG_DOWNLOAD_SUCCESS TRUE)
++			break()
++		endif()
++
++		file(REMOVE "${FFMPEG_ZIP_PATH}") # CMake creates a 0-byte file when a download fails.
++		set(FFMPEG_DOWNLOAD_ERROR
++			"${FFMPEG_DOWNLOAD_ERROR}\nURL: ${FFMPEG_DOWNLOAD_URL}\nStatus: ${STATUS_CODE} (${STATUS_TEXT})\nLog:\n${FILE_LOG}\n")
++	endforeach()
++
++	if (NOT FFMPEG_DOWNLOAD_SUCCESS)
++		message(FATAL_ERROR
++			"Failed to download FFMPEG prebuilt for commit SHA (${FFMPEG_GIT_SHA}) and asset (${FFMPEG_PREBUILTS_NAME})."
++			"${FFMPEG_DOWNLOAD_ERROR}")
+ 	endif()
+ endif()
+ 

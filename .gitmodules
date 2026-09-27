@@ -1,0 +1,159 @@
+[submodule "thirdparty/ddspp"]
+	path = thirdparty/ddspp
+	url = https://github.com/redorav/ddspp.git
+[submodule "tools/SparkIV"]
+	path = tools/SparkIV
+	url = https://github.com/ahmed605/SparkIV.git
+[submodule "tools/XenosRecomp"]
+	path = tools/XenosRecomp
+	url = https://github.com/sonicnext-dev/XenosRecomp.git
+[submodule "tools/DLSS"]
+	path = tools/DLSS
+	url = https://github.com/NVIDIA/DLSS.git
+[submodule "tools/FidelityFX-SDK"]
+	path = tools/FidelityFX-SDK
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
+[submodule "tools/fsr1"]
+	path = tools/fsr1
+	url = https://github.com/GPUOpen-Effects/FidelityFX-FSR.git
+[submodule "tools/smaa"]
+	path = tools/smaa
+	url = https://github.com/iryoku/smaa.git
+[submodule "tools/extract-xiso"]
+	path = tools/extract-xiso
+	url = https://github.com/XboxDev/extract-xiso.git
+[submodule "tools/XexToolGUI"]
+	path = tools/XexToolGUI
+	url = https://github.com/XboxChef/XexToolGUI.git
+[submodule "tools/OpenOrbis-PS4-Toolchain"]
+	path = tools/OpenOrbis-PS4-Toolchain
+	url = https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git
+[submodule "tools/libnx"]
+	path = tools/libnx
+	url = https://github.com/switchbrew/libnx.git
+[submodule "tools/llvm-project-libcxx"]
+	path = tools/llvm-project-libcxx
+	url = https://github.com/llvm/llvm-project.git
+[submodule "thirdparty/msdf-atlas-gen"]
+	path = thirdparty/msdf-atlas-gen
+	url = https://github.com/Chlumsky/msdf-atlas-gen.git
+[submodule "thirdparty/vcpkg"]
+	path = thirdparty/vcpkg
+	url = https://github.com/microsoft/vcpkg
+[submodule "thirdparty/SDL"]
+	path = thirdparty/SDL
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "thirdparty/stb"]
+	path = thirdparty/stb
+	url = https://github.com/nothings/stb.git
+[submodule "thirdparty/concurrentqueue"]
+	path = thirdparty/concurrentqueue
+	url = https://github.com/cameron314/concurrentqueue.git
+[submodule "thirdparty/magic_enum"]
+	path = thirdparty/magic_enum
+	url = https://github.com/Neargye/magic_enum.git
+[submodule "thirdparty/nativefiledialog-extended"]
+	path = thirdparty/nativefiledialog-extended
+	url = https://github.com/btzy/nativefiledialog-extended.git
+[submodule "thirdparty/imgui"]
+	path = thirdparty/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "thirdparty/unordered_dense"]
+	path = thirdparty/unordered_dense
+	url = https://github.com/martinus/unordered_dense.git
+[submodule "thirdparty/SDL_mixer"]
+	path = thirdparty/SDL_mixer
+	url = https://github.com/libsdl-org/SDL_mixer
+[submodule "thirdparty/implot"]
+	path = thirdparty/implot
+	url = https://github.com/epezent/implot.git
+[submodule "thirdparty/json"]
+	path = thirdparty/json
+	url = https://github.com/nlohmann/json
+# TODO: Create LibertyRecompResources repo with GTA IV specific resources
+# [submodule "LibertyRecompResources"]
+# 	path = LibertyRecompResources
+# 	url = https://github.com/OZORDI/LibertyRecompResources
+[submodule "thirdparty/MoltenVK/MoltenVK"]
+	path = thirdparty/MoltenVK/MoltenVK
+	url = https://github.com/KhronosGroup/MoltenVK.git
+[submodule "thirdparty/MoltenVK/SPIRV-Cross"]
+	path = thirdparty/MoltenVK/SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+[submodule "thirdparty/plume"]
+	path = thirdparty/plume
+	url = https://github.com/renderbag/plume
+[submodule "thirdparty/ffmpeg-core"]
+	path = thirdparty/ffmpeg-core
+	url = https://github.com/sonicnext-dev/ffmpeg-core
+[submodule "thirdparty/GameNetworkingSockets"]
+	path = thirdparty/GameNetworkingSockets
+	url = https://github.com/ValveSoftware/GameNetworkingSockets.git
+[submodule "glue/rexglue-sdk-main/thirdparty/libmspack"]
+	path = glue/rexglue-sdk-main/thirdparty/libmspack
+	url = https://github.com/kyz/libmspack.git
+[submodule "glue/rexglue-sdk-main/thirdparty/glslang"]
+	path = glue/rexglue-sdk-main/thirdparty/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+[submodule "glue/rexglue-sdk-main/thirdparty/FFmpeg"]
+	path = glue/rexglue-sdk-main/thirdparty/FFmpeg
+	url = https://github.com/wmarti/FFmpeg.git
+	branch = xenia-ffmpeg-canary-full
+[submodule "glue/rexglue-sdk-main/thirdparty/tomlplusplus"]
+	path = glue/rexglue-sdk-main/thirdparty/tomlplusplus
+	url = https://github.com/marzer/tomlplusplus.git
+[submodule "glue/rexglue-sdk-main/thirdparty/simde"]
+	path = glue/rexglue-sdk-main/thirdparty/simde
+	url = https://github.com/simd-everywhere/simde.git
+[submodule "glue/rexglue-sdk-main/thirdparty/xxHash"]
+	path = glue/rexglue-sdk-main/thirdparty/xxHash
+	url = https://github.com/Cyan4973/xxHash.git
+[submodule "glue/rexglue-sdk-main/thirdparty/spdlog"]
+	path = glue/rexglue-sdk-main/thirdparty/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "glue/rexglue-sdk-main/thirdparty/fmt"]
+	path = glue/rexglue-sdk-main/thirdparty/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "glue/rexglue-sdk-main/thirdparty/catch2"]
+	path = glue/rexglue-sdk-main/thirdparty/catch2
+	url = https://github.com/catchorg/Catch2.git
+[submodule "glue/rexglue-sdk-main/thirdparty/snappy"]
+	path = glue/rexglue-sdk-main/thirdparty/snappy
+	url = https://github.com/google/snappy.git
+[submodule "glue/rexglue-sdk-main/thirdparty/utfcpp"]
+	path = glue/rexglue-sdk-main/thirdparty/utfcpp
+	url = https://github.com/nemtrif/utfcpp.git
+[submodule "glue/rexglue-sdk-main/thirdparty/volk"]
+	path = glue/rexglue-sdk-main/thirdparty/volk
+	url = https://github.com/zeux/volk.git
+[submodule "glue/rexglue-sdk-main/thirdparty/vulkan-headers"]
+	path = glue/rexglue-sdk-main/thirdparty/vulkan-headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "glue/rexglue-sdk-main/thirdparty/vulkan-memory-allocator"]
+	path = glue/rexglue-sdk-main/thirdparty/vulkan-memory-allocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+[submodule "glue/rexglue-sdk-main/thirdparty/imgui"]
+	path = glue/rexglue-sdk-main/thirdparty/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "glue/rexglue-sdk-main/thirdparty/spirv-tools"]
+	path = glue/rexglue-sdk-main/thirdparty/spirv-tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools.git
+[submodule "glue/rexglue-sdk-main/thirdparty/spirv-headers"]
+	path = glue/rexglue-sdk-main/thirdparty/spirv-headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
+[submodule "glue/rexglue-sdk-main/thirdparty/cli11"]
+	path = glue/rexglue-sdk-main/thirdparty/cli11
+	url = https://github.com/CLIUtils/CLI11
+[submodule "glue/rexglue-sdk-main/thirdparty/o1heap"]
+	path = glue/rexglue-sdk-main/thirdparty/o1heap
+	url = https://github.com/pavel-kirienko/o1heap.git
+[submodule "glue/rexglue-sdk-main/thirdparty/sdl3"]
+	path = glue/rexglue-sdk-main/thirdparty/sdl3
+	url = https://github.com/libsdl-org/SDL
+	branch = release-3.4.x
+[submodule "glue/rexglue-sdk-main/thirdparty/inja"]
+	path = glue/rexglue-sdk-main/thirdparty/inja
+	url = https://github.com/pantor/inja.git
+[submodule "glue/rexglue-sdk-main/thirdparty/tracy"]
+	path = glue/rexglue-sdk-main/thirdparty/tracy
+	url = https://github.com/wolfpld/tracy.git

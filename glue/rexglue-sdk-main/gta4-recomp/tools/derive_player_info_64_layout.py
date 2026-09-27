@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Derive the widened GTA IV player-info table layout and hook seams."""
+
+from __future__ import annotations
+
+
+LEGACY_CAPACITY = 16
+EXTENDED_CAPACITY = 64
+GUEST_POINTER_SIZE = 4
+POINTER_TABLE = 0x82C01C70
+GENERATION_TABLE = 0x82C01C30
+NETWORK_ARRAY_REGISTER_CALL = 0x826DB228
+PLAYER_INFO_ID_OFFSET = 1230
+PLAYER_INFO_STATE_OFFSET = 1232
+PLAYER_INFO_PLAYER_POINTER_OFFSET = 1400
+PLAYER_ENTITY_FIRST_CLEANUP_FLAG_OFFSET = 528
+PLAYER_ENTITY_SECOND_CLEANUP_FLAG_OFFSET = 529
+START_GAME_SESSION_BASE = ((-31983 & 0xFFFF) << 16) - 25464
+START_GAME_LITERAL = ((-32251 & 0xFFFF) << 16) + 9944
+START_GAME_FORMAT_LITERAL = ((-32244 & 0xFFFF) << 16) - 27232
+START_GAME_MESSAGE_SINK_OFFSET = 136
+START_GAME_DIRECT_MESSAGE_FLAG = ((-31984 & 0xFFFF) << 16) - 20245
+START_GAME_MESSAGE_SINK = START_GAME_SESSION_BASE + START_GAME_MESSAGE_SINK_OFFSET
+TRANSITION_FLAGS_OFFSET = 152
+TRANSITION_RESET_SOURCE_BIT = 30
+TRANSITION_FALLBACK_STATE = ((-32005 & 0xFFFF) << 16)
+TRANSITION_NESTED_STATE_OFFSET = 544
+TRANSITION_NESTED_STATE_BIAS = 96
+TRANSITION_BYTE_FLAGS_OFFSET = 91
+TRANSITION_BYTE_CLEAR_MASK = (1 << 7) - 1
+TRANSITION_PLAYER_FLAGS_OFFSET = 564
+TRANSITION_PLAYER_FORCE_FLAG = 1 << 23
+TRANSITION_PLAYER_ACTIVE_MASK = (1 << 30) | (1 << 29)
+TRANSITION_RESET_ACCESSOR_RETURN = 0x822D7730
+TRANSITION_FORCE_ACCESSOR_RETURN = 0x822D7C70
+THRESHOLD_ACCESSOR_RETURN = 0x8216D6E0
+THRESHOLD_LIST_COUNT_OFFSET = 128
+THRESHOLD_LIST_RECORD_STRIDE = 8
+THRESHOLD_MATCH_COUNT = 5
+THRESHOLD_EVENT_ID = 41
+SAMPLE_GLOBAL_BASE = ((-32003 & 0xFFFF) << 16)
+SAMPLE_COUNT_ADDRESS = SAMPLE_GLOBAL_BASE - 26740
+SAMPLE_TABLE_ADDRESS = SAMPLE_GLOBAL_BASE + 3040
+SAMPLE_RECORD_SIZE = 8
+SAMPLE_CAPACITY = 16
+LOBBY_POSITION_ACCESSOR_RETURN = 0x826DE970
+LOBBY_CLOCK_ADDRESS = ((-32057 & 0xFFFF) << 16) - 15724
+LOBBY_SELECTION_INDEX_ADDRESS = ((-32085 & 0xFFFF) << 16) + 2520
+LOBBY_SESSION_OFFSET = 4
+LOBBY_FIRST_SCAN_FLAG_OFFSET = 9
+LOBBY_FIRST_SCAN_TIMESTAMP_OFFSET = 12
+LOBBY_POSITION_FLAG_OFFSET = 11
+LOBBY_POSITION_TIMESTAMP_OFFSET = 20
+LOBBY_POSITION_RECORDS_OFFSET = 40
+LOBBY_POSITION_RECORD_COUNT_OFFSET = 536
+LOBBY_POSITION_RECORD_STRIDE = 32
+LOBBY_POSITION_VECTOR_SIZE = 16
+LOBBY_POSITION_RETRY_TICKS = 3000
+PROXIMITY_STATUS_TABLE_ADDRESS = ((-31975 & 0xFFFF) << 16) - 4824
+PROXIMITY_STATUS_RECORD_SIZE = 12
+PROXIMITY_STATUS_CATEGORY_OFFSET = 0
+PROXIMITY_STATUS_WEIGHT_OFFSET = 8
+PROXIMITY_STATUS_CATEGORY_ONE_DENOMINATOR_WEIGHT = 2
+PROXIMITY_STATUS_CATEGORY_TWO_DENOMINATOR_WEIGHT = 3
+PROXIMITY_STATUS_TABLE_BYTES = LEGACY_CAPACITY * PROXIMITY_STATUS_RECORD_SIZE
+PROXIMITY_STATUS_TIMESTAMP_ADDRESS = ((-31975 & 0xFFFF) << 16) - 4960
+PROXIMITY_STATUS_RANDOM_ADDRESS = ((-31975 & 0xFFFF) << 16) - 4956
+PROXIMITY_STATUS_CATEGORY_ONE_MULTIPLIER_ADDRESS = ((-32256 & 0xFFFF) << 16) + 3528
+PROXIMITY_STATUS_CATEGORY_TWO_MULTIPLIER_ADDRESS = ((-32254 & 0xFFFF) << 16) - 26300
+PROXIMITY_STATUS_ELIGIBLE_ID_RETURN = 0x8278D18C
+NEAREST_NETWORK_TIMESTAMP_OFFSET = 180
+PROXIMITY_TEST_COUNTS = (16, 16, 32)
+PROXIMITY_TEST_RANDOM = 1440
+PROXIMITY_TEST_MULTIPLIERS = (1.0, 2.0, 3.0)
+
+
+def main() -> None:
+    legacy_pointer_end = POINTER_TABLE + LEGACY_CAPACITY * GUEST_POINTER_SIZE
+    extended_pointer_end = POINTER_TABLE + EXTENDED_CAPACITY * GUEST_POINTER_SIZE
+    legacy_generation_end = GENERATION_TABLE + LEGACY_CAPACITY * GUEST_POINTER_SIZE
+    extended_generation_end = GENERATION_TABLE + EXTENDED_CAPACITY * GUEST_POINTER_SIZE
+    shadow_pointer_bytes = EXTENDED_CAPACITY * GUEST_POINTER_SIZE
+    shadow_pair_bytes = shadow_pointer_bytes * 2
+
+    assert legacy_pointer_end == 0x82C01CB0
+    assert extended_pointer_end == 0x82C01D70
+    assert legacy_generation_end == POINTER_TABLE
+    assert extended_generation_end == 0x82C01D30
+    assert shadow_pointer_bytes == 0x100
+    assert shadow_pair_bytes == 0x200
+    assert NETWORK_ARRAY_REGISTER_CALL == 0x826DB228
+    assert PLAYER_INFO_ID_OFFSET == 0x4CE
+    assert PLAYER_INFO_STATE_OFFSET == 0x4D0
+    assert PLAYER_INFO_PLAYER_POINTER_OFFSET == 0x578
+    assert PLAYER_ENTITY_FIRST_CLEANUP_FLAG_OFFSET == 0x210
+    assert PLAYER_ENTITY_SECOND_CLEANUP_FLAG_OFFSET == 0x211
+    assert START_GAME_SESSION_BASE == 0x83109C88
+    assert START_GAME_LITERAL == 0x820526D8
+    assert START_GAME_FORMAT_LITERAL == 0x820B95A0
+    assert START_GAME_MESSAGE_SINK_OFFSET == 0x88
+    assert START_GAME_DIRECT_MESSAGE_FLAG == 0x830FB0EB
+    assert START_GAME_MESSAGE_SINK == 0x83109D10
+    assert TRANSITION_FLAGS_OFFSET == 0x98
+    assert TRANSITION_RESET_SOURCE_BIT == 30
+    assert TRANSITION_FALLBACK_STATE == 0x82FB0000
+    assert TRANSITION_NESTED_STATE_OFFSET == 0x220
+    assert TRANSITION_NESTED_STATE_BIAS == 0x60
+    assert TRANSITION_BYTE_FLAGS_OFFSET == 0x5B
+    assert TRANSITION_BYTE_CLEAR_MASK == 0x7F
+    assert TRANSITION_PLAYER_FLAGS_OFFSET == 0x234
+    assert TRANSITION_PLAYER_FORCE_FLAG == 0x00800000
+    assert TRANSITION_PLAYER_ACTIVE_MASK == 0x60000000
+    assert TRANSITION_RESET_ACCESSOR_RETURN == 0x822D7730
+    assert TRANSITION_FORCE_ACCESSOR_RETURN == 0x822D7C70
+    assert THRESHOLD_ACCESSOR_RETURN == 0x8216D6E0
+    assert THRESHOLD_LIST_COUNT_OFFSET == 0x80
+    assert THRESHOLD_LIST_RECORD_STRIDE == 0x8
+    assert THRESHOLD_MATCH_COUNT == 5
+    assert THRESHOLD_EVENT_ID == 41
+    assert SAMPLE_COUNT_ADDRESS == 0x82FC978C
+    assert SAMPLE_TABLE_ADDRESS == 0x82FD0BE0
+    assert SAMPLE_RECORD_SIZE == 0x8
+    assert SAMPLE_CAPACITY == 16
+    assert LOBBY_POSITION_ACCESSOR_RETURN == 0x826DE970
+    assert LOBBY_CLOCK_ADDRESS == 0x82C6C294
+    assert LOBBY_SELECTION_INDEX_ADDRESS == 0x82AB09D8
+    assert LOBBY_SESSION_OFFSET == 0x4
+    assert LOBBY_FIRST_SCAN_FLAG_OFFSET == 0x9
+    assert LOBBY_FIRST_SCAN_TIMESTAMP_OFFSET == 0xC
+    assert LOBBY_POSITION_FLAG_OFFSET == 0xB
+    assert LOBBY_POSITION_TIMESTAMP_OFFSET == 0x14
+    assert LOBBY_POSITION_RECORDS_OFFSET == 0x28
+    assert LOBBY_POSITION_RECORD_COUNT_OFFSET == 0x218
+    assert LOBBY_POSITION_RECORD_STRIDE == 0x20
+    assert LOBBY_POSITION_VECTOR_SIZE == 0x10
+    assert LOBBY_POSITION_RETRY_TICKS == 3000
+    assert PROXIMITY_STATUS_TABLE_ADDRESS == 0x8318ED28
+    assert PROXIMITY_STATUS_RECORD_SIZE == 0xC
+    assert PROXIMITY_STATUS_CATEGORY_OFFSET == 0
+    assert PROXIMITY_STATUS_WEIGHT_OFFSET == 0x8
+    assert PROXIMITY_STATUS_CATEGORY_ONE_DENOMINATOR_WEIGHT == 2
+    assert PROXIMITY_STATUS_CATEGORY_TWO_DENOMINATOR_WEIGHT == 3
+    assert PROXIMITY_STATUS_TABLE_BYTES == 0xC0
+    assert PROXIMITY_STATUS_TIMESTAMP_ADDRESS == 0x8318ECA0
+    assert PROXIMITY_STATUS_RANDOM_ADDRESS == 0x8318ECA4
+    assert PROXIMITY_STATUS_CATEGORY_ONE_MULTIPLIER_ADDRESS == 0x82000DC8
+    assert PROXIMITY_STATUS_CATEGORY_TWO_MULTIPLIER_ADDRESS == 0x82019944
+    assert PROXIMITY_STATUS_ELIGIBLE_ID_RETURN == 0x8278D18C
+    assert NEAREST_NETWORK_TIMESTAMP_OFFSET == 0xB4
+    proximity_test_denominator = (
+        PROXIMITY_TEST_COUNTS[0]
+        + PROXIMITY_TEST_COUNTS[1] * PROXIMITY_STATUS_CATEGORY_ONE_DENOMINATOR_WEIGHT
+        + PROXIMITY_TEST_COUNTS[2] * PROXIMITY_STATUS_CATEGORY_TWO_DENOMINATOR_WEIGHT
+    )
+    proximity_test_weights = tuple(
+        int(PROXIMITY_TEST_RANDOM / proximity_test_denominator * multiplier)
+        for multiplier in PROXIMITY_TEST_MULTIPLIERS
+    )
+    assert sum(PROXIMITY_TEST_COUNTS) == EXTENDED_CAPACITY
+    assert proximity_test_denominator == 144
+    assert proximity_test_weights == (10, 20, 30)
+
+    print(f"legacy_pointer_range=0x{POINTER_TABLE:08X}..0x{legacy_pointer_end:08X}")
+    print(f"extended_pointer_end=0x{extended_pointer_end:08X}")
+    print(
+        f"legacy_generation_range=0x{GENERATION_TABLE:08X}.."
+        f"0x{legacy_generation_end:08X}"
+    )
+    print(f"extended_generation_end=0x{extended_generation_end:08X}")
+    print(f"shadow_pointer_bytes=0x{shadow_pointer_bytes:X}")
+    print(f"shadow_pointer_generation_bytes=0x{shadow_pair_bytes:X}")
+    print(f"network_array_register_return=0x{NETWORK_ARRAY_REGISTER_CALL:08X}")
+    print(f"player_info_id_offset=0x{PLAYER_INFO_ID_OFFSET:X}")
+    print(f"player_info_state_offset=0x{PLAYER_INFO_STATE_OFFSET:X}")
+    print(f"player_info_player_pointer_offset=0x{PLAYER_INFO_PLAYER_POINTER_OFFSET:X}")
+    print(f"player_entity_cleanup_flags=0x{PLAYER_ENTITY_FIRST_CLEANUP_FLAG_OFFSET:X},"
+          f"0x{PLAYER_ENTITY_SECOND_CLEANUP_FLAG_OFFSET:X}")
+    print(f"start_game_session_base=0x{START_GAME_SESSION_BASE:08X}")
+    print(f"start_game_literal=0x{START_GAME_LITERAL:08X}")
+    print(f"start_game_format_literal=0x{START_GAME_FORMAT_LITERAL:08X}")
+    print(f"start_game_message_sink_offset=0x{START_GAME_MESSAGE_SINK_OFFSET:X}")
+    print(f"start_game_direct_message_flag=0x{START_GAME_DIRECT_MESSAGE_FLAG:08X}")
+    print(f"start_game_message_sink=0x{START_GAME_MESSAGE_SINK:08X}")
+    print(f"transition_flags_offset=0x{TRANSITION_FLAGS_OFFSET:X}")
+    print(f"transition_reset_source_bit={TRANSITION_RESET_SOURCE_BIT}")
+    print(f"transition_fallback_state=0x{TRANSITION_FALLBACK_STATE:08X}")
+    print(f"transition_nested_state_offset=0x{TRANSITION_NESTED_STATE_OFFSET:X}")
+    print(f"transition_nested_state_bias=0x{TRANSITION_NESTED_STATE_BIAS:X}")
+    print(f"transition_byte_flags_offset=0x{TRANSITION_BYTE_FLAGS_OFFSET:X}")
+    print(f"transition_byte_clear_mask=0x{TRANSITION_BYTE_CLEAR_MASK:02X}")
+    print(f"transition_player_flags_offset=0x{TRANSITION_PLAYER_FLAGS_OFFSET:X}")
+    print(f"transition_player_force_flag=0x{TRANSITION_PLAYER_FORCE_FLAG:08X}")
+    print(f"transition_player_active_mask=0x{TRANSITION_PLAYER_ACTIVE_MASK:08X}")
+    print(f"transition_reset_accessor_return=0x{TRANSITION_RESET_ACCESSOR_RETURN:08X}")
+    print(f"transition_force_accessor_return=0x{TRANSITION_FORCE_ACCESSOR_RETURN:08X}")
+    print(f"threshold_accessor_return=0x{THRESHOLD_ACCESSOR_RETURN:08X}")
+    print(f"threshold_list_count_offset=0x{THRESHOLD_LIST_COUNT_OFFSET:X}")
+    print(f"threshold_list_record_stride=0x{THRESHOLD_LIST_RECORD_STRIDE:X}")
+    print(f"threshold_match_count={THRESHOLD_MATCH_COUNT}")
+    print(f"threshold_event_id={THRESHOLD_EVENT_ID}")
+    print(f"sample_count_address=0x{SAMPLE_COUNT_ADDRESS:08X}")
+    print(f"sample_table_address=0x{SAMPLE_TABLE_ADDRESS:08X}")
+    print(f"sample_record_size=0x{SAMPLE_RECORD_SIZE:X}")
+    print(f"sample_capacity={SAMPLE_CAPACITY}")
+    print(f"lobby_position_accessor_return=0x{LOBBY_POSITION_ACCESSOR_RETURN:08X}")
+    print(f"lobby_clock_address=0x{LOBBY_CLOCK_ADDRESS:08X}")
+    print(f"lobby_selection_index_address=0x{LOBBY_SELECTION_INDEX_ADDRESS:08X}")
+    print(f"lobby_position_record_count_offset=0x{LOBBY_POSITION_RECORD_COUNT_OFFSET:X}")
+    print(f"lobby_position_record_stride=0x{LOBBY_POSITION_RECORD_STRIDE:X}")
+    print(f"proximity_status_table_address=0x{PROXIMITY_STATUS_TABLE_ADDRESS:08X}")
+    print(f"proximity_status_record_size=0x{PROXIMITY_STATUS_RECORD_SIZE:X}")
+    print(f"proximity_status_weight_offset=0x{PROXIMITY_STATUS_WEIGHT_OFFSET:X}")
+    print(f"proximity_status_table_bytes=0x{PROXIMITY_STATUS_TABLE_BYTES:X}")
+    print(f"proximity_status_timestamp_address=0x{PROXIMITY_STATUS_TIMESTAMP_ADDRESS:08X}")
+    print(f"proximity_status_random_address=0x{PROXIMITY_STATUS_RANDOM_ADDRESS:08X}")
+    print(
+        "proximity_status_multiplier_addresses="
+        f"0x{PROXIMITY_STATUS_CATEGORY_ONE_MULTIPLIER_ADDRESS:08X},"
+        f"0x{PROXIMITY_STATUS_CATEGORY_TWO_MULTIPLIER_ADDRESS:08X}"
+    )
+    print(f"proximity_status_eligible_id_return=0x{PROXIMITY_STATUS_ELIGIBLE_ID_RETURN:08X}")
+    print(f"nearest_network_timestamp_offset=0x{NEAREST_NETWORK_TIMESTAMP_OFFSET:X}")
+    print(f"proximity_global_test_denominator={proximity_test_denominator}")
+    print(f"proximity_global_test_weights={proximity_test_weights}")
+
+
+if __name__ == "__main__":
+    main()

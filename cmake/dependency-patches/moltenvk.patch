@@ -1,0 +1,762 @@
+diff --git a/MoltenVK/MoltenVK.xcodeproj/project.pbxproj b/MoltenVK/MoltenVK.xcodeproj/project.pbxproj
+index 2cfceaa4e7946d24c867134b140fe749e24dc3ff..6d7bbc2e4d89b3b11d9af79ac61488a084e5a906 100644
+--- a/MoltenVK/MoltenVK.xcodeproj/project.pbxproj
++++ b/MoltenVK/MoltenVK.xcodeproj/project.pbxproj
+@@ -98,6 +98,7 @@
+ 		2FEA0A9424902F9F00EEF3AD /* MVKCommandPool.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB77B1C7DFB4800632CA3 /* MVKCommandPool.mm */; };
+ 		2FEA0A9524902F9F00EEF3AD /* MVKCmdDraw.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7751C7DFB4800632CA3 /* MVKCmdDraw.mm */; };
+ 		2FEA0A9624902F9F00EEF3AD /* MVKCommandBuffer.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7791C7DFB4800632CA3 /* MVKCommandBuffer.mm */; };
++		868A8C8B88EE4307BB82875F /* MVKMTLBufferRetention.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0034BCF7930D489E98E2669F /* MVKMTLBufferRetention.mm */; };
+ 		2FEA0A9724902F9F00EEF3AD /* MVKCmdRendering.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7731C7DFB4800632CA3 /* MVKCmdRendering.mm */; };
+ 		2FEA0A9824902F9F00EEF3AD /* MVKBuffer.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7801C7DFB4800632CA3 /* MVKBuffer.mm */; };
+ 		2FEA0A9924902F9F00EEF3AD /* mvk_datatypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7A91C7DFB4800632CA3 /* mvk_datatypes.mm */; };
+@@ -181,7 +182,9 @@
+ 		A94FB7D01C7DFB4800632CA3 /* MVKCommandBuffer.h in Headers */ = {isa = PBXBuildFile; fileRef = A94FB7781C7DFB4800632CA3 /* MVKCommandBuffer.h */; };
+ 		A94FB7D11C7DFB4800632CA3 /* MVKCommandBuffer.h in Headers */ = {isa = PBXBuildFile; fileRef = A94FB7781C7DFB4800632CA3 /* MVKCommandBuffer.h */; };
+ 		A94FB7D21C7DFB4800632CA3 /* MVKCommandBuffer.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7791C7DFB4800632CA3 /* MVKCommandBuffer.mm */; };
++		B1A9B3F4F5474B6D848EDEFA /* MVKMTLBufferRetention.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0034BCF7930D489E98E2669F /* MVKMTLBufferRetention.mm */; };
+ 		A94FB7D31C7DFB4800632CA3 /* MVKCommandBuffer.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7791C7DFB4800632CA3 /* MVKCommandBuffer.mm */; };
++		CF26634425D7480692082DE4 /* MVKMTLBufferRetention.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0034BCF7930D489E98E2669F /* MVKMTLBufferRetention.mm */; };
+ 		A94FB7D41C7DFB4800632CA3 /* MVKCommandPool.h in Headers */ = {isa = PBXBuildFile; fileRef = A94FB77A1C7DFB4800632CA3 /* MVKCommandPool.h */; };
+ 		A94FB7D51C7DFB4800632CA3 /* MVKCommandPool.h in Headers */ = {isa = PBXBuildFile; fileRef = A94FB77A1C7DFB4800632CA3 /* MVKCommandPool.h */; };
+ 		A94FB7D61C7DFB4800632CA3 /* MVKCommandPool.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB77B1C7DFB4800632CA3 /* MVKCommandPool.mm */; };
+@@ -491,6 +494,7 @@
+ 		DCFD7F3A2A45BC6E007BBBF7 /* MVKCommandPool.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB77B1C7DFB4800632CA3 /* MVKCommandPool.mm */; };
+ 		DCFD7F3B2A45BC6E007BBBF7 /* MVKCmdDraw.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7751C7DFB4800632CA3 /* MVKCmdDraw.mm */; };
+ 		DCFD7F3C2A45BC6E007BBBF7 /* MVKCommandBuffer.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7791C7DFB4800632CA3 /* MVKCommandBuffer.mm */; };
++		764673FDF5104133A33A66B1 /* MVKMTLBufferRetention.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0034BCF7930D489E98E2669F /* MVKMTLBufferRetention.mm */; };
+ 		DCFD7F3D2A45BC6E007BBBF7 /* MVKCmdRendering.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7731C7DFB4800632CA3 /* MVKCmdRendering.mm */; };
+ 		DCFD7F3E2A45BC6E007BBBF7 /* MVKBuffer.mm in Sources */ = {isa = PBXBuildFile; fileRef = A94FB7801C7DFB4800632CA3 /* MVKBuffer.mm */; };
+ 		DCFD7F3F2A45BC6E007BBBF7 /* MVKEnvironment.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9A5E9C525C0822700E9085E /* MVKEnvironment.cpp */; };
+@@ -658,6 +662,8 @@
+ 		A94FB7761C7DFB4800632CA3 /* MVKCommand.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKCommand.h; sourceTree = "<group>"; };
+ 		A94FB7781C7DFB4800632CA3 /* MVKCommandBuffer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKCommandBuffer.h; sourceTree = "<group>"; };
+ 		A94FB7791C7DFB4800632CA3 /* MVKCommandBuffer.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = MVKCommandBuffer.mm; sourceTree = "<group>"; };
++		DE76BF2A52C34801A6BFD3A1 /* MVKMTLBufferRetention.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKMTLBufferRetention.h; sourceTree = "<group>"; };
++		0034BCF7930D489E98E2669F /* MVKMTLBufferRetention.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = MVKMTLBufferRetention.mm; sourceTree = "<group>"; };
+ 		A94FB77A1C7DFB4800632CA3 /* MVKCommandPool.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKCommandPool.h; sourceTree = "<group>"; };
+ 		A94FB77B1C7DFB4800632CA3 /* MVKCommandPool.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = MVKCommandPool.mm; sourceTree = "<group>"; };
+ 		A94FB77C1C7DFB4800632CA3 /* MVKCommandPipelineStateFactoryShaderSource.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKCommandPipelineStateFactoryShaderSource.h; sourceTree = "<group>"; };
+@@ -898,6 +904,8 @@
+ 				A94FB7761C7DFB4800632CA3 /* MVKCommand.h */,
+ 				A94FB7781C7DFB4800632CA3 /* MVKCommandBuffer.h */,
+ 				A94FB7791C7DFB4800632CA3 /* MVKCommandBuffer.mm */,
++				DE76BF2A52C34801A6BFD3A1 /* MVKMTLBufferRetention.h */,
++				0034BCF7930D489E98E2669F /* MVKMTLBufferRetention.mm */,
+ 				A95B7D671D3EE486003183D3 /* MVKCommandEncoderState.h */,
+ 				A95B7D681D3EE486003183D3 /* MVKCommandEncoderState.mm */,
+ 				A90C8DE81F45354D009CB32C /* MVKCommandEncodingPool.h */,
+@@ -2100,6 +2108,7 @@
+ 				2FEA0A9424902F9F00EEF3AD /* MVKCommandPool.mm in Sources */,
+ 				2FEA0A9524902F9F00EEF3AD /* MVKCmdDraw.mm in Sources */,
+ 				2FEA0A9624902F9F00EEF3AD /* MVKCommandBuffer.mm in Sources */,
++				868A8C8B88EE4307BB82875F /* MVKMTLBufferRetention.mm in Sources */,
+ 				2FEA0A9724902F9F00EEF3AD /* MVKCmdRendering.mm in Sources */,
+ 				2FEA0A9824902F9F00EEF3AD /* MVKBuffer.mm in Sources */,
+ 				2FEA0A9924902F9F00EEF3AD /* mvk_datatypes.mm in Sources */,
+@@ -2162,6 +2171,7 @@
+ 				A94FB7D61C7DFB4800632CA3 /* MVKCommandPool.mm in Sources */,
+ 				A94FB7CA1C7DFB4800632CA3 /* MVKCmdDraw.mm in Sources */,
+ 				A94FB7D21C7DFB4800632CA3 /* MVKCommandBuffer.mm in Sources */,
++				B1A9B3F4F5474B6D848EDEFA /* MVKMTLBufferRetention.mm in Sources */,
+ 				A94FB7C61C7DFB4800632CA3 /* MVKCmdRendering.mm in Sources */,
+ 				A94FB7DE1C7DFB4800632CA3 /* MVKBuffer.mm in Sources */,
+ 				A9A5E9C725C0822700E9085E /* MVKEnvironment.cpp in Sources */,
+@@ -2217,6 +2227,7 @@
+ 				A94FB7D71C7DFB4800632CA3 /* MVKCommandPool.mm in Sources */,
+ 				A94FB7CB1C7DFB4800632CA3 /* MVKCmdDraw.mm in Sources */,
+ 				A94FB7D31C7DFB4800632CA3 /* MVKCommandBuffer.mm in Sources */,
++				CF26634425D7480692082DE4 /* MVKMTLBufferRetention.mm in Sources */,
+ 				A94FB7C71C7DFB4800632CA3 /* MVKCmdRendering.mm in Sources */,
+ 				A94FB7DF1C7DFB4800632CA3 /* MVKBuffer.mm in Sources */,
+ 				A9A5E9C925C0822700E9085E /* MVKEnvironment.cpp in Sources */,
+@@ -2300,6 +2311,7 @@
+ 				DCFD7F3A2A45BC6E007BBBF7 /* MVKCommandPool.mm in Sources */,
+ 				DCFD7F3B2A45BC6E007BBBF7 /* MVKCmdDraw.mm in Sources */,
+ 				DCFD7F3C2A45BC6E007BBBF7 /* MVKCommandBuffer.mm in Sources */,
++				764673FDF5104133A33A66B1 /* MVKMTLBufferRetention.mm in Sources */,
+ 				DCFD7F3D2A45BC6E007BBBF7 /* MVKCmdRendering.mm in Sources */,
+ 				DCFD7F3E2A45BC6E007BBBF7 /* MVKBuffer.mm in Sources */,
+ 				DCFD7F3F2A45BC6E007BBBF7 /* MVKEnvironment.cpp in Sources */,
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+index 2a6dcb882307a57192c40f409bbb49de570359c9..4dc7dad601f2a4cfcc30b519d11f32c8ba093328 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+@@ -39,6 +39,7 @@ class MVKQueryPool;
+ class MVKPipeline;
+ class MVKGraphicsPipeline;
+ class MVKComputePipeline;
++class MVKMTLBufferRetention;
+ 
+ typedef uint64_t MVKMTLCommandBufferID;
+ 
+@@ -261,6 +262,9 @@ public:
+ 	/** Encode commands from the specified secondary command buffer onto the Metal command buffer. */
+ 	void encodeSecondary(MVKCommandBuffer* secondaryCmdBuffer);
+ 
++	/** Ownership of conservative physical-address buffer dependencies until Metal completion. */
++	MVKMTLBufferRetention* getGPUAddressableBufferRetention();
++
+ 	/** Begins a render pass and establishes initial draw state. */
+ 	void beginRenderpass(MVKCommand* passCmd,
+ 						 VkSubpassContents subpassContents,
+@@ -490,6 +494,9 @@ public:
+ 	/** The current Metal command buffer. */
+ 	id<MTLCommandBuffer> _mtlCmdBuffer;
+ 
++	/** Borrowed from the actual Metal command buffer, not owned by this encoder. */
++	MVKMTLBufferRetention* _gpuAddressableBufferRetention = nullptr;
++
+ 	/** The current Metal render encoder. */
+ 	id<MTLRenderCommandEncoder> _mtlRenderEncoder;
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+index 707c2672c29b0638ea1751c9aa6a966c617fef85..0ca4915841374c29f9ba5358f5f3be74296e00f9 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "MVKCommandBuffer.h"
++#include "MVKMTLBufferRetention.h"
+ #include "MVKFramebuffer.h"
+ #include "MVKCommandPool.h"
+ #include "MVKQueue.h"
+@@ -429,10 +430,18 @@ void MVKCommandEncoder::beginEncoding(id<MTLCommandBuffer> mtlCmdBuff, MVKComman
+     _canUseLayeredRendering = false;
+ 
+     _mtlCmdBuffer = mtlCmdBuff;        // not retained
++	_gpuAddressableBufferRetention = nullptr;
+ 
+ 	_cmdBuffer->setMetalObjectLabel(_mtlCmdBuffer, _cmdBuffer->_debugName);
+ }
+ 
++MVKMTLBufferRetention* MVKCommandEncoder::getGPUAddressableBufferRetention() {
++	if (!_gpuAddressableBufferRetention) {
++		_gpuAddressableBufferRetention = mvkGetMTLBufferRetention(_mtlCmdBuffer);
++	}
++	return _gpuAddressableBufferRetention;
++}
++
+ // Multithread autorelease prefill style uses a dedicated autorelease pool when encoding each command.
+ void MVKCommandEncoder::encodeCommands(MVKCommand* command) {
+ 	if (_prefillStyle == MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS_STYLE_IMMEDIATE_ENCODING) {
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+index 16fd614d15713ef639aac8e8bc2c0ca82b70a16b..329007b5afb31363a6e446beb7df4935d02c6fe4 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+@@ -645,7 +645,9 @@ static void bindMetalResources(id<MTLCommandEncoder> encoder,
+ 			mtlShared._gpuAddressableResourceStages = useResourceStage;
+ 		else
+ 			mtlShared._gpuAddressableResourceStages = combineStages(mtlShared._gpuAddressableResourceStages, useResourceStage);
+-		mvkEncoder.getDevice()->encodeGPUAddressableBuffers(mtlShared._useResource, useResourceStage);
++		// Create command-buffer ownership before taking the device resource lock.
++		mvkEncoder.getDevice()->encodeGPUAddressableBuffers(
++			mtlShared._useResource, useResourceStage, mvkEncoder.getGPUAddressableBufferRetention());
+ 	}
+ 
+ 	const MVKShaderStageResourceBinding& resourceCounts = common._layout->getResourceCounts().stages[vkStage];
+diff --git a/MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.h b/MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e6ab560cc950014f478ae4480955124c5974d7c
+--- /dev/null
++++ b/MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (c) 2026 LibertyRecomp contributors
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#pragma once
++
++#import <Metal/Metal.h>
++#include <unordered_set>
++
++// Owns the extra Metal dependencies introduced by conservative BDA enumeration.
++// Encoding is single-writer, and completion cannot run until encoding has ended.
++// This object must not own its command buffer, queue, or device.
++class MVKMTLBufferRetention {
++public:
++	MVKMTLBufferRetention() = default;
++	MVKMTLBufferRetention(const MVKMTLBufferRetention&) = delete;
++	MVKMTLBufferRetention& operator=(const MVKMTLBufferRetention&) = delete;
++	~MVKMTLBufferRetention();
++
++	// Call while the device resource lock still protects the buffer lookup.
++	void retainBuffer(id<MTLBuffer> buffer);
++	void clear();
++
++private:
++	std::unordered_set<id<MTLBuffer>> _buffers;
++};
++
++// Borrowed state owned by this actual Metal command buffer, including prefilled
++// buffers. Repeated Vulkan encoders/passes share the same deduplicated ownership.
++// Returns nullptr for a failed (nil) command-buffer allocation.
++MVKMTLBufferRetention* mvkGetMTLBufferRetention(id<MTLCommandBuffer> commandBuffer);
+diff --git a/MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.mm b/MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.mm
+new file mode 100644
+index 0000000000000000000000000000000000000000..48c02db979c54138283aad86034c6b8ff6ff4152
+--- /dev/null
++++ b/MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.mm
+@@ -0,0 +1,54 @@
++/*
++ * Copyright (c) 2026 LibertyRecomp contributors
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "MVKMTLBufferRetention.h"
++#import <objc/runtime.h>
++
++MVKMTLBufferRetention::~MVKMTLBufferRetention() { clear(); }
++
++void MVKMTLBufferRetention::retainBuffer(id<MTLBuffer> buffer) {
++	if (buffer && _buffers.insert(buffer).second) { [buffer retain]; }
++}
++
++void MVKMTLBufferRetention::clear() {
++	// Drop both resources and bookkeeping at completion, even if Metal keeps its
++	// command-buffer wrapper alive. Swapping first also makes cleanup idempotent.
++	decltype(_buffers) buffers;
++	buffers.swap(_buffers);
++	for (id<MTLBuffer> buffer : buffers) { [buffer release]; }
++}
++
++@interface MVKMTLBufferRetentionOwner : NSObject {
++@public
++	MVKMTLBufferRetention retention;
++}
++@end
++
++@implementation MVKMTLBufferRetentionOwner
++- (void)dealloc {
++	// Also handles a command buffer discarded without invoking its handlers.
++	retention.clear();
++	[super dealloc];
++}
++@end
++
++MVKMTLBufferRetention* mvkGetMTLBufferRetention(id<MTLCommandBuffer> commandBuffer) {
++	if (!commandBuffer) { return nullptr; }
++	static char associationKey;
++	MVKMTLBufferRetentionOwner* owner =
++		(MVKMTLBufferRetentionOwner*)objc_getAssociatedObject(commandBuffer, &associationKey);
++	if (!owner) {
++		owner = [MVKMTLBufferRetentionOwner new];
++		objc_setAssociatedObject(commandBuffer, &associationKey, owner,
++								 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++		// Capture only the owner: capturing commandBuffer would form a retain
++		// cycle. Error completions release resources just like successful ones.
++		[commandBuffer addCompletedHandler: ^(id<MTLCommandBuffer>) {
++			owner->retention.clear();
++		}];
++		[owner release];
++	}
++	return &owner->retention;
++}
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+index c9ce14a70e90d6ce7f7f430c5a6be06adf639a7b..ca516c8b942308a6630bcd8bbc66a1d8539dec1d 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+@@ -72,6 +72,7 @@ class MVKCommandEncoder;
+ class MVKCommandResourceFactory;
+ class MVKPrivateDataSlot;
+ struct MVKUseResourceHelper;
++class MVKMTLBufferRetention;
+ enum class MVKResourceUsageStages : uint8_t;
+ 
+ 
+@@ -853,7 +854,8 @@ public:
+ #pragma mark Operations
+ 
+ 	/** Tell the GPU to be ready to use any of the GPU-addressable buffers. */
+-	void encodeGPUAddressableBuffers(MVKUseResourceHelper& resources, MVKResourceUsageStages stage);
++	void encodeGPUAddressableBuffers(MVKUseResourceHelper& resources, MVKResourceUsageStages stage,
++									MVKMTLBufferRetention* retention);
+ 
+ 	/** Adds the specified host semaphore to be woken upon device loss. */
+ 	void addSemaphore(MVKSemaphoreImpl* sem4);
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index e1f3c04ebe9eeb23358f7a529541ed0cfe7c86d5..2f40b28dd28863225b88ed0bba7eaa54fa9316a6 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -30,6 +30,7 @@
+ #include "MVKRenderPass.h"
+ #include "MVKSync.h"
+ #include "MVKCommandPool.h"
++#include "MVKMTLBufferRetention.h"
+ #include "MVKFoundation.h"
+ #include "MVKStrings.h"
+ #include <MoltenVKShaderConverter/SPIRVToMSLConverter.h>
+@@ -4531,10 +4532,19 @@ MVKBuffer* MVKDevice::removeBuffer(MVKBuffer* mvkBuff) {
+ 	return mvkBuff;
+ }
+ 
+-void MVKDevice::encodeGPUAddressableBuffers(MVKUseResourceHelper& resources, MVKResourceUsageStages stage) {
++void MVKDevice::encodeGPUAddressableBuffers(MVKUseResourceHelper& resources, MVKResourceUsageStages stage,
++										  MVKMTLBufferRetention* retention) {
++	// A failed Metal command-buffer allocation must not publish unowned pointers.
++	if (!retention) { return; }
+ 	lock_guard<mutex> lock(_rezLock);
+ 	for (auto& buff : _gpuAddressableBuffers) {
+-		resources.add(buff->getMTLBuffer(), stage, true);
++		id<MTLBuffer> mtlBuffer = buff->getMTLBuffer();
++		if (!mtlBuffer) { continue; }
++		// Other frame slots may destroy their Vulkan buffers after this snapshot.
++		// Retain the actual Metal object before dropping _rezLock, and keep it
++		// through Metal completion, not just through deferred useResources encoding.
++		retention->retainBuffer(mtlBuffer);
++		resources.add(mtlBuffer, stage, true);
+ 	}
+ }
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.h b/MoltenVK/MoltenVK/GPUObjects/MVKImage.h
+index cde38cec0501e211946d4daac3cddd6cc4bcd2e4..587f5565b0326910e71b55c6c07599da1bc818cc 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.h
+@@ -499,8 +499,10 @@ protected:
+ 	friend MVKSwapchain;
+ 
+ 	id<CAMetalDrawable> getCAMetalDrawable();
+-	void addPresentedHandler(id<CAMetalDrawable> mtlDrawable, MVKImagePresentInfo presentInfo, MVKSwapchainSignaler signaler);
+-	void releaseMetalDrawable();
++	id<CAMetalDrawable> retainCAMetalDrawable();
++	void addPresentedHandler(id<CAMetalDrawable> mtlDrawable, MVKImagePresentInfo presentInfo,
++							 MVKSwapchainSignaler signaler, uint64_t tracePresentSequence);
++	void releaseMetalDrawable(const char* reason);
+ 	MVKSwapchainImageAvailability getAvailability();
+ 	void makeAvailable();
+ 	VkResult acquireAndSignalWhenAvailable(MVKSemaphore* semaphore, MVKFence* fence);
+@@ -511,6 +513,15 @@ protected:
+ 	MVKSwapchainImageAvailability _availability;
+ 	MVKSmallVector<MVKSwapchainSignaler, 1> _availabilitySignalers;
+ 	MVKSwapchainSignaler _preSignaler = {};
++	std::mutex _mtlDrawableLock;
++	uint64_t _mtlDrawableGeneration = 0;
++	uint64_t _mtlDrawableEpoch = 0;
++	uint64_t _traceLastRenderEvent = 0;
++	uint64_t _traceLastRenderDrawableID = 0;
++	void* _traceLastRenderDrawable = nullptr;
++	void* _traceLastRenderTexture = nullptr;
++	uint64_t _traceLastRenderGeneration = 0;
++	uint64_t _traceLastRenderEpoch = 0;
+ 	std::mutex _availabilityLock;
+ 	uint64_t _beginPresentTime = 0;
+ 	uint64_t _presentationStartTime = 0;
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+index 5463d5a8cb3fedb572a4cebe9d2297f8e350b8e8..aebd8d7e2323801b08e90a973f865f4852c8c5d9 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+@@ -29,9 +29,30 @@
+ #import "MTLSamplerDescriptor+MoltenVK.h"
+ #import "CAMetalLayer+MoltenVK.h"
+ 
++#include <atomic>
++#include <cstdlib>
++
+ using namespace std;
+ using namespace SPIRV_CROSS_NAMESPACE;
+ 
++static bool isLibertyTVDrawableTraceEnabled() {
++	static const bool isEnabled = [] {
++		const char* value = std::getenv("LIBERTY_TV_MVK_TRACE");
++		return value && value[0] && value[0] != '0';
++	}();
++	return isEnabled;
++}
++
++static uint64_t getLibertyTVDrawableID(id<CAMetalDrawable> drawable) {
++	if (drawable && [drawable respondsToSelector: @selector(drawableID)]) {
++		return drawable.drawableID;
++	}
++	return 0;
++}
++
++static std::atomic<uint64_t> libertyTVRenderEventSequence{0};
++static std::atomic<uint64_t> libertyTVPresentSequence{0};
++
+ #pragma mark -
+ #pragma mark MVKImagePlane
+ 
+@@ -1538,9 +1559,14 @@ VkResult MVKPresentableSwapchainImage::acquireAndSignalWhenAvailable(MVKSemaphor
+ 
+ 	// Now that this image is being acquired, release the existing drawable and its texture.
+ 	// This is not done earlier so the texture is retained for any post-processing such as screen captures, etc.
+-	releaseMetalDrawable();
++	releaseMetalDrawable("acquire");
+ 
+ 	lock_guard<mutex> lock(_availabilityLock);
++	if (isLibertyTVDrawableTraceEnabled()) {
++		MVKLogInfo("liberty-tv-mvk: event=acquire image=%u available=%s waiters=%zu",
++				   _swapchainIndex, _availability.isAvailable ? "true" : "false",
++				   _availabilitySignalers.size());
++	}
+ 
+ 	// Upon acquisition, update acquisition ID immediately, to move it to the back of the chain,
+ 	// so other images will be preferred if either all images are available or no images are available.
+@@ -1581,47 +1607,211 @@ id<CAMetalDrawable> MVKPresentableSwapchainImage::getCAMetalDrawable() {
+ 
+ 	if (_mtlTextureHeadless) { return nil; }	// If headless, there is no drawable.
+ 
+-	if ( !_mtlDrawable ) {
+-		@autoreleasepool {
+-			bool hasInvalidFormat = false;
+-			uint32_t attemptCnt = _swapchain->getImageCount();	// Attempt a resonable number of times
+-			for (uint32_t attemptIdx = 0; !_mtlDrawable && attemptIdx < attemptCnt; attemptIdx++) {
+-				uint64_t startTime = getPerformanceTimestamp();
+-				_mtlDrawable = [_swapchain->getCAMetalLayer().nextDrawable retain];	// retained
+-				addPerformanceInterval(getPerformanceStats().queue.retrieveCAMetalDrawable, startTime);
+-				hasInvalidFormat = _mtlDrawable && !_mtlDrawable.texture.pixelFormat;
+-				if (hasInvalidFormat) { releaseMetalDrawable(); }
++	uint64_t fetchGeneration = 0;
++	{
++		lock_guard<mutex> lock(_mtlDrawableLock);
++		if (_mtlDrawable) { return _mtlDrawable; }
++		fetchGeneration = _mtlDrawableGeneration;
++	}
++
++	// nextDrawable may block while Core Animation waits for the finite drawable
++	// pool. Never hold _mtlDrawableLock across that call because presentation
++	// callbacks need the same lock to retire the previous drawable.
++	id<CAMetalDrawable> drawable = nil;
++	bool sawInvalidFormat = false;
++	uint32_t attemptCnt = _swapchain->getImageCount();	// Attempt a reasonable number of times.
++	@autoreleasepool {
++		for (uint32_t attemptIdx = 0; !drawable && attemptIdx < attemptCnt; attemptIdx++) {
++			id<CAMetalDrawable> publishedDrawable = nil;
++			uint64_t publishedGeneration = 0;
++			uint64_t publishedEpoch = 0;
++			uint64_t startTime = getPerformanceTimestamp();
++			id<CAMetalDrawable> fetchedDrawable =
++				[_swapchain->getCAMetalLayer().nextDrawable retain];	// retained
++			addPerformanceInterval(getPerformanceStats().queue.retrieveCAMetalDrawable, startTime);
++			if (fetchedDrawable && !fetchedDrawable.texture.pixelFormat) {
++				sawInvalidFormat = true;
++				[fetchedDrawable release];
++				continue;
+ 			}
+-			if (hasInvalidFormat) {
+-				setConfigurationResult(reportError(VK_ERROR_OUT_OF_DATE_KHR, "CAMetalDrawable with valid format could not be acquired after %d attempts.", attemptCnt));
+-			} else if ( !_mtlDrawable ) {
+-				setConfigurationResult(reportError(VK_ERROR_OUT_OF_POOL_MEMORY, "CAMetalDrawable could not be acquired after %d attempts.", attemptCnt));
++
++			{
++				lock_guard<mutex> lock(_mtlDrawableLock);
++				// Another queue operation may have populated the cache while
++				// nextDrawable was blocked. A release may also have invalidated
++				// this fetch while it was blocked. Publish only into the generation
++				// in which the fetch began, otherwise discard it and retry.
++				if (_mtlDrawable) {
++					drawable = _mtlDrawable;
++				} else if (fetchedDrawable &&
++						   fetchGeneration == _mtlDrawableGeneration) {
++					_mtlDrawable = fetchedDrawable;
++					fetchedDrawable = nil;
++					drawable = _mtlDrawable;
++					++_mtlDrawableEpoch;
++					if (isLibertyTVDrawableTraceEnabled()) {
++						publishedDrawable = [_mtlDrawable retain];
++						publishedGeneration = _mtlDrawableGeneration;
++						publishedEpoch = _mtlDrawableEpoch;
++					}
++				} else {
++					fetchGeneration = _mtlDrawableGeneration;
++				}
+ 			}
++			if (publishedDrawable) {
++				MVKLogInfo("liberty-tv-mvk: event=drawable-publish image=%u drawable=%p drawable-id=%llu texture=%p generation=%llu epoch=%llu",
++						   _swapchainIndex, (void*)publishedDrawable,
++						   (unsigned long long)getLibertyTVDrawableID(publishedDrawable),
++						   (void*)publishedDrawable.texture,
++						   (unsigned long long)publishedGeneration,
++						   (unsigned long long)publishedEpoch);
++				[publishedDrawable release];
++			}
++			[fetchedDrawable release];
++		}
++	}
++
++	if (!drawable) {
++		if (sawInvalidFormat) {
++			setConfigurationResult(reportError(VK_ERROR_OUT_OF_DATE_KHR, "CAMetalDrawable with valid format could not be acquired after %d attempts.", attemptCnt));
++		} else {
++			setConfigurationResult(reportError(VK_ERROR_OUT_OF_POOL_MEMORY, "CAMetalDrawable could not be acquired after %d attempts.", attemptCnt));
+ 		}
+ 	}
+-	return _mtlDrawable;
++	return drawable;
++}
++
++// Returns a drawable with +1 ownership. The read and retain must be atomic
++// with respect to releaseMetalDrawable(), otherwise acquisition can release
++// the last reference between a raw-pointer read and the keep-alive retain.
++id<CAMetalDrawable> MVKPresentableSwapchainImage::retainCAMetalDrawable() {
++	getCAMetalDrawable();
++	lock_guard<mutex> lock(_mtlDrawableLock);
++	return [_mtlDrawable retain];
+ }
+ 
+ // If not headless, retrieve the MTLTexture directly from the CAMetalDrawable.
+ id<MTLTexture> MVKPresentableSwapchainImage::getMTLTexture(uint8_t planeIndex) {
+-	return _mtlTextureHeadless ? _mtlTextureHeadless : getCAMetalDrawable().texture;
++	if (_mtlTextureHeadless) { return _mtlTextureHeadless; }
++
++	id<CAMetalDrawable> drawable = retainCAMetalDrawable();
++	if (!drawable) { return nil; }
++	id<MTLTexture> texture = drawable.texture;
++	if (isLibertyTVDrawableTraceEnabled()) {
++		uint64_t renderEvent = ++libertyTVRenderEventSequence;
++		uint64_t generation = 0;
++		uint64_t epoch = 0;
++		bool cacheMatch = false;
++		{
++			lock_guard<mutex> lock(_mtlDrawableLock);
++			generation = _mtlDrawableGeneration;
++			epoch = _mtlDrawableEpoch;
++			cacheMatch = _mtlDrawable == drawable;
++			_traceLastRenderEvent = renderEvent;
++			_traceLastRenderDrawableID = getLibertyTVDrawableID(drawable);
++			_traceLastRenderDrawable = (void*)drawable;
++			_traceLastRenderTexture = (void*)texture;
++			_traceLastRenderGeneration = generation;
++			_traceLastRenderEpoch = epoch;
++		}
++		MVKLogInfo("liberty-tv-mvk: event=render-texture render-event=%llu image=%u drawable=%p drawable-id=%llu texture=%p generation=%llu epoch=%llu cache-match=%s plane=%u",
++				   (unsigned long long)renderEvent, _swapchainIndex,
++				   (void*)drawable,
++				   (unsigned long long)getLibertyTVDrawableID(drawable),
++				   (void*)texture, (unsigned long long)generation,
++				   (unsigned long long)epoch,
++				   cacheMatch ? "true" : "false", planeIndex);
++	}
++	[drawable release];
++	return texture;
+ }
+ 
+ // Present the drawable and make myself available only once the command buffer has completed.
+ // Pass MVKImagePresentInfo by value because it may not exist when the callback runs.
+ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffer> mtlCmdBuff,
+-															  MVKImagePresentInfo presentInfo) {
+-	_swapchain->renderWatermark(getMTLTexture(0), mtlCmdBuff);
+-
++														  MVKImagePresentInfo presentInfo) {
+ 	// According to Apple, it is more performant to call MTLDrawable present from within a
+ 	// MTLCommandBuffer scheduled-handler than it is to call MTLCommandBuffer presentDrawable:.
+ 	// But get current drawable now, intead of in handler, because a new drawable might be acquired by then.
+ 	// Attach present handler before presenting to avoid race condition.
+-	id<CAMetalDrawable> mtlDrwbl = getCAMetalDrawable();
++	id<CAMetalDrawable> mtlDrwbl = retainCAMetalDrawable();
++	if (!mtlDrwbl) {
++		// getCAMetalDrawable() reports acquisition failures itself. A successful
++		// result followed by nil here means the drawable was retired between the
++		// lookup and the ownership-taking lock; never report a successful present
++		// for an image that has no drawable.
++		if (getConfigurationResult() == VK_SUCCESS) {
++			setConfigurationResult(reportError(VK_ERROR_OUT_OF_DATE_KHR,
++										 "CAMetalDrawable became unavailable before presentation."));
++		}
++		return getConfigurationResult();
++	}
++	const bool traceDrawable = isLibertyTVDrawableTraceEnabled();
++	const uint64_t tracePresentSequence =
++		traceDrawable ? ++libertyTVPresentSequence : 0;
++	if (traceDrawable) {
++		uint64_t generation = 0;
++		uint64_t epoch = 0;
++		uint64_t renderEvent = 0;
++		uint64_t renderDrawableID = 0;
++		void* renderDrawable = nullptr;
++		void* renderTexture = nullptr;
++		uint64_t renderGeneration = 0;
++		uint64_t renderEpoch = 0;
++		{
++			lock_guard<mutex> lock(_mtlDrawableLock);
++			generation = _mtlDrawableGeneration;
++			epoch = _mtlDrawableEpoch;
++			renderEvent = _traceLastRenderEvent;
++			renderDrawableID = _traceLastRenderDrawableID;
++			renderDrawable = _traceLastRenderDrawable;
++			renderTexture = _traceLastRenderTexture;
++			renderGeneration = _traceLastRenderGeneration;
++			renderEpoch = _traceLastRenderEpoch;
++		}
++		const uint64_t presentDrawableID = getLibertyTVDrawableID(mtlDrwbl);
++		const void* presentTexture = (void*)mtlDrwbl.texture;
++		const bool identityMatch =
++			renderEvent && renderDrawable == (void*)mtlDrwbl &&
++			renderDrawableID == presentDrawableID &&
++			renderTexture == presentTexture &&
++			renderGeneration == generation && renderEpoch == epoch;
++		MVKLogInfo("liberty-tv-mvk: event=present-capture present-seq=%llu image=%u present-id=%llu drawable=%p drawable-id=%llu texture=%p generation=%llu epoch=%llu render-event=%llu render-drawable=%p render-drawable-id=%llu render-texture=%p render-generation=%llu render-epoch=%llu identity-match=%s",
++				   (unsigned long long)tracePresentSequence, _swapchainIndex,
++				   (unsigned long long)presentInfo.presentId, (void*)mtlDrwbl,
++				   (unsigned long long)presentDrawableID, presentTexture,
++				   (unsigned long long)generation, (unsigned long long)epoch,
++				   (unsigned long long)renderEvent, renderDrawable,
++				   (unsigned long long)renderDrawableID, renderTexture,
++				   (unsigned long long)renderGeneration,
++				   (unsigned long long)renderEpoch,
++				   identityMatch ? "true" : "false");
++	}
++	_swapchain->renderWatermark(mtlDrwbl.texture, mtlCmdBuff);
+ 	MVKSwapchainSignaler signaler = getPresentationSignaler();
+ 	[mtlCmdBuff addScheduledHandler: ^(id<MTLCommandBuffer> mcb) {
++		if (traceDrawable) {
++			CAMetalLayer* layer = mtlDrwbl.layer;
++			const CGRect bounds = layer.bounds;
++			const CGSize drawableSize = layer.drawableSize;
++			MVKLogInfo("liberty-tv-mvk: event=present-scheduled present-seq=%llu image=%u drawable=%p drawable-id=%llu texture=%p command-buffer=%p status=%lu layer=%p superlayer=%p delegate=%p hidden=%s opaque=%s framebuffer-only=%s display-sync=%s contents-scale=%.3f bounds=%.3f,%.3f,%.3f,%.3f drawable-size=%.3f,%.3f",
++					   (unsigned long long)tracePresentSequence, _swapchainIndex,
++					   (void*)mtlDrwbl,
++					   (unsigned long long)getLibertyTVDrawableID(mtlDrwbl),
++					   (void*)mtlDrwbl.texture, (void*)mcb,
++					   (unsigned long)mcb.status, (void*)layer,
++					   (void*)layer.superlayer, (void*)layer.delegate,
++					   layer.hidden ? "true" : "false",
++					   layer.opaque ? "true" : "false",
++					   layer.framebufferOnly ? "true" : "false",
++					   layer.displaySyncEnabledMVK ? "true" : "false",
++					   layer.contentsScale, bounds.origin.x, bounds.origin.y,
++					   bounds.size.width, bounds.size.height,
++					   drawableSize.width, drawableSize.height);
++		}
+ 
+-		addPresentedHandler(mtlDrwbl, presentInfo, signaler);
++		addPresentedHandler(mtlDrwbl, presentInfo, signaler,
++						tracePresentSequence);
+ 
+ 		// Try to do any present mode transitions as late as possible in an attempt
+ 		// to avoid visual disruptions on any presents already on the queue.
+@@ -1629,8 +1819,21 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
+ 			mtlDrwbl.layer.displaySyncEnabledMVK = (presentInfo.presentMode != VK_PRESENT_MODE_IMMEDIATE_KHR);
+ 		}
+ 		if (presentInfo.desiredPresentTime) {
++			if (traceDrawable) {
++				MVKLogInfo("liberty-tv-mvk: event=present-call present-seq=%llu image=%u drawable-id=%llu mode=at-time desired-time=%llu",
++						   (unsigned long long)tracePresentSequence,
++						   _swapchainIndex,
++						   (unsigned long long)getLibertyTVDrawableID(mtlDrwbl),
++						   (unsigned long long)presentInfo.desiredPresentTime);
++			}
+ 			[mtlDrwbl presentAtTime: (double)presentInfo.desiredPresentTime * 1.0e-9];
+ 		} else {
++			if (traceDrawable) {
++				MVKLogInfo("liberty-tv-mvk: event=present-call present-seq=%llu image=%u drawable-id=%llu mode=immediate",
++						   (unsigned long long)tracePresentSequence,
++						   _swapchainIndex,
++						   (unsigned long long)getLibertyTVDrawableID(mtlDrwbl));
++			}
+ 			[mtlDrwbl present];
+ 		}
+ 	}];
+@@ -1642,10 +1845,19 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
+ 	// from this callback, because the last one or two presentation completion
+ 	// callbacks can occasionally stall.
+ 	retain();
+-	[mtlDrwbl retain];
+ 	auto* fence = presentInfo.fence;
+ 	if (fence) { fence->retain(); }
+ 	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mcb) {
++		if (traceDrawable) {
++			NSError* error = mcb.error;
++			MVKLogInfo("liberty-tv-mvk: event=present-command-completed present-seq=%llu image=%u drawable-id=%llu command-buffer=%p status=%lu error-domain=%s error-code=%ld error=%s",
++					   (unsigned long long)tracePresentSequence, _swapchainIndex,
++					   (unsigned long long)getLibertyTVDrawableID(mtlDrwbl),
++					   (void*)mcb, (unsigned long)mcb.status,
++					   error ? error.domain.UTF8String : "none",
++					   error ? (long)error.code : 0L,
++					   error ? error.localizedDescription.UTF8String : "none");
++		}
+ 		signal(fence);
+ 		if (fence) { fence->release(); }
+ 		[mtlDrwbl release];
+@@ -1683,16 +1895,32 @@ MVKSwapchainSignaler MVKPresentableSwapchainImage::getPresentationSignaler() {
+ // Pass MVKImagePresentInfo & MVKSwapchainSignaler by value because they may not exist when the callback runs.
+ void MVKPresentableSwapchainImage::addPresentedHandler(id<CAMetalDrawable> mtlDrawable,
+ 													   MVKImagePresentInfo presentInfo,
+-													   MVKSwapchainSignaler signaler) {
++													   MVKSwapchainSignaler signaler,
++													   uint64_t tracePresentSequence) {
+ 	beginPresentation(presentInfo);
+ 
+ #if !MVK_OS_SIMULATOR
+ 	[mtlDrawable addPresentedHandler: ^(id<MTLDrawable> mtlDrwbl) {
+-		endPresentation(presentInfo, signaler, mtlDrwbl.presentedTime * 1.0e9);
++		const double rawPresentedTime = mtlDrwbl.presentedTime;
++		if (isLibertyTVDrawableTraceEnabled()) {
++			MVKLogInfo("liberty-tv-mvk: event=presented present-seq=%llu image=%u drawable=%p drawable-id=%llu raw-presented-time=%.9f dropped=%s",
++					   (unsigned long long)tracePresentSequence, _swapchainIndex,
++					   (void*)mtlDrwbl,
++					   (unsigned long long)getLibertyTVDrawableID((id<CAMetalDrawable>)mtlDrwbl),
++					   rawPresentedTime,
++					   rawPresentedTime == 0.0 ? "true" : "false");
++		}
++		endPresentation(presentInfo, signaler, rawPresentedTime * 1.0e9);
+ 	}];
+ #else
+ 	// If MTLDrawable.presentedTime/addPresentedHandler isn't supported,
+ 	// treat it as if the present happened when requested.
++	if (isLibertyTVDrawableTraceEnabled()) {
++		MVKLogInfo("liberty-tv-mvk: event=presented present-seq=%llu image=%u drawable=%p drawable-id=%llu raw-presented-time=unsupported dropped=unknown",
++				   (unsigned long long)tracePresentSequence, _swapchainIndex,
++				   (void*)mtlDrawable,
++				   (unsigned long long)getLibertyTVDrawableID(mtlDrawable));
++	}
+ 	endPresentation(presentInfo, signaler);
+ #endif
+ }
+@@ -1731,15 +1959,41 @@ void MVKPresentableSwapchainImage::endPresentation(const MVKImagePresentInfo& pr
+ }
+ 
+ // Releases the CAMetalDrawable underlying this image.
+-void MVKPresentableSwapchainImage::releaseMetalDrawable() {
+-    [_mtlDrawable release];
+-	_mtlDrawable = nil;
++void MVKPresentableSwapchainImage::releaseMetalDrawable(const char* reason) {
++	id<CAMetalDrawable> drawable = nil;
++	id<MTLTexture> texture = nil;
++	uint64_t drawableID = 0;
++	uint64_t generationBefore = 0;
++	uint64_t generationAfter = 0;
++	uint64_t epoch = 0;
++	{
++		lock_guard<mutex> lock(_mtlDrawableLock);
++		drawable = _mtlDrawable;
++		texture = drawable.texture;
++		drawableID = getLibertyTVDrawableID(drawable);
++		generationBefore = _mtlDrawableGeneration;
++		epoch = _mtlDrawableEpoch;
++		_mtlDrawable = nil;
++		++_mtlDrawableGeneration;
++		generationAfter = _mtlDrawableGeneration;
++	}
++	if (isLibertyTVDrawableTraceEnabled()) {
++		MVKLogInfo("liberty-tv-mvk: event=drawable-release reason=%s image=%u drawable=%p drawable-id=%llu texture=%p generation-before=%llu generation-after=%llu epoch=%llu",
++				   reason ? reason : "unknown", _swapchainIndex, (void*)drawable,
++				   (unsigned long long)drawableID, (void*)texture,
++				   (unsigned long long)generationBefore,
++				   (unsigned long long)generationAfter,
++				   (unsigned long long)epoch);
++	}
++	// Releasing a drawable may synchronously trigger Core Animation callbacks.
++	// Keep those callbacks outside the ownership lock.
++	[drawable release];
+ }
+ 
+ // Signal, untrack, and release any signalers that are tracking.
+ // Release the drawable before the lock, as it may trigger completion callback.
+ void MVKPresentableSwapchainImage::makeAvailable() {
+-	releaseMetalDrawable();
++	releaseMetalDrawable("make-available");
+ 	lock_guard<mutex> lock(_availabilityLock);
+ 
+ 	if ( !_availability.isAvailable ) {
+@@ -1779,7 +2033,7 @@ MVKPresentableSwapchainImage::MVKPresentableSwapchainImage(MVKDevice* device,
+ 
+ 
+ void MVKPresentableSwapchainImage::destroy() {
+-	releaseMetalDrawable();
++	releaseMetalDrawable("destroy");
+ 	[_mtlTextureHeadless release];
+ 	_mtlTextureHeadless = nil;
+ 	MVKSwapchainImage::destroy();

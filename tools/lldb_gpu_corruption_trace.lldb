@@ -1,0 +1,125 @@
+# LLDB Script: GPU Memory Corruption Trace
+# Usage: lldb -s lldb_gpu_corruption_trace.lldb -- ./LibertyRecomp
+#
+# This script traces GPU operations to verify the corruption hypothesis
+
+# =============================================================================
+# BREAKPOINT 1: AllocPhysical - Check for uninitialized memory
+# =============================================================================
+breakpoint set --name "Heap::AllocPhysical"
+breakpoint command add 1 --script-type python
+import lldb
+def alloc_physical_check(frame, bp_loc, dict):
+    # This runs when AllocPhysical is called
+    size = frame.FindVariable("size")
+    print(f"\n[ALLOC] AllocPhysical called, size={size.GetValue()}")
+    return False  # Don't stop, just log
+DONE
+
+# =============================================================================
+# BREAKPOINT 2: CreateTexture - Check texture dimensions
+# =============================================================================
+breakpoint set --file video.cpp --line 3929
+breakpoint command add 2 --script-type python
+import lldb
+def create_texture_check(frame, bp_loc, dict):
+    width = frame.FindVariable("width")
+    height = frame.FindVariable("height")
+    print(f"\n[TEXTURE] CreateTexture: {width.GetValue()}x{height.GetValue()}")
+    # Check for suspicious values
+    w = int(width.GetValue() or "0")
+    h = int(height.GetValue() or "0")
+    if w > 8192 or h > 8192:
+        print(f"  WARNING: Suspicious dimensions!")
+    return False
+DONE
+
+# =============================================================================
+# BREAKPOINT 3: StretchRect - Check texture pointer
+# =============================================================================
+breakpoint set --file video.cpp --line 4132
+breakpoint command add 3 --script-type python
+import lldb
+def stretch_rect_check(frame, bp_loc, dict):
+    texture = frame.FindVariable("texture")
+    print(f"\n[STRETCHRECT] texture={texture.GetValue()}")
+    return False
+DONE
+
+# =============================================================================
+# BREAKPOINT 4: ExecutePendingStretchRectCommands - GPU operations
+# =============================================================================
+breakpoint set --file video.cpp --line 4297
+breakpoint command add 4 --script-type python
+import lldb
+def exec_stretch_check(frame, bp_loc, dict):
+    print(f"\n[GPU] ExecutePendingStretchRectCommands called")
+    return False
+DONE
+
+# =============================================================================
+# BREAKPOINT 5: resolveTexture - Catch actual GPU resolve
+# =============================================================================
+breakpoint set --file video.cpp --line 4319
+breakpoint command add 5 --script-type python
+import lldb
+def resolve_texture_check(frame, bp_loc, dict):
+    print(f"\n[RESOLVE] resolveTexture called - potential corruption point!")
+    # Get texture info
+    texture = frame.FindVariable("texture")
+    surface = frame.FindVariable("surface")
+    print(f"  texture={texture.GetValue()}")
+    print(f"  surface={surface.GetValue()}")
+    return True  # Stop here to examine
+DONE
+
+# =============================================================================
+# HELPER COMMANDS
+# =============================================================================
+
+# Check physical heap state
+command script add -s python heap_state
+def heap_state(debugger, command, result, internal_dict):
+    target = debugger.GetSelectedTarget()
+    process = target.GetProcess()
+    # Try to read s_physBumpUsed
+    print("Checking physical heap state...")
+    # This requires symbols to work properly
+DONE
+
+# Translate guest address to host
+command script add -s python guest2host
+def guest2host(debugger, command, result, internal_dict):
+    target = debugger.GetSelectedTarget()
+    process = target.GetProcess()
+    guest_addr = int(command, 16) if command.startswith("0x") else int(command)
+    print(f"Guest address: 0x{guest_addr:08X}")
+    # Physical heap starts at 0xA0000000 in guest space
+    if guest_addr >= 0xA0000000:
+        offset = guest_addr - 0xA0000000
+        print(f"Physical heap offset: 0x{offset:08X} ({offset / (1024**2):.1f} MB)")
+    else:
+        print(f"Normal heap address")
+DONE
+
+# Search for corruption pattern
+command alias find_pattern memory find -e 0xEA7060FF
+
+# Print startup message
+script print("\n" + "="*60)
+script print("GPU CORRUPTION TRACE SESSION")
+script print("="*60)
+script print("Breakpoints set:")
+script print("  1. Heap::AllocPhysical")
+script print("  2. CreateTexture (video.cpp:3929)")
+script print("  3. StretchRect (video.cpp:4132)")
+script print("  4. ExecutePendingStretchRectCommands (video.cpp:4297)")
+script print("  5. resolveTexture (video.cpp:4319)")
+script print("")
+script print("Commands available:")
+script print("  heap_state     - Check physical heap usage")
+script print("  guest2host <addr> - Translate guest address")
+script print("  find_pattern   - Search for 0xEA7060FF pattern")
+script print("="*60 + "\n")
+
+# Don't auto-run, let user control

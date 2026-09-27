@@ -1,0 +1,20 @@
+diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
+index 9dcfedf5a2783b0c31c8a878c4d65e6b7039291e..34847b9b424425b6e0d18177ec2b22b99d4b6562 100644
+--- a/plume_render_interface_types.h
++++ b/plume_render_interface_types.h
+@@ -60,6 +60,15 @@ namespace plume {
+         }
+         bool operator!=(const struct RenderWindow& rhs) const { return !(*this == rhs); }
+     };
++#elif defined(__ORBIS__) || defined(LIBERTY_RECOMP_PS4)
++    // PS4: No windowing system. RenderWindow wraps the sceVideoOut handle.
++    struct RenderWindow {
++        int videoOutHandle;
++        bool operator==(const struct RenderWindow& rhs) const {
++            return videoOutHandle == rhs.videoOutHandle;
++        }
++        bool operator!=(const struct RenderWindow& rhs) const { return !(*this == rhs); }
++    };
+ #else
+     static_assert(false, "RenderWindow was not defined for this platform.");
+ #endif

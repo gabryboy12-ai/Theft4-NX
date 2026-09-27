@@ -1,0 +1,57 @@
+# LLDB Debug Script for Speechbanks Address Calculation
+# This traces the actual values in sub_828A58C8 to identify root cause
+
+# Set breakpoint at sub_828A58C8 entry to capture buffer allocation
+breakpoint set --name __imp__sub_828A58C8
+breakpoint command add -s python
+def bp_828A58C8(frame, bp_loc, dict):
+    r3 = frame.FindRegister("x3").GetValueAsUnsigned()
+    print(f"[sub_828A58C8] ENTRY r3=0x{r3:08X}")
+    return False
+DONE
+
+# Set breakpoint at sub_827E21A0 to capture the address being formatted
+breakpoint set --name sub_827E21A0
+breakpoint command add -s python
+def bp_827E21A0(frame, bp_loc, dict):
+    r3 = frame.FindRegister("x3").GetValueAsUnsigned()
+    r4 = frame.FindRegister("x4").GetValueAsUnsigned()
+    r5 = frame.FindRegister("x5").GetValueAsUnsigned()  # memAddr
+    r6 = frame.FindRegister("x6").GetValueAsUnsigned()
+    r7 = frame.FindRegister("x7").GetValueAsUnsigned()
+    r8 = frame.FindRegister("x8").GetValueAsUnsigned()
+    print(f"[sub_827E21A0] r3=0x{r3:08X} r4=0x{r4:08X} r5(memAddr)=0x{r5:08X}")
+    print(f"               r6=0x{r6:08X} r7=0x{r7:08X} r8=0x{r8:08X}")
+    
+    # Check if r5 looks like garbage
+    if r5 < 0x82000000:
+        print(f"  WARNING: r5=0x{r5:08X} is INVALID (< 0x82000000)")
+        import struct
+        r5_signed = struct.unpack('>i', struct.pack('>I', r5 & 0xFFFFFFFF))[0]
+        print(f"  r5 as signed int32: {r5_signed}")
+    return False
+DONE
+
+# Set breakpoint at sub_828935B8 to track buffer allocation
+breakpoint set --name sub_828935B8
+breakpoint command add -s python
+def bp_828935B8(frame, bp_loc, dict):
+    r3 = frame.FindRegister("x3").GetValueAsUnsigned()
+    r4 = frame.FindRegister("x4").GetValueAsUnsigned()  # size
+    print(f"[sub_828935B8] Allocator: r3=0x{r3:08X} r4(size)=0x{r4:08X} ({r4})")
+    return False
+DONE
+
+# Set breakpoint at sub_827E8420 to track file reads
+breakpoint set --name sub_827E8420
+breakpoint command add -s python
+def bp_827E8420(frame, bp_loc, dict):
+    r3 = frame.FindRegister("x3").GetValueAsUnsigned()  # stream
+    r4 = frame.FindRegister("x4").GetValueAsUnsigned()  # dest
+    r5 = frame.FindRegister("x5").GetValueAsUnsigned()  # size
+    print(f"[sub_827E8420] stream=0x{r3:08X} dest=0x{r4:08X} size={r5}")
+    return False
+DONE
+
+# Continue execution
+continue

@@ -1,0 +1,110 @@
+# LLDB Debug Script for Memory Corruption Analysis
+# =================================================
+# This script helps trace the memory corruption issue in GTA IV recompilation
+# 
+# Key addresses (calculated via Python):
+#   Guest physical heap: 0xA0000000 - 0x100000000 (1.5GB)
+#   Corruption dest:     0xBA000000 (416MB into heap)
+#   Corruption pattern:  0xEA7060FF / 0xEAA8637F
+#   BSS region corrupt:  0x83128A80
+
+# =========================================
+# 1. BASIC SETUP
+# =========================================
+settings set target.load-script-from-symbol-file true
+settings set stop-disassembly-count 0
+
+# =========================================
+# 2. MEMORY ALLOCATION TRACKING
+# =========================================
+
+# Break on physical allocation to verify memset is working
+breakpoint set --name "Heap::AllocPhysical" --condition "size > 0x10000"
+breakpoint command add -o "expr (void)printf(\"[ALLOC] AllocPhysical size=0x%zx alignment=0x%zx\\n\", size, alignment)"
+
+# =========================================
+# 3. HASH TABLE FUNCTION MONITORING
+# =========================================
+# sub_82802540 is the hash table lookup that can infinite loop
+
+# Find the function by searching for pattern in recompiled code
+# The function is in ppc_recomp.106.cpp around line 17961
+
+# =========================================
+# 4. GPU CORRUPTION WATCHPOINTS
+# =========================================
+# To set watchpoint on corruption destination:
+# First get host address: p g_memory.Translate(0xBA000000)
+# Then: watchpoint set expression -w write -- *(uint32_t*)<host_addr>
+
+# =========================================
+# 5. VBLANK CALLBACK MONITORING
+# =========================================
+# Corruption happens between VBLANK callbacks #6 and #7 (~116ms)
+# Monitor the global variable that gets corrupted: 0x83128A80
+
+# =========================================
+# 6. USEFUL COMMANDS
+# =========================================
+
+# Check heap state
+define heap_state
+  expr o1heapGetDiagnostics(g_userHeap.physicalHeap)
+end
+
+# Translate guest to host address
+define xlate
+  expr g_memory.Translate($arg0)
+end
+
+# Check if address is in physical heap (guest 0xA0000000-0x100000000)
+define is_phys
+  expr ($arg0 >= 0xA0000000 && $arg0 < 0x100000000)
+end
+
+# =========================================
+# 7. CORRUPTION DETECTION
+# =========================================
+
+# When program hangs, interrupt and check:
+# (lldb) process interrupt
+# (lldb) bt all
+# Look for sub_82802540 in stuck thread
+
+# Check for corruption pattern in memory:
+# (lldb) memory find -s "0xEA7060FF" <start> <end>
+
+# =========================================
+# 8. TEXTURE ALLOCATION MONITORING
+# =========================================
+# GuestTexture/GuestSurface allocations that might contain garbage
+
+breakpoint set --file video.cpp --line 3929 --condition "true"
+breakpoint command add -o "expr (void)printf(\"[GPU] CreateTexture\\n\")"
+
+breakpoint set --file video.cpp --line 4068 --condition "true"  
+breakpoint command add -o "expr (void)printf(\"[GPU] CreateSurface\\n\")"
+
+# =========================================
+# 9. POST-MEMSET VERIFICATION
+# =========================================
+# After AllocPhysical returns, verify memory is zeroed:
+# breakpoint set --name "Heap::AllocPhysical"
+# (lldb) finish
+# (lldb) memory read $rax $rax+64
+# Should show all zeros
+
+# =========================================
+# QUICK START COMMANDS
+# =========================================
+# 1. lldb "./out/build/macos-release/LibertyRecomp/Liberty Recompiled.app"
+# 2. command source tools/debug_memory_corruption.lldb
+# 3. run
+# 4. If hangs: process interrupt
+# 5. bt all - look for infinite loop in sub_82802540
+
+echo "Memory corruption debug script loaded.\n"
+echo "Key commands:\n"
+echo "  heap_state - Show heap diagnostics\n"
+echo "  xlate <guest_addr> - Translate guest to host address\n"
+echo "  is_phys <addr> - Check if address is in physical heap\n"

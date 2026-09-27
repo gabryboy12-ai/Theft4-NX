@@ -1,0 +1,58 @@
+{
+  "source_dimensions": [
+    1024,
+    1024
+  ],
+  "mac_source": "LibertyRecomp/res/icons/apple.png",
+  "mac_source_dimensions": [
+    1024,
+    1024
+  ],
+  "png_sizes": [
+    16,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256,
+    512,
+    1024
+  ],
+  "windows_icon_sizes": [
+    16,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256
+  ],
+  "mac_iconset_logical_sizes": [
+    16,
+    32,
+    128,
+    256,
+    512
+  ],
+  "mac_iconset_scales": [
+    1,
+    2
+  ],
+  "assets": {
+    "LibertyRecomp/res/icons/source.png": "786674eb6f566cbc9c71bb91cd0509d6dd4a726fa3aa27baec6c5a239b3d2025",
+    "LibertyRecomp/res/icons/apple.png": "8ba15bc5e8937ec8de1ad93fc7db53edecc9b04a014e19c86efa2aad114143cf",
+    "LibertyRecomp/res/icons/game_icon.ico": "0624f779fdbb59132347f090d9323da68651d621c94a8542835e8f1ed46b478b",
+    "LibertyRecomp/res/icons/game_icon.bmp": "22eec3afb471e9cd52a81eaab0f0499a56de394f45e73b5e2af8643eb3817498",
+    "LibertyRecomp/res/macos/game_icon.icns": "709808c2c3f4da1f547eabb84d0dc351f2a83bb6acc847b3af2937eaa89426b2",
+    "LibertyRecomp/res/icons/png/16.png": "d92f72a3e65e7a28400b7ad621c621f57fd99f18db9746183e052cea8b2b02c0",
+    "LibertyRecomp/res/icons/png/24.png": "bc0fe1ca2b1fed7ff68392fac505229a4548e47aaffe34f940978a42f4f28b16",
+    "LibertyRecomp/res/icons/png/32.png": "83caca80d35e2e9c51e7ef72a54519716325c24ccea361d6b79b963b7e343d81",
+    "LibertyRecomp/res/icons/png/48.png": "46730234e52b966673814265e5eb15d70b71337d7646ec03423e9e850339127e",
+    "LibertyRecomp/res/icons/png/64.png": "91febc9640b8a7969edda56435283b2bbd579ec2fcd584cd4bdf3be75c9e5429",
+    "LibertyRecomp/res/icons/png/128.png": "7fb025e95ecc87a722fbe17e92e01372f6642e7faa00261d29740587f504441b",
+    "LibertyRecomp/res/icons/png/256.png": "760dc6fe12f4b26b8c2ad3f0998986a9cff982a94343d85f822cf70b5da3154c",
+    "LibertyRecomp/res/icons/png/512.png": "74ecd0db7e258ce55d202b789f7db09e106fae761f091941bf39f0299042d3e8",
+    "LibertyRecomp/res/icons/png/1024.png": "5d3e6688f45350739db709aa683270651bb16d9bd65356aa0ab00fad994c53cf"
+  }
+}

@@ -1,0 +1,23 @@
+diff --git a/libcxxabi/src/cxa_guard_impl.h b/libcxxabi/src/cxa_guard_impl.h
+index 191a589176b1a306d634a7de366b1b67d117a8ca..438ac9386c3f2add5642f1140fe2b81d1350eee5 100644
+--- a/libcxxabi/src/cxa_guard_impl.h
++++ b/libcxxabi/src/cxa_guard_impl.h
+@@ -161,6 +161,18 @@ uint32_t PlatformThreadID() {
+   static_assert(sizeof(mach_port_t) == sizeof(uint32_t), "");
+   return static_cast<uint32_t>(pthread_mach_thread_np(std::__libcpp_thread_get_current_id()));
+ }
++#elif defined(__ORBIS__) && _LIBCPP_HAS_THREAD_API_PTHREAD
++// OpenOrbis musl aliases SYS_gettid → SYS_getpid (FreeBSD has no gettid
++// syscall — the real per-thread call is SYS_thr_self=432, which musl does
++// not expose). The generic SYS_gettid branch below would therefore return
++// the same value (the process pid) for every thread, and libc++abi's
++// __cxa_guard_acquire recursion check (`*thread_id_address == current_thread_id`)
++// would fire on every cross-thread static-init race. Use the pthread_self()
++// pointer as a per-thread ID source instead — each guest thread has a unique
++// TCB pointer, the low 32 bits are sufficiently unique in practice.
++uint32_t PlatformThreadID() {
++  return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pthread_self()));
++}
+ #elif defined(SYS_gettid) && _LIBCPP_HAS_THREAD_API_PTHREAD
+ uint32_t PlatformThreadID() {
+   static_assert(sizeof(pid_t) == sizeof(uint32_t), "");

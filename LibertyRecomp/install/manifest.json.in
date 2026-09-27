@@ -1,0 +1,7 @@
+{
+  "gameVersion":    "@LIBERTY_PAYLOAD_GAME_VERSION@",
+  "titleUpdate":    "@LIBERTY_PAYLOAD_TU_VERSION@",
+  "hasTLAD":        @LIBERTY_PAYLOAD_HAS_TLAD@,
+  "hasTBOGT":       @LIBERTY_PAYLOAD_HAS_TBOGT@,
+  "buildTimestamp": @LIBERTY_PAYLOAD_BUILD_TIMESTAMP@
+}

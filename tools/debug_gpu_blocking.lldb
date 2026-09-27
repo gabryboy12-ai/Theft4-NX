@@ -1,0 +1,29 @@
+# LLDB debug script for GPU command processor blocking analysis
+# Run with: lldb -s tools/debug_gpu_blocking.lldb
+
+# Load the executable
+file "out/build/macos-relwithdebinfo/LibertyRecomp/Liberty Recompiled.app/Contents/MacOS/Liberty Recompiled"
+
+# Set breakpoints on key GPU functions
+# These are the C++ symbol names for the hooked/stubbed functions
+
+# GPU Command Processor
+breakpoint set -n "sub_829DDC90" -C "thread backtrace" -C "continue"
+breakpoint set -n "sub_829DD978" -C "thread backtrace" -C "continue"
+breakpoint set -n "sub_829D8568_hook" -C "thread backtrace" -C "continue"
+
+# Kernel wait functions
+breakpoint set -n "__imp__KeWaitForSingleObject" -C "register read r3 r4 r5" -C "continue"
+breakpoint set -n "__imp__NtWaitForSingleObjectEx" -C "register read r3 r4 r5" -C "continue"
+
+# VBlank and rendering
+breakpoint set -n "VdSwap" -C "thread backtrace" -C "continue"
+
+# Run the app
+run
+
+# When it hangs, use these commands:
+# process interrupt
+# thread list
+# thread backtrace all
+# bt

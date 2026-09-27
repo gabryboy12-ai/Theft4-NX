@@ -1,0 +1,300 @@
+openapi: 3.1.0
+info:
+  title: LibertyRecomp Community Service
+  version: 2.0.0
+  description: >-
+    Community-operated compatibility API. This project is not affiliated with or authorized by
+    Rockstar Games and never serves copyrighted game assets. Hex strings represent all Xbox
+    64-bit identifiers and exchange keys. Binary values use RFC 4648 base64; auth uses base64url.
+servers: [{url: "https://community.example.invalid"}]
+security: [{bearerAuth: []}]
+paths:
+  /api/v2/devices/challenge:
+    post:
+      security: []
+      operationId: createDeviceChallenge
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ChallengeRequest'}, examples: {fixture: {value: {device_id: device_fixture, xuid: '0xe000000000000001', public_key: VlX3AZ7qGxATy5ZI4U6QR7YyJEfAbG-ZOr8kw-K0KYQ}}}}}}
+      responses: {'201': {description: Challenge, content: {application/json: {schema: {$ref: '#/components/schemas/ChallengeResponse'}, examples: {fixture: {value: {challenge_id: ch_fixture, challenge: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8}}}}}}}
+  /api/v2/devices/enroll:
+    post:
+      security: []
+      operationId: enrollOrVerifyDevice
+      description: >-
+        Enrolls a new public key or verifies the already-enrolled key. Sign the exact ASCII bytes
+        of the base64url challenge. Fixture signature for the challenge/public key above is
+        J6UVKhjVqhBrWJcy9XFhnfxpATK523cJWVEGFLWSiRMFdVSsVplWIWFSUYFJn2bq2gbGPveZG-DvIjVo-l-kBw.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/EnrollRequest'}}}}
+      responses: {'201': {description: Tokens, content: {application/json: {schema: {$ref: '#/components/schemas/TokenPair'}}}}}
+  /api/v2/devices/refresh:
+    post:
+      security: []
+      operationId: refreshDeviceToken
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [refresh_token], properties: {refresh_token: {type: string}}}}}}
+      responses: {'200': {description: Rotated tokens, content: {application/json: {schema: {$ref: '#/components/schemas/TokenPair'}}}}}
+  /api/v2/sessions:
+    post:
+      operationId: createSession
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionRecord'}}}}
+      responses: {'201': {description: Created session, content: {application/json: {schema: {$ref: '#/components/schemas/SessionRecord'}}}}, '409': {$ref: '#/components/responses/Conflict'}}
+  /api/v2/sessions/search:
+    post:
+      operationId: searchSessions
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionSearch'}}}}
+      responses: {'200': {description: Matching sessions, content: {application/json: {schema: {type: object, required: [procedure_index,sessions], properties: {procedure_index: {type: integer}, sessions: {type: array, items: {$ref: '#/components/schemas/SessionRecord'}}}}}}}}
+  /api/v2/sessions/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    get: {operationId: getSession, responses: {'200': {description: Session, headers: {ETag: {schema: {type: string}}}, content: {application/json: {schema: {$ref: '#/components/schemas/SessionRecord'}}}}, '404': {$ref: '#/components/responses/NotFound'}}}
+    patch:
+      operationId: patchSession
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionPatch'}}}}
+      responses: {'200': {description: Updated session, content: {application/json: {schema: {$ref: '#/components/schemas/SessionRecord'}}}}, '409': {$ref: '#/components/responses/Conflict'}}
+    delete:
+      operationId: deleteSession
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses: {'200': {description: Deleted}}
+  /api/v2/sessions/by-xbox-id/{xbox_id}:
+    get:
+      operationId: getSessionByXboxID
+      parameters: [{name: xbox_id, in: path, required: true, schema: {$ref: '#/components/schemas/Hex64'}}]
+      responses: {'200': {description: Full session record, content: {application/json: {schema: {$ref: '#/components/schemas/SessionRecord'}}}}, '404': {$ref: '#/components/responses/NotFound'}}
+  /api/v2/sessions/{id}/heartbeat:
+    $ref: '#/components/pathItems/SessionAction'
+  /api/v2/sessions/{id}/join:
+    $ref: '#/components/pathItems/SessionAction'
+  /api/v2/sessions/{id}/leave:
+    $ref: '#/components/pathItems/SessionAction'
+  /api/v2/sessions/{id}/migration:
+    $ref: '#/components/pathItems/SessionAction'
+  /api/v2/events:
+    get:
+      operationId: pollEvents
+      description: Durable HTTP long-poll fallback. Resume with the last processed numeric event id.
+      parameters:
+        - {name: after, in: query, schema: {type: integer, format: int64, minimum: 0}}
+        - {name: wait_ms, in: query, schema: {type: integer, minimum: 0, maximum: 30000}}
+      responses: {'200': {description: Events, content: {application/json: {schema: {type: object, properties: {events: {type: array, items: {$ref: '#/components/schemas/Event'}}}}}}}}
+  /api/v2/realtime:
+    get:
+      operationId: connectRealtime
+      description: Upgrade to WebSocket with Authorization header. Each text frame is one Event.
+      parameters: [{name: after, in: query, schema: {type: integer, format: int64, minimum: 0}}]
+      responses: {'101': {description: Switching Protocols}}
+  /api/v2/chat/messages:
+    post:
+      operationId: sendTextChatMessage
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TextChatInput'}}}}
+      responses: {'201': {description: Message appended to each authenticated recipient event stream}}
+  /api/v2/relay/routes:
+    post:
+      operationId: registerRelayRoute
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RelayRouteRequest'}}}}
+      responses: {'200': {description: Registered route, content: {application/json: {schema: {$ref: '#/components/schemas/RelayRoute'}}}}}
+    delete:
+      operationId: unregisterRelayRoute
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RelayRouteRequest'}}}}
+      responses: {'200': {description: Unregistered}}
+  /api/v2/relay/datagrams:
+    post:
+      operationId: sendRelayDatagram
+      description: Validates the complete batch before enqueueing and preserves input order per destination. A single Datagram remains accepted for compatibility. Encoded payload strings across one batch are limited to 1011712 bytes within the 1048576-byte HTTP body cap.
+      requestBody: {required: true, content: {application/json: {schema: {oneOf: [{$ref: '#/components/schemas/Datagram'}, {$ref: '#/components/schemas/DatagramBatch'}]}}}}
+      responses: {'202': {description: Entire batch queued, content: {application/json: {schema: {type: object, required: [accepted,accepted_count], properties: {accepted: {type: boolean}, accepted_count: {type: integer, minimum: 1, maximum: 64}}}}}}}
+    get:
+      operationId: receiveRelayDatagrams
+      parameters:
+        - {name: local_port, in: query, required: true, schema: {type: integer, minimum: 1, maximum: 65535}}
+        - {name: max_bytes, in: query, required: true, schema: {type: integer, minimum: 1, maximum: 1048576}}
+        - {name: wait_ms, in: query, required: true, schema: {type: integer, minimum: 0, maximum: 30000}}
+      responses: {'200': {description: Datagrams, content: {application/json: {schema: {type: object, properties: {datagrams: {type: array, items: {$ref: '#/components/schemas/Datagram'}}}}}}}}
+  /api/v2/matchmaking/tickets:
+    post:
+      operationId: createMatchmakingTicket
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MatchmakingTicket'}}}}
+      responses: {'201': {description: Ticket, content: {application/json: {schema: {$ref: '#/components/schemas/MatchmakingTicket'}}}}}
+  /api/v2/matchmaking/tickets/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    get: {operationId: getMatchmakingTicket, responses: {'200': {description: Ticket, content: {application/json: {schema: {$ref: '#/components/schemas/MatchmakingTicket'}}}}}}
+    delete: {operationId: cancelMatchmakingTicket, parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/IfMatch'}], responses: {'200': {description: Cancelled}}}
+  /api/v2/social/{kind}:
+    parameters: [{$ref: '#/components/parameters/ResourceKind'}]
+    get: {operationId: listSocialResources, responses: {'200': {description: Resources}}}
+    post: {operationId: createSocialResource, parameters: [{$ref: '#/components/parameters/IdempotencyKey'}], requestBody: {$ref: '#/components/requestBodies/ResourcePayload'}, responses: {'201': {description: Created}}}
+  /api/v2/progression/{kind}:
+    parameters: [{$ref: '#/components/parameters/ResourceKind'}]
+    get: {operationId: listProgressionResources, responses: {'200': {description: Resources}}}
+    post: {operationId: appendProgressionResource, parameters: [{$ref: '#/components/parameters/IdempotencyKey'}], requestBody: {$ref: '#/components/requestBodies/ResourcePayload'}, responses: {'201': {description: Created}}}
+  /api/v2/friends:
+    get:
+      operationId: enumerateFriends
+      parameters: [{name: after, in: query, schema: {type: string}}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}]
+      responses: {'200': {description: XUID-ordered friend page, content: {application/json: {schema: {$ref: '#/components/schemas/FriendPage'}}}}}
+  /api/v2/friends/check:
+    post:
+      operationId: checkFriends
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [xuids], properties: {xuids: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Hex64'}}}}}}}
+      responses: {'200': {description: Input-ordered relationship flags}}
+  /api/v2/friends/relationships:
+    post:
+      operationId: mutateFriendRelationship
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [target_xuid,action], properties: {target_xuid: {$ref: '#/components/schemas/Hex64'}, action: {type: string, enum: [request,accept,remove,block,unblock]}}}}}}
+      responses: {'200': {description: Relationship projection}}
+  /api/v2/invites:
+    post:
+      operationId: createInvites
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/InviteCreate'}}}}
+      responses: {'201': {description: Created invitation records}}
+    get:
+      operationId: enumerateInvites
+      parameters: [{name: after, in: query, schema: {type: string}}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}, {name: state, in: query, schema: {type: string, enum: [pending,accepted,expired,revoked]}}]
+      responses: {'200': {description: ID-ordered invitation page}}
+  /api/v2/invites/{id}/accept:
+    post:
+      operationId: acceptInvite
+      parameters: [{$ref: '#/components/parameters/ResourceID'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [expected_revision], properties: {expected_revision: {type: integer, format: int64, minimum: 1}}}}}}
+      responses: {'200': {description: Accepted invitation plus full SessionRecord}}
+  /api/v2/stats/writes:
+    post:
+      operationId: writeStats
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StatWrite'}}}}
+      responses: {'200': {description: Idempotent write receipt}}
+  /api/v2/stats/read:
+    post:
+      operationId: readStats
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [xuids,view_id,stat_ids], properties: {xuids: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Hex64'}}, view_id: {$ref: '#/components/schemas/Hex32'}, stat_ids: {type: array, maxItems: 64, items: {$ref: '#/components/schemas/Hex32'}}}}}}}
+      responses: {'200': {description: Rows in input XUID order, content: {application/json: {schema: {type: object, required: [rows], properties: {rows: {type: array, items: {$ref: '#/components/schemas/StatRow'}}}}}}}}
+  /api/v2/stats/reset:
+    post:
+      operationId: resetStatsView
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [view_id], properties: {view_id: {$ref: '#/components/schemas/Hex32'}}}}}}
+      responses: {'200': {description: Authenticated caller row cleared in the requested view}}
+  /api/v2/stats/skill:
+    post:
+      operationId: readSkill
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [xuids], properties: {xuids: {type: array, minItems: 1, maxItems: 100, items: {$ref: '#/components/schemas/Hex64'}}}}}}}
+      responses: {'200': {description: Finite numeric ratings in exact input order, content: {application/json: {schema: {type: object, required: [ratings], properties: {ratings: {type: array, items: {type: object, required: [xuid,rating], properties: {xuid: {$ref: '#/components/schemas/Hex64'}, rating: {type: number}}}}}}}}}}
+  /api/v2/leaderboards/{view_id}:
+    get:
+      operationId: enumerateLeaderboard
+      parameters: [{name: view_id, in: path, required: true, schema: {$ref: '#/components/schemas/Hex32'}}, {name: stat_id, in: query, required: true, schema: {$ref: '#/components/schemas/Hex32'}}, {name: offset, in: query, schema: {type: integer, minimum: 0}}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}, {name: friends_only, in: query, schema: {type: boolean}}]
+      responses: {'200': {description: Descending rows sorted without integer precision loss; value is the typed StatValue object}}
+  /api/v2/voice/routes:
+    post:
+      operationId: createVoiceRoute
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/VoiceRouteRequest'}}}}
+      responses: {'201': {description: New single-active voice route token; atomically revokes the prior route for this account/session}}
+    delete:
+      operationId: revokeVoiceRoute
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [route_token], properties: {route_token: {type: string}}}}}}
+      responses: {'200': {description: Route immediately revoked}}
+  /api/v2/voice/packets:
+    post:
+      operationId: sendVoicePacket
+      requestBody: {required: true, content: {application/json: {schema: {oneOf: [{$ref: '#/components/schemas/VoicePacketInput'}, {$ref: '#/components/schemas/VoicePacketBatch'}]}}}}
+      responses: {'202': {description: Complete ordered batch committed atomically to recipient-specific active route streams}}
+    get:
+      operationId: receiveVoicePackets
+      parameters: [{name: route_token, in: query, required: true, schema: {type: string}}, {name: after, in: query, description: Opaque decimal cursor previously returned as next_after, schema: {type: string, pattern: '^[0-9]+$'}}, {name: wait_ms, in: query, schema: {type: integer, minimum: 0, maximum: 30000}}]
+      responses: {'200': {description: Flattened ordered packets, content: {application/json: {schema: {type: object, required: [packets,next_after], properties: {packets: {type: array, items: {$ref: '#/components/schemas/VoicePacket'}}, next_after: {type: string}}}}}}}
+  /health/live: {get: {security: [], responses: {'200': {description: Process live}}}}
+  /health/ready: {get: {security: [], responses: {'200': {description: Dependencies ready}, '503': {description: Not ready}}}}
+  /metrics: {get: {security: [], responses: {'200': {description: Prometheus text metrics}}}}
+components:
+  securitySchemes: {bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}}
+  parameters:
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$'}}
+    IfMatch: {name: If-Match, in: header, required: true, schema: {type: string}, description: Numeric resource revision}
+    ResourceID: {name: id, in: path, required: true, schema: {type: string}}
+    ResourceKind: {name: kind, in: path, required: true, schema: {type: string, enum: [friends, blocks, presence, recent-players, parties, invites, match-results, profiles, leaderboard-entries, achievements, viral-events]}}
+  pathItems:
+    SessionAction:
+      parameters: [{$ref: '#/components/parameters/ResourceID'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      post:
+        operationId: mutateSessionMembership
+        requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionAction'}}}}
+        responses: {'200': {description: Updated session, content: {application/json: {schema: {$ref: '#/components/schemas/SessionRecord'}}}}, '409': {$ref: '#/components/responses/Conflict'}}
+  requestBodies:
+    ResourcePayload: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResourcePayload'}}}}
+  responses:
+    Conflict: {description: Revision, capacity, or state conflict, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Hex64: {type: string, pattern: '^0x[0-9a-fA-F]{16}$', examples: ['0xe000000000000001']}
+    Base64: {type: string, contentEncoding: base64}
+    ChallengeRequest: {type: object, additionalProperties: false, required: [device_id,xuid,public_key], properties: {device_id: {type: string}, xuid: {$ref: '#/components/schemas/Hex64'}, public_key: {type: string, description: base64url Ed25519 public key}}}
+    ChallengeResponse: {type: object, additionalProperties: false, required: [challenge_id,challenge], properties: {challenge_id: {type: string}, challenge: {type: string, description: base64url challenge; sign its exact ASCII bytes}}}
+    EnrollRequest: {type: object, additionalProperties: false, required: [challenge_id,device_id,xuid,machine_id,player_name,public_key,signature], properties: {challenge_id: {type: string}, device_id: {type: string}, xuid: {$ref: '#/components/schemas/Hex64'}, machine_id: {type: string}, player_name: {type: string, minLength: 1, maxLength: 32}, public_key: {type: string}, signature: {type: string}}}
+    TokenPair: {type: object, additionalProperties: false, required: [access_token,refresh_token,expires_in], properties: {access_token: {type: string}, refresh_token: {type: string}, expires_in: {type: integer, format: int64}}}
+    Route: {type: object, additionalProperties: false, required: [peer_id], properties: {peer_id: {type: integer, minimum: 0, maximum: 63}, address: {type: string}, port: {type: integer, minimum: 0, maximum: 65535}, relay_address: {type: string}, connection_id: {type: string}}}
+    SessionMemberInput: {type: object, additionalProperties: false, properties: {xuid: {$ref: '#/components/schemas/Hex64'}, private: {type: boolean}, machine_id: {$ref: '#/components/schemas/Hex64'}, virtual_ipv4: {type: string, format: ipv4, description: Ignored and replaced by server allocation}, online_port: {type: integer, minimum: 0, maximum: 65535}, peer_id: {type: string}, route: {$ref: '#/components/schemas/Route'}}}
+    SessionMember: {type: object, properties: {xuid: {$ref: '#/components/schemas/Hex64'}, account_id: {type: string, readOnly: true}, machine_id: {$ref: '#/components/schemas/Hex64'}, virtual_ipv4: {type: string, format: ipv4}, online_port: {type: integer, minimum: 0, maximum: 65535}, peer_id: {type: string, description: Rex connection identifier; numeric roster index is route.peer_id}, private: {type: boolean}, ready: {type: boolean}, role: {type: string, enum: [host,player,spectator], readOnly: true}, route: {$ref: '#/components/schemas/Route'}, joined_at: {type: string, format: date-time, readOnly: true}}}
+    SessionRecord:
+      type: object
+      additionalProperties: false
+      required: [mode,episode,region,visibility,public_slots,private_slots,build_id,protocol_version,title_id,media_id,title_version,contexts,properties]
+      properties:
+        id: {type: string, readOnly: true}
+        revision: {type: integer, format: int64, readOnly: true}
+        host_epoch: {type: integer, format: int64, readOnly: true}
+        host_xuid: {$ref: '#/components/schemas/Hex64'}
+        previous_session_id: {$ref: '#/components/schemas/Hex64'}
+        nonce: {$ref: '#/components/schemas/Hex64'}
+        flags: {type: integer, format: int32, minimum: 0}
+        lifecycle_state: {type: integer, format: int32, minimum: 0}
+        host_machine_id: {$ref: '#/components/schemas/Hex64'}
+        host_ipv4: {type: string, format: ipv4}
+        host_port: {type: integer, minimum: 0, maximum: 65535}
+        host_ethernet_address: {type: string, pattern: '^[0-9a-fA-F]{12}$'}
+        host_peer_id: {type: string, description: Rex host peer connection identifier}
+        host_lease_expires_at: {type: string, format: date-time, readOnly: true}
+        state: {type: string, enum: [open,in_game,closed], readOnly: true}
+        visibility: {type: string, enum: [public,friends,private]}
+        mode: {type: string, maxLength: 64}
+        episode: {type: string, maxLength: 32}
+        region: {type: string, maxLength: 32}
+        ranked: {type: boolean}
+        public_slots: {type: integer, minimum: 0, maximum: 64}
+        private_slots: {type: integer, minimum: 0, maximum: 64}
+        build_id: {type: string}
+        protocol_version: {type: integer, minimum: 1}
+        title_id: {type: string, pattern: '^0x[0-9a-fA-F]{8}$'}
+        media_id: {type: string, pattern: '^0x[0-9a-fA-F]{8}$'}
+        title_version: {type: string, pattern: '^0x[0-9a-fA-F]{8}$'}
+        session_id: {$ref: '#/components/schemas/Hex64'}
+        exchange_key: {type: string, pattern: '^0x[0-9a-fA-F]{32}$'}
+        contexts: {type: object, maxProperties: 64, additionalProperties: {type: integer, format: int64, minimum: 0, maximum: 4294967295}}
+        properties: {type: object, maxProperties: 64, additionalProperties: {$ref: '#/components/schemas/Base64'}}
+        members: {type: array, maxItems: 64, items: {$ref: '#/components/schemas/SessionMember'}}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+    SessionSearch: {type: object, additionalProperties: false, required: [title_id,media_id,title_version,protocol_version,procedure_index,contexts,properties,maximum_results], properties: {title_id: {type: string}, media_id: {type: string}, title_version: {type: string}, protocol_version: {type: integer, minimum: 1}, procedure_index: {type: integer, minimum: 0}, contexts: {type: object, additionalProperties: {type: integer, format: int64, minimum: 0, maximum: 4294967295}}, properties: {type: object, additionalProperties: {$ref: '#/components/schemas/Base64'}}, maximum_results: {type: integer, minimum: 1, maximum: 100}}}
+    SessionPatch: {type: object, additionalProperties: false, required: [expected_revision], properties: {expected_revision: {type: integer, format: int64}, state: {type: string}, visibility: {type: string}, public_slots: {type: integer}, private_slots: {type: integer}, contexts: {type: object, additionalProperties: {type: integer, format: int64, minimum: 0, maximum: 4294967295}}, properties: {type: object, additionalProperties: {$ref: '#/components/schemas/Base64'}}, previous_session_id: {$ref: '#/components/schemas/Hex64'}, nonce: {$ref: '#/components/schemas/Hex64'}, flags: {type: integer}, lifecycle_state: {type: integer}, host_machine_id: {$ref: '#/components/schemas/Hex64'}, host_ipv4: {type: string, format: ipv4}, host_port: {type: integer}, host_ethernet_address: {type: string}, host_peer_id: {type: string}, members: {type: array, maxItems: 64, items: {$ref: '#/components/schemas/SessionMemberInput'}}}}
+    SessionAction: {type: object, additionalProperties: false, required: [expected_revision], properties: {expected_revision: {type: integer, format: int64}, expected_host_epoch: {type: integer, format: int64}, new_host_xuid: {$ref: '#/components/schemas/Hex64'}, private: {type: boolean}, route: {$ref: '#/components/schemas/Route'}, member: {$ref: '#/components/schemas/SessionMemberInput'}, replacement: {$ref: '#/components/schemas/SessionRecord'}}}
+    Event: {type: object, required: [id,event_id,user_id,type,aggregate_type,aggregate_id,revision,payload,created_at], properties: {id: {type: integer, format: int64}, event_id: {type: string}, user_id: {type: string}, type: {type: string}, aggregate_type: {type: string}, aggregate_id: {type: string}, revision: {type: integer, format: int64}, correlation_id: {type: string}, payload: {type: object}, created_at: {type: string, format: date-time}}}
+    RelayRouteRequest: {type: object, additionalProperties: false, required: [session_id,local_port], properties: {session_id: {type: string}, local_port: {type: integer, minimum: 1, maximum: 65535}}}
+    RelayRoute: {type: object, properties: {account_id: {type: string}, session_id: {type: string}, local_port: {type: integer}, virtual_ipv4: {type: string}, expires_at: {type: string, format: date-time}}}
+    Datagram: {type: object, additionalProperties: false, required: [destination_ipv4,destination_port,source_port,payload], properties: {destination_ipv4: {type: string, format: ipv4}, destination_port: {type: integer}, source_ipv4: {type: string, format: ipv4, readOnly: true}, source_port: {type: integer}, payload: {$ref: '#/components/schemas/Base64'}, received_at: {type: string, format: date-time, readOnly: true}}}
+    DatagramBatch: {type: object, additionalProperties: false, required: [datagrams], properties: {datagrams: {type: array, minItems: 1, maxItems: 64, items: {$ref: '#/components/schemas/Datagram'}}}}
+    MatchmakingTicket: {type: object, additionalProperties: false, required: [procedure_index,mode,episode,region,ranked,party_size,contexts,properties], properties: {id: {type: string, readOnly: true}, owner_id: {type: string, readOnly: true}, procedure_index: {type: integer}, mode: {type: string}, episode: {type: string}, region: {type: string}, ranked: {type: boolean}, party_size: {type: integer, minimum: 1, maximum: 64}, contexts: {type: object, additionalProperties: {type: integer}}, properties: {type: object, additionalProperties: {$ref: '#/components/schemas/Base64'}}, state: {type: string, readOnly: true}, matched_session_id: {type: string, readOnly: true}, created_at: {type: string, readOnly: true}, updated_at: {type: string, readOnly: true}}}
+    ResourcePayload: {type: object, additionalProperties: false, properties: {target_account_id: {type: string}, session_id: {type: string}, category: {type: string, maxLength: 64}, value: {type: string, maxLength: 512}, values: {type: object, maxProperties: 64, additionalProperties: {type: integer, format: int64}}, metadata: {type: object, maxProperties: 64, additionalProperties: {type: string, maxLength: 512}}, expires_at: {type: string, format: date-time}}}
+    Friend: {type: object, required: [xuid,account_id,player_name,state], properties: {xuid: {$ref: '#/components/schemas/Hex64'}, account_id: {type: string}, player_name: {type: string}, state: {type: string, enum: [incoming,outgoing,accepted,removed,blocked,blocked_by]}, presence: {type: string}, updated_at: {type: string, format: date-time}}}
+    FriendPage: {type: object, required: [items,next_cursor], properties: {items: {type: array, items: {$ref: '#/components/schemas/Friend'}}, next_cursor: {type: string}}}
+    InviteCreate: {type: object, additionalProperties: false, required: [session_id,recipient_xuids,custom_data,expires_in_seconds], properties: {session_id: {$ref: '#/components/schemas/Hex64'}, recipient_xuids: {type: array, minItems: 1, maxItems: 32, uniqueItems: true, items: {$ref: '#/components/schemas/Hex64'}}, custom_data: {$ref: '#/components/schemas/Base64'}, expires_in_seconds: {type: integer, minimum: 60, maximum: 604800}}}
+    Hex32: {type: string, pattern: '^0x[0-9a-f]{8}$', example: '0x00000001'}
+    StatValue: {type: object, additionalProperties: false, required: [type,value], properties: {type: {type: string, enum: [i32,i64,f64,unicode,binary]}, value: {description: JSON number, string, or base64 string according to type}}}
+    StatRow: {type: object, required: [xuid,view_id,columns,updated_at], properties: {xuid: {$ref: '#/components/schemas/Hex64'}, view_id: {$ref: '#/components/schemas/Hex32'}, columns: {type: object, additionalProperties: {$ref: '#/components/schemas/StatValue'}}, updated_at: {type: string, format: date-time}}}
+    StatWrite: {type: object, additionalProperties: false, required: [session_id,sequence,views], properties: {session_id: {$ref: '#/components/schemas/Hex64'}, sequence: {type: string, pattern: '^(0|[1-9][0-9]*)$'}, views: {type: array, minItems: 1, maxItems: 16, items: {type: object, additionalProperties: false, required: [view_id,rows], properties: {view_id: {$ref: '#/components/schemas/Hex32'}, rows: {type: array, minItems: 1, maxItems: 64, items: {type: object, additionalProperties: false, required: [xuid,columns], properties: {xuid: {$ref: '#/components/schemas/Hex64'}, columns: {type: object, minProperties: 1, maxProperties: 64, propertyNames: {pattern: '^0x[0-9a-f]{8}$'}, additionalProperties: {$ref: '#/components/schemas/StatValue'}}}}}}}}}}
+    VoiceRouteRequest: {type: object, additionalProperties: false, required: [session_id,channel,target_xuids,mute_xuids], properties: {session_id: {$ref: '#/components/schemas/Hex64'}, channel: {type: string, enum: [all,team,private]}, target_xuids: {type: array, maxItems: 64, items: {$ref: '#/components/schemas/Hex64'}}, mute_xuids: {type: array, maxItems: 64, items: {$ref: '#/components/schemas/Hex64'}}}}
+    VoicePacketInput: {type: object, additionalProperties: false, required: [route_token,sequence,payload], properties: {route_token: {type: string}, sequence: {type: integer, minimum: 0, maximum: 4294967295}, payload: {$ref: '#/components/schemas/Base64'}}}
+    VoicePacketBatch: {type: object, additionalProperties: false, required: [packets], properties: {packets: {type: array, minItems: 1, maxItems: 32, items: {$ref: '#/components/schemas/VoicePacketInput'}}}}
+    VoicePacket: {type: object, additionalProperties: false, required: [source_xuid,session_id,sequence,payload], properties: {source_xuid: {$ref: '#/components/schemas/Hex64'}, session_id: {$ref: '#/components/schemas/Hex64'}, sequence: {type: integer, minimum: 0, maximum: 4294967295}, payload: {$ref: '#/components/schemas/Base64'}}}
+    TextChatInput: {type: object, additionalProperties: false, required: [session_id,channel,target_xuids,sequence,text], properties: {session_id: {$ref: '#/components/schemas/Hex64'}, channel: {type: string, enum: [all,team]}, target_xuids: {type: array, maxItems: 64, uniqueItems: true, items: {$ref: '#/components/schemas/Hex64'}}, sequence: {type: integer, minimum: 0, maximum: 4294967295}, text: {type: string, minLength: 1, maxLength: 256}}}
+    Error: {type: object, properties: {error: {type: object, properties: {code: {type: string}, message: {type: string}, correlation_id: {type: string}}}}}

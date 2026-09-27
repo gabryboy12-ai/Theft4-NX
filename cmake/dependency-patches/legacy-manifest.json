@@ -1,0 +1,239 @@
+{
+  "schema": 1,
+  "dependencies": [
+    {
+      "name": "moltenvk",
+      "path": "thirdparty/MoltenVK/MoltenVK",
+      "base_revision": "db445ff2042d9ce348c439ad8451112f354b8d2a",
+      "patch": "moltenvk.patch",
+      "sha256": "1bab1027d3b08add8bdb64e8a9e368790686813f3cceb4afd43499e8372611e4",
+      "files": [
+        {
+          "path": "MoltenVK/MoltenVK.xcodeproj/project.pbxproj",
+          "before_sha256": "584041286aa2122c52d9f78fd33a40ee6f5f533602ab2849ece3b9f0fecc7b94",
+          "after_sha256": "b5f35a56d9c79a3078dba7947db638ed15266edbb72f54d74d06447419aa9bb0"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h",
+          "before_sha256": "e9b15682064427ad45b12bd7576ef5119d12a5a1ce898a5dfd0e2313066fbc34",
+          "after_sha256": "4f7aee042fc3a49a2435e3a48ec92b397f1dd1523a7388a1b2023545f7e8557e"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm",
+          "before_sha256": "d9ac6ede5c7ef795c4e4462385e14909d96e78cedfa75ea41a582719c34048be",
+          "after_sha256": "c1bd1226c79f590e3cd26f8b82ae8ef6cbd69e44d534cfd8361e0e4c3e45c072"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm",
+          "before_sha256": "366ff1201b5cf09d34ca04bb6c87c04f916e4b3b00f407c610059ee71f85794b",
+          "after_sha256": "c92667dca185581f853135ff43cd70a31cfb8f9d0eb0e7cab42b42a2be4466c1"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.h",
+          "before_sha256": "absent",
+          "after_sha256": "0c079bd5ca200e24a0916b656046ef05351a104733ffdc588122ba1f0cbfc558"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/Commands/MVKMTLBufferRetention.mm",
+          "before_sha256": "absent",
+          "after_sha256": "d2d278a898ab95d23034921ba71c2c78ad21cfe265aa6ccadddaf4597f85cde0"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/GPUObjects/MVKDevice.h",
+          "before_sha256": "770ef8e7d514a2871eda702f40ea5e54a14a043e9ba93d96e1c97f16582820f8",
+          "after_sha256": "2d2bcccc37c36229d3d17cf7fc7afb02e13e3e678c8a12e9055e2944a26de0f0"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm",
+          "before_sha256": "cd522dc721236e828123c369e523150f3e6cefaf5cd66130700f9bdf1e97ac1a",
+          "after_sha256": "0e3741a28b934aa1dea2685f3189a8b607a1ebf4110e2eac21e2aa1f1afd7bb2"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/GPUObjects/MVKImage.h",
+          "before_sha256": "6891066d162dab1fc1a98a2812df1873fdfb48e8fa16d6bb42027209fb2073dc",
+          "after_sha256": "8a87c47ca3c77c37566f8c2b165fcfe29e4ed7f5c975634d78d34ffd6ce7de03"
+        },
+        {
+          "path": "MoltenVK/MoltenVK/GPUObjects/MVKImage.mm",
+          "before_sha256": "21c536ea1fe7d5132f987162f08bdd63ba8f2b878d080264778b4fdcf6965229",
+          "after_sha256": "cb2e1ebc955e6afffa203b24f23743bdfbed7294f62dbf80814f00a831ab1a36"
+        }
+      ]
+    },
+    {
+      "name": "xenosrecomp",
+      "path": "tools/XenosRecomp",
+      "base_revision": "0d0f3d56ea3f43ae1c3b0867017292f369e77667",
+      "patch": "xenosrecomp.patch",
+      "sha256": "a27b5301b7c590f6664f6a3650ec0f3ac2b1da3667d0fd268847a2d79e45641c",
+      "files": [
+        {
+          "path": "XenosRecomp/air_compiler.cpp",
+          "before_sha256": "c8d071abd627f1aa52ced53a544abf5bc8ab6ba58f80a26b60371503b09a7fa9",
+          "after_sha256": "84d552b97312605429c69141ed5adcf925464341876d2df6094e786310d00c50"
+        },
+        {
+          "path": "XenosRecomp/main.cpp",
+          "before_sha256": "d4c49f7fe44124fc04d3e419673b9c2d7b1e6b6eb88f5cd837561e42327228f6",
+          "after_sha256": "593b78f97e41c35fbf19245dad893116ddbfb6feffcd4baefd1ccfc15d1f7a06"
+        },
+        {
+          "path": "XenosRecomp/shader_common.h",
+          "before_sha256": "f0f196114ef422740db57aabddb162fd6136c0dff06465764e6df47c6e8ffa91",
+          "after_sha256": "79499e75ee81493de2828ccece79061a30fc5af507aad567489ea920de05bd47"
+        },
+        {
+          "path": "XenosRecomp/shader_recompiler.cpp",
+          "before_sha256": "23efd9399e860761f6bbbd54d44d401c041171bd291e2268607ff1b4c1a72720",
+          "after_sha256": "4e1987dc755739b8ca74b6c2a012cb3b47c939b39a55e789ef73e1fe21667bd8"
+        },
+        {
+          "path": "XenosRecomp/shader_recompiler.h",
+          "before_sha256": "3a135e35b0583d713d83e1782b5410cb22aa85ed4d553b98b1f8916c4f42d633",
+          "after_sha256": "e9e3d644776cff779846260e64ecff2fc0b07e447d52f60501c307d7ee08172c"
+        },
+        {
+          "path": "XenosRecomp/shader_source_preservation.h",
+          "before_sha256": "absent",
+          "after_sha256": "9b817dadae37468c7c5ad8bc058fa34e00564144a52574b89ed8857b51ba7164"
+        },
+        {
+          "path": "shader_override_compiler.py",
+          "before_sha256": "absent",
+          "after_sha256": "34ce3b392f46bc2e402e4f9b6fe6b44683251a3e2d1dfb5dd78b9c7a43a3a8a9"
+        },
+        {
+          "path": "validate_smaa_pipeline.py",
+          "before_sha256": "absent",
+          "after_sha256": "f21c3e30202a579656f5cee7fa8636825e5c2ca22168c644065ba54474bda2f2"
+        },
+        {
+          "path": "tests/shader_overrides/example_pixel.glsl",
+          "before_sha256": "absent",
+          "after_sha256": "1ae060c60b34d9d650a5d2fa3c5ac99be765d58af4e6a0ae4729716b90c1c9e9"
+        },
+        {
+          "path": "tests/shader_overrides/example_vertex.hlsl",
+          "before_sha256": "absent",
+          "after_sha256": "e111390513c363dd15066f98e4db39164e9df662f39afaf963d9c55f826e60e6"
+        },
+        {
+          "path": "tests/shader_overrides/manifest.json",
+          "before_sha256": "absent",
+          "after_sha256": "b909e262ce315fc158e79e1a3b3327b459064958c5d62f1878261c1433e70b95"
+        },
+        {
+          "path": "tests/test_override_sampler_lod_bias.py",
+          "before_sha256": "absent",
+          "after_sha256": "f9ef28451795a6f6e5f56486448cf582195a97788433a862b81e08498a00a89e"
+        },
+        {
+          "path": "tests/test_shader_override_compiler.py",
+          "before_sha256": "absent",
+          "after_sha256": "1343162d78d85a4e9ed76d5703bc9eb60db4609e150613aa4e9fc1f96416c94a"
+        },
+        {
+          "path": "tests/test_ssaa_fragment_coordinate_mapping.py",
+          "before_sha256": "absent",
+          "after_sha256": "1d7cb609f8e2e439a1ca42f033ad16882dceb0d8492ca29c7af95c124a4b3143"
+        },
+        {
+          "path": "tests/test_conditional_exec_translation.py",
+          "before_sha256": "absent",
+          "after_sha256": "2acebbee67f88641debee654bdd788e1b2299adc23909201afe365d2ad52cab8"
+        },
+        {
+          "path": "tests/run_conditional_exec_gpu_test.py",
+          "before_sha256": "absent",
+          "after_sha256": "193a7b80cc1544d59a62d4a799fab0c63fdedb604780633cc87cbaca024d66f9"
+        },
+        {
+          "path": "tests/conditional_exec_gpu_test.mm",
+          "before_sha256": "absent",
+          "after_sha256": "1c66a5222e7b03b7b0bf29db1235384163b0ee4acccc8610f85e3c27ba541763"
+        },
+        {
+          "path": "tests/test_texture_lod_translation.py",
+          "before_sha256": "absent",
+          "after_sha256": "cb4ec50021ea5871ba6f090b71dd50ca7345156379a8bcaf4c9bce2b2607f0e9"
+        },
+        {
+          "path": "tests/run_texture_lod_gpu_test.py",
+          "before_sha256": "absent",
+          "after_sha256": "ff3ee3745a723d1f6414f671d7a6c45f417b404d10f17737f87f0f5e128e71b4"
+        },
+        {
+          "path": "tests/texture_lod_gpu_test.mm",
+          "before_sha256": "absent",
+          "after_sha256": "0f081f2bee7c6552ebeff1af1fee37ad24f31ac4e5df2968bcc993b8450f4da8"
+        },
+        {
+          "path": "tests/run_deferred_alpha_gpu_test.py",
+          "before_sha256": "absent",
+          "after_sha256": "f29c1d1bfb76afe129cfbbb357d76e1ccfcda3910d4c8870355afd7ca943799b"
+        },
+        {
+          "path": "tests/deferred_alpha_gpu_test.mm",
+          "before_sha256": "absent",
+          "after_sha256": "3b1b8ef175a70759354420356fa441a7ff4c02d3fbf8949937906acc178b5e6a"
+        }
+      ]
+    },
+    {
+      "name": "ffmpeg-ps4",
+      "path": "glue/rexglue-sdk-main/thirdparty/FFmpeg",
+      "base_revision": "0604b464c7cb4ebc94940cf1f324a3b26b87717c",
+      "patch": "ffmpeg-ps4.patch",
+      "sha256": "bedeec08682faadde931b1b22f0bde8651b910f0b45445d8671e7a90c3c70364",
+      "files": [
+        {
+          "path": "config.h",
+          "before_sha256": "66d5a3bd370da489638d652c91963e9a39ff7eb6f5186a5b601972e498eb06a4",
+          "after_sha256": "81e3d6a370fef07bb2264e0bcbf88a7a70be033d850878e6731cdddb4eafe746"
+        }
+      ]
+    },
+    {
+      "name": "ffmpeg-download",
+      "path": "thirdparty/ffmpeg-core",
+      "base_revision": "5089f001a5442308599fbab8e35282f5ad8ccf13",
+      "patch": "ffmpeg-download.patch",
+      "sha256": "7eebd28904ca81d7240facf2551c3801e9bc2aa45eaab5ae9a53a43cff2e93ff",
+      "files": [
+        {
+          "path": "CMakeLists.txt",
+          "before_sha256": "8acf9d7593e640d2e658ca4fa1b2e224a755c2f07ddc040b4f3cd60b075f1c82",
+          "after_sha256": "b4d2afb4314cb44fbda6663eb556c218adc329c2cfd6b1418dddeaae2aac013e"
+        }
+      ]
+    },
+    {
+      "name": "plume-ps4",
+      "path": "thirdparty/plume",
+      "base_revision": "519e3258048fe0bc65044e75fba7b1543e4c8e90",
+      "patch": "plume-ps4.patch",
+      "sha256": "3d6e628a3866efad961a338d6815894f02083d346b6cd9e45ba6fa74381f464f",
+      "files": [
+        {
+          "path": "plume_render_interface_types.h",
+          "before_sha256": "9ff137103bbfa63c66f1f23a926f7efad6aaebbafb0554df9966e1978246d17b",
+          "after_sha256": "8709977ca35d01042d2f6f9616b1cb167fb8fe8be18b5f10e6ec6a010437ab02"
+        }
+      ]
+    },
+    {
+      "name": "libcxxabi-ps4",
+      "path": "tools/llvm-project-libcxx",
+      "base_revision": "2078da43e25a4623cab2d0d60decddf709aaea28",
+      "patch": "libcxxabi-ps4.patch",
+      "sha256": "c40de4478b89d662b55473b79d0132e334e6466558ff1a462773bb7bcbb7221a",
+      "files": [
+        {
+          "path": "libcxxabi/src/cxa_guard_impl.h",
+          "before_sha256": "0c77f1e80dd8115e7fae1674e7c539b239b72b2b9552b79aaab68fd454d82f6d",
+          "after_sha256": "af0286e4adb6edd044c875ab3173dc2fb0ff810850d9ffdd0b04331019e1c62e"
+        }
+      ]
+    }
+  ]
+}

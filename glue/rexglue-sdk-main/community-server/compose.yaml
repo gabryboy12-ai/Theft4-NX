@@ -1,0 +1,125 @@
+name: liberty-community
+
+x-app: &app
+  build: .
+  image: libertyrecomp/community-server:local
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    COMMUNITY_LISTEN: :8080
+    COMMUNITY_PUBLIC_URL: ${COMMUNITY_PUBLIC_URL:?COMMUNITY_PUBLIC_URL is required}
+    COMMUNITY_TRUSTED_PROXIES: ${COMMUNITY_TRUSTED_PROXIES:-172.30.0.2/32}
+    COMMUNITY_DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}?sslmode=disable
+    COMMUNITY_REDIS_URL: redis://redis:6379/0
+    COMMUNITY_TOKEN_SIGNING_KEY: ${COMMUNITY_TOKEN_SIGNING_KEY:?COMMUNITY_TOKEN_SIGNING_KEY must be replaced}
+    COMMUNITY_MAX_SESSION_MEMBERS: ${COMMUNITY_MAX_SESSION_MEMBERS:-64}
+    COMMUNITY_RATE_LIMIT_PER_MINUTE: ${COMMUNITY_RATE_LIMIT_PER_MINUTE:-120}
+  depends_on:
+    migrate: {condition: service_completed_successfully}
+    redis: {condition: service_healthy}
+  networks: [frontend, backend]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: [/tmp]
+  expose: ["8080"]
+  healthcheck:
+    test: [CMD, /community-server, healthcheck]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 10s
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck: {test: [CMD-SHELL, "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"], interval: 5s, timeout: 3s, retries: 20}
+    networks: [backend]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
+    volumes: ["redis-data:/data"]
+    healthcheck: {test: [CMD, redis-cli, ping], interval: 5s, timeout: 3s, retries: 20}
+    networks: [backend]
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: [migrate]
+    environment:
+      <<: *app-env
+      COMMUNITY_ROLE: api
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [backend]
+    healthcheck: {disable: true}
+
+  api:
+    <<: *app
+    environment: {<<: *app-env, COMMUNITY_ROLE: api}
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      COMMUNITY_DOMAIN: ${COMMUNITY_DOMAIN:?COMMUNITY_DOMAIN is required}
+      COMMUNITY_ACME_EMAIL: ${COMMUNITY_ACME_EMAIL:?COMMUNITY_ACME_EMAIL is required}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports: ["80:80", "443:443", "443:443/udp", "127.0.0.1:8080:8080"]
+    depends_on:
+      api: {condition: service_healthy}
+    networks:
+      frontend:
+        ipv4_address: 172.30.0.2
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: [CMD, wget, --quiet, --spider, "http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  matchmaker:
+    <<: *app
+    environment: {<<: *app-env, COMMUNITY_ROLE: matchmaker}
+    networks: [backend]
+
+  worker:
+    <<: *app
+    environment: {<<: *app-env, COMMUNITY_ROLE: worker}
+    networks: [backend]
+
+  backup:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:?POSTGRES_DB is required}
+      PGUSER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes: ["./deploy/backup.sh:/backup.sh:ro", "./backups:/backups"]
+    entrypoint: [/bin/sh, /backup.sh]
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [backend]
+
+volumes: {postgres-data: {}, redis-data: {}, caddy-data: {}, caddy-config: {}}
+networks:
+  frontend:
+    ipam:
+      config: [{subnet: 172.30.0.0/24}]
+  backend: {internal: true}

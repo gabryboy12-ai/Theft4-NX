@@ -1,0 +1,173 @@
+#include "theft4_boot.h"
+#include "gta4_installer.h"
+#include <rex/logging.h>
+#include <rex/diagnostics/policy.h>
+#include <rex/system/xmemory.h>
+#include <rex/system/function_dispatcher.h>
+#include <rex/system/xex_module.h>
+#include <rex/runtime.h>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <fstream>
+#include <string_view>
+#include <vector>
+
+static void WriteImportMessage(char* message, size_t capacity, const std::string& value) {
+    if (message && capacity) std::snprintf(message, capacity, "%s", value.c_str());
+}
+
+int theft4_install_title_update(const char* game_directory, const char* update_source,
+                                char* message, size_t message_capacity) {
+    if (!game_directory || !update_source) {
+        WriteImportMessage(message, message_capacity, "No title update was selected.");
+        return 2;
+    }
+    try {
+        const auto result = gta4::install::InstallTitleUpdate(game_directory, update_source);
+        WriteImportMessage(message, message_capacity,
+            result.success ? "Title Update 8 installed and verified." : result.error);
+        return result.success ? 0 : 1;
+    } catch (const std::exception& error) {
+        WriteImportMessage(message, message_capacity,
+            std::string("The title update could not be installed: ") + error.what());
+        return 1;
+    }
+}
+
+int theft4_validate_base_game(const char* game_directory, char* message,
+                              size_t message_capacity) {
+    if (!game_directory) {
+        WriteImportMessage(message, message_capacity, "No game directory is available.");
+        return 2;
+    }
+    try {
+        const auto inspection = gta4::install::InspectGameSource(game_directory);
+        if (inspection.supported()) {
+            WriteImportMessage(message, message_capacity,
+                "GTA IV USA retail base verified. Select the matching title update.");
+            return 0;
+        }
+        WriteImportMessage(message, message_capacity,
+            inspection.rejection_reason.empty() ? "The transferred base game is not supported."
+                                                : inspection.rejection_reason);
+        return 1;
+    } catch (const std::exception& error) {
+        WriteImportMessage(message, message_capacity,
+            std::string("The transferred base game could not be checked: ") + error.what());
+        return 1;
+    }
+}
+
+int theft4_validate_installed_game(const char* game_directory, char* message,
+                                   size_t message_capacity) {
+    if (!game_directory) {
+        WriteImportMessage(message, message_capacity, "No game directory is available.");
+        return 2;
+    }
+    try {
+        std::string reason;
+        const bool ready = gta4::install::IsInstallReady(game_directory, &reason);
+        WriteImportMessage(message, message_capacity,
+            ready ? "GTA IV and Title Update 8 are verified." : reason);
+        return ready ? 0 : 1;
+    } catch (const std::exception& error) {
+        WriteImportMessage(message, message_capacity,
+            std::string("The installed game could not be checked: ") + error.what());
+        return 1;
+    }
+}
+
+int theft4_configure_boot_diagnostics(void) {
+    const char* enabled = std::getenv("THEFT4_DIAGNOSTICS");
+    const bool detailed = enabled && std::string_view(enabled) == "1";
+#ifdef THEFT4_LAB_BUILD
+    // Keep the bounded profiler available for the graph's manual capture
+    // gesture. Detailed collection remains dormant until the user arms it.
+    return rex::diagnostics::Configure(
+               true,
+               detailed
+                   ? "logging,transition,audio,vulkan,presenter,guest-hooks,native-profiler"
+                   : "logging,native-profiler")
+               ? 0
+               : 1;
+#endif
+    return rex::diagnostics::Configure(
+               true, detailed ? "logging,transition,audio,vulkan,presenter,guest-hooks"
+                              : "logging")
+               ? 0
+               : 1;
+}
+
+static std::vector<uint8_t> ReadExecutable(const std::filesystem::path& path) {
+    const auto size = std::filesystem::file_size(path);
+    if (size < sizeof(rex::xex2_header) || size > 64 * 1024 * 1024)
+        throw std::runtime_error("Invalid executable size");
+    std::vector<uint8_t> bytes(size);
+    std::ifstream file(path, std::ios::binary);
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), bytes.size()))
+        throw std::runtime_error("Cannot read executable from app sandbox");
+    return bytes;
+}
+
+int theft4_prepare_game(const char* game_directory, const char* support_directory,
+                       theft4_boot_event_fn event, void* context) {
+    static std::atomic_flag running = ATOMIC_FLAG_INIT;
+    if (!game_directory || !support_directory || !event || running.test_and_set()) return 2;
+    struct Clear { ~Clear() { running.clear(); } } clear;
+    int status = 1;
+    try {
+        const std::filesystem::path support(support_directory);
+        const auto log_path = (support / "runtime.log").string();
+        rex::LogConfig logging;
+        logging.log_file = log_path.c_str();
+        logging.log_to_console = true;
+        rex::InitLogging(logging);
+        event(context, "Checking installed game and TU8");
+        std::string reason;
+        if (!gta4::install::IsInstallReady(game_directory, &reason)) {
+            event(context, reason.c_str());
+        } else {
+            event(context, "Game and TU8 verified on this device");
+            event(context, "Initializing Xbox runtime, memory, and filesystem");
+            const std::filesystem::path game(game_directory);
+            rex::Runtime runtime(game, support / "user", game / "update", support / "cache",
+                                 {}, support / "marketplace", support / "saves");
+            rex::RuntimeConfig config;
+            config.tool_mode = true;
+            if (runtime.Setup(std::move(config)) == 0) {
+                event(context, "Runtime and kernel host worker initialized; loading executable");
+                // The existing XEX loader deliberately splits data loading /
+                // patching from LoadContinue (kernel import resolution). Do
+                // the former here; LoadContinue still requires the full HLE
+                // export modules, not just the initialized KernelState.
+                rex::runtime::XexModule base(runtime.function_dispatcher(), runtime.kernel_state());
+                rex::runtime::XexModule patch(runtime.function_dispatcher(), runtime.kernel_state());
+                const auto base_bytes = ReadExecutable(std::filesystem::path(game_directory) / "default.xex");
+                const auto patch_bytes = ReadExecutable(std::filesystem::path(game_directory) / "default.xexp");
+                if (!base.Load("default.xex", "game:/default.xex", base_bytes.data(), base_bytes.size()))
+                    throw std::runtime_error("Xbox executable data load failed");
+                event(context, "Xbox executable loaded; applying TU8 in memory");
+                if (!patch.Load("default.xexp", "game:/default.xexp", patch_bytes.data(), patch_bytes.size()))
+                    throw std::runtime_error("Xbox title update load failed");
+                const int patch_status = patch.ApplyPatch(&base);
+                if (patch_status != 0)
+                    throw std::runtime_error("Xbox title update application failed: " + std::to_string(patch_status));
+                const auto* info = base.opt_execution_info();
+                if (!info || info->version_value != 0x00000805 || !base.is_valid_executable())
+                    throw std::runtime_error("Patched Xbox executable verification failed");
+                event(context, "TU8 loaded in the runtime; HLE exports and graphics still required before game execution");
+                status = 0;
+            } else {
+                event(context, "Xbox runtime initialization failed; see runtime log");
+            }
+        }
+    } catch (const std::exception& error) {
+        event(context, error.what());
+    }
+    rex::ShutdownLogging();
+    if (status == 0)
+        event(context, "Runtime initialized and TU8 loaded successfully; stopped before game execution");
+    return status;
+}

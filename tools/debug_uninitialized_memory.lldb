@@ -1,0 +1,77 @@
+# LLDB Debug Script: Uninitialized Memory in Bump Allocator
+# Usage: lldb -s debug_uninitialized_memory.lldb -- ./LibertyRecomp
+#
+# This script traces AllocPhysical returns to verify uninitialized memory hypothesis
+
+# =============================================================================
+# BREAKPOINT 1: AllocPhysical Return (line 262 in heap.cpp)
+# =============================================================================
+# Set breakpoint at the return statement of AllocPhysical
+breakpoint set --file heap.cpp --line 262
+
+# When hit, dump the returned memory
+breakpoint command add 1 --script-type python --one-liner 'frame = lldb.frame; ptr = frame.FindVariable("ptr").GetValueAsUnsigned(); size = frame.FindVariable("size").GetValueAsUnsigned(); print(f"\\n[ALLOC] AllocPhysical returning ptr=0x{ptr:X} size={size}"); lldb.process.ReadMemory(ptr, min(256, size), lldb.SBError()) if ptr else None; lldb.thread.GetProcess().Continue()'
+
+# =============================================================================
+# BREAKPOINT 2: GuestTexture Allocation (video.cpp:3929)
+# =============================================================================
+breakpoint set --file video.cpp --line 3929
+breakpoint command add 2 --script-type python --one-liner 'print("\\n[TEXTURE] Creating GuestTexture"); lldb.thread.GetProcess().Continue()'
+
+# =============================================================================
+# BREAKPOINT 3: GuestSurface Allocation (video.cpp:4068)
+# =============================================================================
+breakpoint set --file video.cpp --line 4068
+breakpoint command add 3 --script-type python --one-liner 'print("\\n[SURFACE] Creating GuestSurface"); lldb.thread.GetProcess().Continue()'
+
+# =============================================================================
+# BREAKPOINT 4: GuestDevice Allocation with memset (video.cpp:2573)
+# =============================================================================
+breakpoint set --file video.cpp --line 2573
+breakpoint command add 4 --script-type python --one-liner 'print("\\n[DEVICE] Creating GuestDevice (with memset)"); lldb.thread.GetProcess().Continue()'
+
+# =============================================================================
+# WATCHPOINT: Monitor corruption destination 0xBA000000
+# =============================================================================
+# This requires translating guest address to host address first
+# Run: (lldb) p g_memory.Translate(0xBA000000)
+# Then: watchpoint set expression -- *(uint32_t*)<host_address>
+
+# =============================================================================
+# BREAKPOINT 5: Hash table infinite loop detection (sub_82802540)
+# =============================================================================
+# Note: Need to find the actual function address in the recompiled binary
+# The infinite loop is in the while(1) at line 2587562 of the XEX decompile
+
+# =============================================================================
+# Helper Commands
+# =============================================================================
+
+# Command to dump physical heap statistics
+command alias heap_stats expression -l c++ -- printf("Bump used: %zu bytes\\n", s_physBumpUsed)
+
+# Command to check memory at guest address
+# Usage: guest_mem 0xBA000000
+command regex guest_mem 's/(.+)/expression -l c++ -- { void* p = g_memory.Translate(%1); printf("Guest 0x%X -> Host %p\\n", %1, p); if(p) { uint32_t* u = (uint32_t*)p; printf("  [0x00]: 0x%08X\\n  [0x04]: 0x%08X\\n  [0x08]: 0x%08X\\n  [0x0C]: 0x%08X\\n", u[0], u[1], u[2], u[3]); } }/'
+
+# Command to check if address is in physical heap
+command regex in_phys_heap 's/(.+)/expression -l c++ -- printf("0x%X: %s physical heap\\n", %1, (%1 >= 0xA0000000 && %1 < 0x100000000) ? "IN" : "NOT in")/'
+
+# Print helper info
+script print("\\n" + "="*60)
+script print("UNINITIALIZED MEMORY DEBUG SESSION")
+script print("="*60)
+script print("Breakpoints set:")
+script print("  1. AllocPhysical return (heap.cpp:262)")
+script print("  2. GuestTexture creation (video.cpp:3929)")
+script print("  3. GuestSurface creation (video.cpp:4068)")
+script print("  4. GuestDevice creation (video.cpp:2573)")
+script print("")
+script print("Commands available:")
+script print("  heap_stats    - Show bump allocator usage")
+script print("  guest_mem <addr> - Dump memory at guest address")
+script print("  in_phys_heap <addr> - Check if address is in physical heap")
+script print("="*60 + "\\n")
+
+# Run the program
+run

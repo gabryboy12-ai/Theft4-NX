@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "terminal": {
+      "command": "node",
+      "args": ["/Users/Ozordi/Downloads/LibertyRecomp/tools/terminal-mcp-server/dist/index.js"]
+    }
+  }
+}
