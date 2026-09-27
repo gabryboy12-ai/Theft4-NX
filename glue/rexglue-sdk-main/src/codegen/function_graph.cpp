@@ -3,6 +3,7 @@
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
+ * @copyright   share_registers: Copyright (c) 2026 StevensND (nfsmw-nx), BSD 3-Clause
  *
  * @license     BSD 3-Clause License
  *              See LICENSE file in the project root for full license text.
@@ -1155,6 +1156,82 @@ bool FunctionGraph::isVacant(uint32_t fromAddr, uint32_t targetAddr) const {
 
   // green light for vacancy
   return true;
+}
+
+size_t FunctionGraph::markFuncletRegisterSharing() {
+  // MSVC compiles __finally / __except bodies as funclets that run on the
+  // owner's frame with its non-volatiles still live, and reaches an inline one
+  // by bl from the middle of the owner. Localizing the funclet's copies hands it
+  // a zero. The scope table names each funclet, which is the only reliable way
+  // to tell one from a real function: every prologue reads its non-volatiles in
+  // order to spill them, so "reads before writes" cannot distinguish them. C++
+  // EH cleanup and catch funclets run the same way, so they are claimed too. The
+  // owner stays localized and syncs across the call site instead, so it keeps
+  // its isolation from its own callers.
+  std::vector<std::pair<uint32_t, uint32_t>> ranges;  // funclet [base, end)
+
+  for (auto& entry : functions_) {
+    auto& node = entry.second;
+    if (!node->hasExceptionInfo())
+      continue;
+
+    auto claim = [&](uint32_t addr) {
+      auto it = addr ? functions_.find(addr) : functions_.end();
+      if (it == functions_.end())
+        return;
+      ranges.emplace_back(it->second->base(), it->second->end());
+    };
+
+    if (const auto* seh = node->exceptionInfo()->asSeh()) {
+      for (const auto& scope : seh->scopes) {
+        claim(scope.handler);
+        claim(scope.filter);
+      }
+    } else if (const auto* cxx = node->exceptionInfo()->asCxx()) {
+      for (const auto& entry : cxx->unwindMap) {
+        claim(entry.action);
+      }
+      for (const auto& tryBlock : cxx->tryBlocks) {
+        for (const auto& handler : tryBlock.handlers) {
+          claim(handler.handlerAddress);
+        }
+      }
+    }
+  }
+
+  if (ranges.empty())
+    return 0;
+
+  std::sort(ranges.begin(), ranges.end());
+  size_t out = 0;
+  for (size_t i = 1; i < ranges.size(); ++i) {
+    if (ranges[i].first <= ranges[out].second) {
+      ranges[out].second = std::max(ranges[out].second, ranges[i].second);
+    } else {
+      ranges[++out] = ranges[i];
+    }
+  }
+  ranges.resize(out + 1);
+
+  auto insideFunclet = [&](uint32_t addr) {
+    auto it = std::upper_bound(
+        ranges.begin(), ranges.end(), addr,
+        [](uint32_t a, const std::pair<uint32_t, uint32_t>& r) { return a < r.first; });
+    return it != ranges.begin() && addr < (--it)->second;
+  };
+
+  // A funclet compiled with both an unwind entry and an inline bl entry lands in
+  // the graph as two nodes sharing one tail. The scope table names only the
+  // first, so sweep the extent for the rest.
+  size_t marked = 0;
+  for (const auto& [base, node] : functions_) {
+    if (insideFunclet(base) && !node->sharesRegisters()) {
+      node->setSharesRegisters(true);
+      ++marked;
+    }
+  }
+
+  return marked;
 }
 
 bool FunctionGraph::isMergeableEntryPoint(uint32_t addr) const {

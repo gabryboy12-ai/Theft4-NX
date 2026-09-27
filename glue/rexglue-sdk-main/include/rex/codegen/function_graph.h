@@ -4,6 +4,7 @@
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
+ * @copyright   share_registers: Copyright (c) 2026 StevensND (nfsmw-nx), BSD 3-Clause
  *
  * @license     BSD 3-Clause License
  *              See LICENSE file in the project root for full license text.
@@ -174,6 +175,10 @@ class FunctionGraph {
 
   // Check if target is a mergeable entry point (DISCOVERED with xrefs)
   bool isMergeableEntryPoint(uint32_t addr) const;
+
+  // Flag every SEH / C++ EH funclet as register-sharing. Run after discovery,
+  // once funclet extents are known. Returns the number flagged. (nfsmw-nx)
+  size_t markFuncletRegisterSharing();
 
   //=========================================================================
   // Target Classification (for code generation)

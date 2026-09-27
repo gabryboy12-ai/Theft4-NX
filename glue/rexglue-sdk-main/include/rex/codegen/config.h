@@ -4,6 +4,7 @@
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
+ * @copyright   share_registers: Copyright (c) 2026 StevensND (nfsmw-nx), BSD 3-Clause
  *
  * @license     BSD 3-Clause License
  *              See LICENSE file in the project root for full license text.
@@ -47,6 +48,11 @@ struct FunctionConfig {
   uint32_t end = 0;     // End address, exclusive (mutually exclusive with size)
   std::string name;     // Custom symbol name (empty = auto-generate sub_XXXXXXXX)
   uint32_t parent = 0;  // Parent function address (0 = standalone, non-zero = chunk)
+  // Keep non-volatiles in ctx instead of localizing them. Marks an MSVC SEH
+  // funclet, or a fragment the analyzer split off its owner, which reads the
+  // registers its owner left live and would see a zero from a local. Callers
+  // sync their localized copies across the call site. (nfsmw-nx)
+  bool shareRegisters = false;
 
   // Get effective size (prefers size over end)
   uint32_t getSize(uint32_t address) const {

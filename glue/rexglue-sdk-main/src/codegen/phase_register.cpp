@@ -4,6 +4,7 @@
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
+ * @copyright   share_registers: Copyright (c) 2026 StevensND (nfsmw-nx), BSD 3-Clause
  *
  * @license     BSD 3-Clause License
  *              See LICENSE file in the project root for full license text.
@@ -550,7 +551,10 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
   for (const auto& [address, cfg] : config.functions) {
     uint32_t size = cfg.getSize(address);
     std::string name = cfg.name.empty() ? fmt::format("sub_{:08X}", address) : cfg.name;
-    graph.addFunction(address, size, FunctionAuthority::CONFIG, true);
+    auto* node = graph.addFunction(address, size, FunctionAuthority::CONFIG, true);
+    if (node && cfg.shareRegisters) {
+      node->setSharesRegisters(true);
+    }
     graph.setFunctionName(address, name);
     configFuncs++;
 

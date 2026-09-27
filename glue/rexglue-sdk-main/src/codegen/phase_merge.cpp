@@ -4,6 +4,7 @@
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
+ * @copyright   share_registers: Copyright (c) 2026 StevensND (nfsmw-nx), BSD 3-Clause
  *
  * @license     BSD 3-Clause License
  *              See LICENSE file in the project root for full license text.
@@ -66,6 +67,11 @@ void mergeAndSeal(CodegenContext& ctx) {
 
     if (changesThisIteration == 0)
       break;
+  }
+
+  size_t sharedRegs = graph.markFuncletRegisterSharing();
+  if (sharedRegs > 0) {
+    REXCODEGEN_DEBUG("Analyze: {} functions share registers with an SEH funclet", sharedRegs);
   }
 
   size_t totalSealed = graph.sealAllReady();

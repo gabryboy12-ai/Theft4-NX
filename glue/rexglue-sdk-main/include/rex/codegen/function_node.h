@@ -4,6 +4,7 @@
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
+ * @copyright   share_registers: Copyright (c) 2026 StevensND (nfsmw-nx), BSD 3-Clause
  *
  * @license     BSD 3-Clause License
  *              See LICENSE file in the project root for full license text.
@@ -139,6 +140,12 @@ class FunctionNode {
   const std::optional<ExceptionInfo>& exceptionInfo() const { return exceptionInfo_; }
   bool hasExceptionInfo() const { return exceptionInfo_.has_value() && exceptionInfo_->hasInfo(); }
 
+  // This is an SEH funclet (or a split fragment marked share_registers):
+  // non-volatiles stay in ctx so it sees what its owner left live, and callers
+  // sync their localized copies around the call.
+  bool sharesRegisters() const { return sharesRegisters_; }
+  void setSharesRegisters(bool val) { sharesRegisters_ = val; }
+
   void setName(std::string name) { name_ = std::move(name); }
 
  private:
@@ -195,6 +202,7 @@ class FunctionNode {
   std::vector<UnresolvedJump> unresolvedJumps_;
 
   std::optional<ExceptionInfo> exceptionInfo_;
+  bool sharesRegisters_ = false;
 
   // Computed at seal()
   std::optional<FunctionAnalysis> analysis_;

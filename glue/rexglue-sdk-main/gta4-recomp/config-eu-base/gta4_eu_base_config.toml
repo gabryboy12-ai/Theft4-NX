@@ -3,14 +3,19 @@
 # of gta4_config.toml. No [rexcrt], no [functions], no hooks: every address in
 # gta4_config.toml belongs to the USA v8 (0.0.8.5) image.
 
+# Registers as C++ locals, as nfsmw-nx ships them (docs/switch-port/08-nfsmw-nx.md
+# section 4): cr fields, ctr, xer and r14-r31/f14-f31/v14-v31,v64-v127. Not
+# non_argument_as_local (breaks the r12 convention of __savevmx) nor skip_lr.
+# Fragments that read those registers before writing them are marked
+# share_registers below (tools/switch-codegen/read_before_write.py).
 skip_lr = false
-ctr_as_local = false
-xer_as_local = false
+ctr_as_local = true
+xer_as_local = true
 reserved_as_local = false
 skip_msr = false
-cr_as_local = false
+cr_as_local = true
 non_argument_as_local = false
-non_volatile_as_local = false
+non_volatile_as_local = true
 
 [analysis]
 max_jump_extension = 65536
@@ -25,3 +30,13 @@ large_function_threshold = 1048576
 "0x82A05828" = {}   # b from 0x8274D070; USA v8 0x82A77E28 (tail-call thunk)
 "0x82518A40" = {}   # b from 0x82234E08; USA v8 0x824FF7C0 (found by the USA analysis)
 "0x826EA240" = {}   # b from 0x826EA2F4; USA equivalent ambiguous (repetitive code)
+
+# Fragments that read registers their owner left live (registers as locals).
+# Found by tools/switch-codegen/read_before_write.py after a generation with
+# registers as locals; 0x829A88C0 (r30 ^ r30, a zeroing idiom) is a false
+# positive and is not marked.
+"0x8299BD94" = { share_registers = true }   # reads r25 before writing
+"0x829A83F4" = { share_registers = true }   # reads v64 v65 before writing
+"0x829A8C50" = { share_registers = true }   # reads r30 v64 v65 before writing
+"0x829AAE00" = { share_registers = true }   # reads r31 before writing
+"0x829AB658" = { share_registers = true }   # reads r31 before writing

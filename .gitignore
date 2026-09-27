@@ -805,3 +805,6 @@ tools/GTAIV.EFLC.FusionFix-master/
 LibertyRecomp/gpu/shader/**/*.spv
 LibertyRecomp/gpu/shader/**/*.ir
 LibertyRecomp/gpu/shader/**/*.metallib
+
+# Theft4-NX: codegen post-passes for the Switch build (docs/switch-port/08-nfsmw-nx.md).
+!/tools/switch-codegen/*.py
