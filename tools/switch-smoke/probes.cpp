@@ -1516,6 +1516,7 @@ struct T11Block {
   u8* backing = nullptr;
   u8* shadow = nullptr;
   bool moved = false;
+  bool from_pool = false;  // a slot of one big allocation: not freed on its own
 };
 
 // A view mapped with svcMapProcessMemory, kept for the unmap.
@@ -1564,7 +1565,9 @@ int T11Release(Handle process, std::vector<T11View>& views, std::vector<T11Block
       }
       b.moved = false;
     }
-    std::free(b.backing);
+    if (!b.from_pool) {
+      std::free(b.backing);
+    }
     b.backing = nullptr;
   }
   blocks.clear();
@@ -1831,6 +1834,21 @@ void T11ModelD(Handle process) {
   // Heap kept aside so that logging and cleanup still have memory when the
   // backing allocations exhaust the heap.
   void* reserve = std::malloc(32u << 20);
+
+  // Backing from ONE aligned allocation, as memory_switch.cpp's guest pool:
+  // the largest the heap gives, searched down from 3 GiB in 64 MiB steps.
+  // (Run 8 took one aligned_alloc(2 MiB) per block and stopped at 1542 MiB:
+  // newlib's memalign leaves almost 2 MiB unusable in front of each block.)
+  u8* pool = nullptr;
+  u64 pool_blocks = 0;
+  for (u64 mib = kMaxBlocks * 2; mib >= 64 && !pool; mib -= 64) {
+    pool = static_cast<u8*>(std::aligned_alloc(k2MiB, mib << 20));
+    pool_blocks = pool ? mib / 2 : 0;
+  }
+  const auto runtime_pool = rex::memory::nx::GetGuestArenaStats();
+  SMOKE_INFO("T11.2 pool: largest single aligned allocation %" PRIu64
+             " MiB (the runtime's guest pool holds another %zu MiB)",
+             pool_blocks * 2, runtime_pool.pool_blocks * 2);
   std::vector<T11Block> blocks;
   std::vector<T11View> views;
   blocks.reserve(kMaxBlocks);
@@ -1864,11 +1882,13 @@ void T11ModelD(Handle process) {
       SMOKE_INFO("T11.2 about to commit block %" PRIu64 " and map its views", k);
     }
     T11Block b;
-    b.backing = static_cast<u8*>(std::aligned_alloc(k2MiB, k2MiB));
-    if (!b.backing) {
-      stop = "heap exhausted (aligned_alloc), not a kernel refusal";
+    if (k >= pool_blocks) {
+      stop = "pool exhausted (" + std::to_string(pool_blocks * 2) +
+             " MiB, the whole heap left), not a kernel refusal";
       break;
     }
+    b.backing = pool + k * k2MiB;
+    b.from_pool = true;
     const u64 t0 = armGetSystemTick();
     Result rc = T11Commit(process, b, shadows + k * k2MiB);
     const u64 t1 = armGetSystemTick();
@@ -1956,6 +1976,9 @@ void T11ModelD(Handle process) {
   const u64 t0 = armGetSystemTick();
   const int failed = T11Release(process, views, blocks);
   SMOKE_INFO("T11.2 release in %.1f ms: %d failures", TicksToMs(armGetSystemTick() - t0), failed);
+  if (!failed) {
+    std::free(pool);  // a slot still moved would keep part of it locked
+  }
   std::free(reserve);
   if (!failed) {
     for (auto& [r, base] : extra_windows) {

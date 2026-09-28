@@ -83,6 +83,7 @@ extern "C" char _start;
 int main(int argc, char** argv);
 
 REXCVAR_DECLARE(bool, nx_memory_trace);
+REXCVAR_DECLARE(int32_t, nx_guest_pool_mib);
 
 namespace {
 
@@ -275,10 +276,12 @@ std::unique_ptr<rex::memory::Memory> g_memory;
 rex::memory::nx::GuestArenaStats LogArenaStats(const char* when) {
   const auto stats = rex::memory::nx::GetGuestArenaStats();
   SMOKE_INFO("  arena %s: %zu blocks mapped (%zu MiB, peak %zu), %zu pages committed "
-             "(%zu references), %" PRIu64 " maps / %" PRIu64 " unmaps, %.2f ms in the map SVCs",
+             "(%zu references), %" PRIu64 " maps / %" PRIu64 " unmaps, %.2f ms in the map SVCs; "
+             "pool %zu/%zu blocks free",
              when, stats.mapped_blocks, stats.mapped_blocks * 2, stats.peak_mapped_blocks,
              stats.committed_pages, stats.page_references, stats.map_calls, stats.unmap_calls,
-             double(armTicksToNs(stats.map_ticks)) / 1e6);
+             double(armTicksToNs(stats.map_ticks)) / 1e6, stats.pool_free_blocks,
+             stats.pool_blocks);
   return stats;
 }
 
@@ -507,6 +510,14 @@ bool WriteRead32(const char* label, void* write_host, void* read_host, uint32_t 
 void StepGuestMemory() {
   SMOKE_INFO("step 3 guest memory: rex::memory::Memory::Initialize (runtime path, model A: table)");
   ScopedMemoryTrace trace;
+  // The guest pool takes its heap once, up front (memory_switch.cpp). The
+  // game's 1536 MiB default would leave the probes too little heap (T5, T8,
+  // T11.2 measure with the rest), so the smoke uses 256 MiB unless
+  // smoke.toml sets nx_guest_pool_mib.
+  if (REXCVAR_GET(nx_guest_pool_mib) == 1536) {
+    REXCVAR_SET(nx_guest_pool_mib, 256);
+  }
+  SMOKE_INFO("  guest pool: nx_guest_pool_mib = %d", int(REXCVAR_GET(nx_guest_pool_mib)));
   g_memory = std::make_unique<rex::memory::Memory>();
   SMOKE_INFO("  about to Memory::Initialize");
   if (!g_memory->Initialize()) {

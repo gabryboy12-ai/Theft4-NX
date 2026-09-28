@@ -18,14 +18,18 @@
  *   applies). rex_guest_table[addr >> 24] holds, per 16 MiB slice, the host
  *   address of guest 0 for that slice: host = addr + rex_guest_table[addr >> 24].
  *
- * - Backing is committed on demand in 2 MiB blocks: a block taken with
- *   aligned_alloc from the heap is moved to its arena offset with
- *   svcMapProcessCodeMemory and made RW with svcSetProcessMemoryPermission.
+ * - Backing is committed on demand in 2 MiB blocks: a free 2 MiB slot of the
+ *   guest pool is moved to its arena offset with svcMapProcessCodeMemory and
+ *   made RW with svcSetProcessMemoryPermission. The pool is ONE aligned_alloc
+ *   taken when the arena is reserved (cvar nx_guest_pool_mib): one 2 MiB
+ *   aligned_alloc per block wastes almost 2 MiB in front of each one with
+ *   newlib's memalign, and stopped at 1542 MiB of a 3189 MiB pool in
+ *   switch-smoke T11.2 (docs/switch-port/03-memory.md section 13).
  *   Every 4 KiB host page carries a reference count: xmemory.cpp commits and
  *   decommits one reference per heap page transition (the physical heap and
  *   the 0xA/0xC/0xE window heaps, and the 0x80/0x90 XEX heaps, share host
  *   pages). A block is moved back to the heap and freed when none of its
- *   pages is referenced.
+ *   pages is referenced; its slot goes back to the pool.
  *
  * - Protection: svcSetMemoryPermission, 4 KiB granularity, on mapped blocks
  *   only. Unmapped blocks have no pages to protect. svcSetProcessMemoryPermission
@@ -78,6 +82,15 @@ uint8_t* rex_guest_physical_base;
 
 // Every commit and protect goes through here in the game, so the trace (one
 // sink call per SVC) stays off unless asked for.
+// Default 1536 MiB = 768 blocks: guest physical memory (512 MiB) plus about
+// 1 GiB of virtual heaps and XEX, the upper end of the game's estimate
+// (03-memory.md section 3), and about 1.5 GiB of the ~3.1 GiB heap left for
+// the runtime, Vulkan/Mesa, the shader caches and audio (the margin the model
+// decision asked for).
+REXCVAR_DEFINE_INT32(nx_guest_pool_mib, 1536, "Memory",
+                     "Switch: MiB of heap taken once when the guest arena is reserved, from "
+                     "which the 2 MiB guest blocks are handed out (rounded to 2 MiB)");
+
 REXCVAR_DEFINE_BOOL(nx_memory_trace, false, "Memory",
                     "Switch: send every guest-arena SVC and its Result to the memory trace sink "
                     "(diagnostics only; slow when the sink writes to storage)");
@@ -98,7 +111,7 @@ constexpr uint64_t kArenaSize = kVirtualSpan + kPhysicalSpan;
 constexpr size_t kArenaBlocks = kArenaSize / kNxBlockSize;
 
 struct Block {
-  void* source = nullptr;      // aligned_alloc'd heap memory while moved into the arena
+  void* source = nullptr;      // pool slot while moved into the arena
   uint16_t referenced = 0;     // pages of this block with a non-zero reference count
 };
 
@@ -109,6 +122,8 @@ struct Arena {
   Handle process = INVALID_HANDLE;
   std::vector<uint16_t> page_refs;  // one per 4 KiB page of the arena
   std::vector<Block> blocks;
+  uint8_t* pool = nullptr;             // one aligned_alloc, 2 MiB slots
+  std::vector<uint32_t> free_slots;    // stack of free slot indices
   nx::GuestArenaStats stats;
 };
 
@@ -184,18 +199,28 @@ uint8_t* BlockAddress(size_t block) {
   return g_arena.base + block * kNxBlockSize;
 }
 
-// Moves a zeroed 2 MiB heap block to its arena offset and makes it RW.
+void ReleaseSlot(void* source) {
+  g_arena.free_slots.push_back(
+      uint32_t((static_cast<uint8_t*>(source) - g_arena.pool) / kNxBlockSize));
+  g_arena.stats.pool_free_blocks = g_arena.free_slots.size();
+}
+
+// Moves a zeroed 2 MiB pool slot to its arena offset and makes it RW.
 // Caller holds g_arena.mutex.
 bool MapBlock(size_t block) {
   Block& b = g_arena.blocks[block];
-  void* source = std::aligned_alloc(kNxBlockSize, kNxBlockSize);
-  if (!source) {
-    REXSYS_ERROR("memory_switch: aligned_alloc(2 MiB) failed for arena block {} ({} mapped)",
-                 block, g_arena.stats.mapped_blocks);
-    TraceMemory("MapBlock %zu: aligned_alloc(2 MiB) failed (%zu blocks mapped)", block,
-                g_arena.stats.mapped_blocks);
+  if (g_arena.free_slots.empty()) {
+    REXSYS_ERROR(
+        "memory_switch: guest pool exhausted: all {} blocks ({} MiB) in use, arena block {} "
+        "refused; raise the cvar nx_guest_pool_mib",
+        g_arena.stats.pool_blocks, g_arena.stats.pool_blocks * 2, block);
+    TraceMemory("MapBlock %zu: guest pool exhausted (%zu blocks)", block,
+                g_arena.stats.pool_blocks);
     return false;
   }
+  void* source = g_arena.pool + size_t(g_arena.free_slots.back()) * kNxBlockSize;
+  g_arena.free_slots.pop_back();
+  g_arena.stats.pool_free_blocks = g_arena.free_slots.size();
   std::memset(source, 0, kNxBlockSize);
   const u64 dst = reinterpret_cast<u64>(BlockAddress(block));
   // Only the two SVCs are timed: the trace sink may write to storage.
@@ -223,7 +248,7 @@ bool MapBlock(size_t block) {
     REXSYS_ERROR("memory_switch: svcMapProcessCodeMemory block {} rc=0x{:x}", block, rc);
   }
   if (R_FAILED(rc)) {
-    std::free(source);
+    ReleaseSlot(source);
     return false;
   }
   g_arena.stats.map_ticks += svc_ticks;
@@ -271,7 +296,7 @@ bool SetArenaPermission(uint8_t* address, size_t length, uint32_t perm) {
   return ok;
 }
 
-// Moves a block back to the heap and frees it. Caller holds g_arena.mutex.
+// Moves a block back to its pool slot. Caller holds g_arena.mutex.
 void UnmapBlock(size_t block) {
   Block& b = g_arena.blocks[block];
   const u64 dst = reinterpret_cast<u64>(BlockAddress(block));
@@ -282,13 +307,13 @@ void UnmapBlock(size_t block) {
   TraceMemory("UnmapBlock %zu: svcUnmapProcessCodeMemory(dst 0x%lx, src %p) rc=0x%x", block, dst,
               b.source, rc);
   if (R_FAILED(rc)) {
-    // The source stays moved: it must not go back to malloc. Keep the block
-    // mapped so a later commit can reuse it.
+    // The source stays moved: its slot must not be handed out again. Keep
+    // the block mapped so a later commit can reuse it.
     REXSYS_ERROR("memory_switch: svcUnmapProcessCodeMemory block {} rc=0x{:x}; block kept",
                  block, rc);
     return;
   }
-  std::free(b.source);
+  ReleaseSlot(b.source);
   b.source = nullptr;
   --g_arena.stats.mapped_blocks;
   ++g_arena.stats.unmap_calls;
@@ -416,12 +441,33 @@ bool ReserveGuestArena(GuestArena* out) {
     return false;
   }
 
+  // The guest pool: one allocation for every block the game will commit.
+  const size_t pool_blocks =
+      size_t(std::max<int32_t>(REXCVAR_GET(nx_guest_pool_mib), 2)) / 2;
+  uint8_t* pool =
+      static_cast<uint8_t*>(std::aligned_alloc(kNxBlockSize, pool_blocks * kNxBlockSize));
+  if (!pool) {
+    REXSYS_ERROR("memory_switch: cannot allocate the {} MiB guest pool (cvar nx_guest_pool_mib)",
+                 pool_blocks * 2);
+    virtmemLock();
+    virtmemRemoveReservation(reservation);
+    virtmemUnlock();
+    return false;
+  }
+
   g_arena.base = base;
   g_arena.reservation = reservation;
+  g_arena.pool = pool;
+  g_arena.free_slots.resize(pool_blocks);
+  for (size_t i = 0; i < pool_blocks; ++i) {
+    g_arena.free_slots[i] = uint32_t(pool_blocks - 1 - i);  // lowest slot handed out first
+  }
   g_arena.process = process;
   g_arena.page_refs.assign(kArenaSize / kNxPageSize, 0);
   g_arena.blocks.assign(kArenaBlocks, Block{});
   g_arena.stats = {};
+  g_arena.stats.pool_blocks = pool_blocks;
+  g_arena.stats.pool_free_blocks = pool_blocks;
 
   const uint64_t v = reinterpret_cast<uint64_t>(base);
   const uint64_t p = v + kVirtualSpan;
@@ -446,9 +492,11 @@ bool ReserveGuestArena(GuestArena* out) {
   out->virtual_base = base;
   out->physical_base = base + kVirtualSpan;
   out->size = kArenaSize;
-  REXSYS_INFO("memory_switch: guest arena {}-{} (virtual {}, physical {})",
+  REXSYS_INFO("memory_switch: guest arena {}-{} (virtual {}, physical {}), guest pool {} MiB "
+              "at {}",
               static_cast<void*>(base), static_cast<void*>(base + kArenaSize - 1),
-              static_cast<void*>(base), static_cast<void*>(base + kVirtualSpan));
+              static_cast<void*>(base), static_cast<void*>(base + kVirtualSpan),
+              pool_blocks * 2, static_cast<void*>(pool));
   return true;
 }
 
@@ -485,6 +533,10 @@ void ReleaseGuestArena() {
   virtmemLock();
   virtmemRemoveReservation(g_arena.reservation);
   virtmemUnlock();
+  std::free(g_arena.pool);
+  g_arena.pool = nullptr;
+  g_arena.free_slots.clear();
+  g_arena.free_slots.shrink_to_fit();
   std::memset(rex_guest_table, 0, sizeof(rex_guest_table));
   rex_guest_virtual_base = nullptr;
   rex_guest_physical_base = nullptr;

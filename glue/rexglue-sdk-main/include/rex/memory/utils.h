@@ -176,6 +176,8 @@ struct GuestArenaStats {
   uint64_t map_calls = 0;    // cumulative
   uint64_t unmap_calls = 0;  // cumulative
   uint64_t map_ticks = 0;    // cumulative armGetSystemTick() in the two SVCs that move a block in
+  size_t pool_blocks = 0;       // 2 MiB slots of the guest pool (cvar nx_guest_pool_mib)
+  size_t pool_free_blocks = 0;  // slots not mapped into the arena
 };
 bool ReserveGuestArena(GuestArena* out);
 void ReleaseGuestArena();
