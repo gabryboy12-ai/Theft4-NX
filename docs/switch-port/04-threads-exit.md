@@ -271,3 +271,10 @@ ancora su Switch (renderer non portato): la regola è già pronta.
 - **la premessa, misurata:** due thread che fanno spin per 200 ms sullo stesso
   core. A 0x3B il secondo deve partire entro 50 ms dal primo (time-slicing);
   a 0x2C deve partire dopo almeno 150 ms, cioè quando il primo ha finito.
+
+**Run 8 (2026-09-28, `out/console-runs/run8/smoke.log`): tutto ok.** Bande e
+default (0x2C) come atteso, `set_nx_priority(0x3B)` letto 0x3B da `priority()`
+e dal thread. Spin sul core 2: a 0x3B il secondo thread parte **3 ms** dopo il
+primo, a 0x2C dopo **200 ms**, cioè alla fine del primo. La premessa dello
+schema è confermata sulla console: solo 0x3B ha il time-slicing, sopra è
+cooperativo.

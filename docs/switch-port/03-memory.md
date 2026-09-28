@@ -1,6 +1,6 @@
 # Switch port — 03: memoria guest
 
-Aggiornato: 2026-09-25 · Ramo `switch-port` · Progetto deciso e fase 1 implementata (§8–§10). Le sezioni 1–7 sono l'analisi che ha portato alla decisione.
+Aggiornato: 2026-09-28 · Ramo `switch-port` · Progetto deciso e fase 1 implementata (§8–§10). Le sezioni 1–7 sono l'analisi che ha portato alla decisione. **Confermato il 2026-09-28 contro gli alias con `svcMapProcessMemory` (modello D): §13.**
 
 Legenda: **[codice]** = verificato nei sorgenti del repo. **[HW]** = comportamento del kernel Horizon da confermare sulla console, con `switch-smoke` o con un test mirato.
 
@@ -14,7 +14,7 @@ Deciso dopo `switch-smoke` T1–T8 sulla console:
   - viene **restituito** quando non contiene più pagine guest impegnate.
 
   T8: 0,023 ms per blocco, 512 MiB in 5,86 ms, dati e atomiche corretti, nessun dato perso allo smontaggio.
-- **Nessun alias.** 0x90 → 0x80, 0x7F → fisica, e le finestre 0xA/0xC/0xE → fisica sono voci della tabella.
+- **Nessun alias.** 0x90 → 0x80, 0x7F → fisica, e le finestre 0xA/0xC/0xE → fisica sono voci della tabella. Gli alias veri con `svcMapProcessMemory` esistono (T11, run 8), ma le viste non accettano permessi propri, quindi il write-watch non potrebbe funzionare: §13.
 - **Elisione della traduzione per stack (r1) e indirizzi costanti:** è un'**ottimizzazione futura** (§7). Non è implementata.
 
 L'implementazione della fase 1 (correttezza prima delle prestazioni) è descritta in §8–§10.
@@ -642,7 +642,7 @@ Partire da **B**: costo nullo sul writeback, granularità sufficiente, nessun ca
 
 In entrambi i casi il gestore dovrà prendere il minimo di lock (vedi §10, deadlock).
 
-## 13. Tre modelli a confronto: A, nfsmw-nx, D (T11, da completare con la console)
+## 13. Tre modelli a confronto: A, nfsmw-nx, D (T11, run 8: si resta su A)
 
 Dopo la lettura di nfsmw-nx (08 §1) c'è un terzo modo di fare le finestre
 fisiche: **alias veri** con `svcMapProcessMemory`, usando come sorgente l'alias
@@ -693,28 +693,45 @@ e il +4 KiB della finestra 0xE0 è nella posizione della vista (offset fisico
    Windows/Mac con il confronto. I checksum devono coincidere: provano che le
    quattro varianti toccano gli stessi byte.
 
-### Numeri dalla console
-
-Da riempire con il run di T11:
+### Numeri dalla console (run 8, 2026-09-28, `out/console-runs/run8/smoke.log`)
 
 | Misura | Valore |
 |---|---|
-| T11.1 alias RW a tre vie, atomiche su tutte le viste | |
-| T11.1 `svcSetMemoryPermission` su una vista / sull'alias | |
-| T11.2 tempo per blocco (commit + 4 viste) | |
-| T11.2 `LimitableResource_Memory` con 512 MiB in modello D | |
-| T11.2 tetto: memoria reale, mappata, result code | |
-| T11.3 sequenziale basso: tabella / nfsmw-nx vs diretto | |
-| T11.3 sequenziale misto | |
-| T11.3 casuale basso | |
-| T11.3 casuale misto | |
+| T11.1 alias RW a tre vie, atomiche su tutte le viste | **corretto.** Scritture incrociate alias → vista 2 → vista 3 → alias e all'ultimo byte del blocco: stessa memoria. `ldaxr/stlxr` alternando le tre viste: `0x000493e0` (atteso), 0 retry. CAS: riuscito dalla vista 2, fallito (valore vecchio) dalla vista 3, l'alias legge il nuovo valore. Tre thread su tre core, uno per vista, 100.000 somme ciascuno: `0x000493e0000493e0` (atteso), 440.287 retry |
+| T11.1 `svcSetMemoryPermission` su una vista / sull'alias | **vista: rifiutato**, `0xD401` (2001-0106, `InvalidCurrentMemory`); la vista resta `type=0x0f RW-`. **Alias: accettato** (`R--`), ma la vista 2 resta `RW-`: la protezione dell'alias non passa alle viste |
+| T11.2 tempo per blocco (commit + 4 viste) | 256 blocchi: commit 3,01 ms + viste 7,89 ms; per blocco min 0,039, media 0,043, max 0,165 ms. 776 viste, 1551 MiB mappati nelle viste |
+| T11.2 `LimitableResource_Memory` con 512 MiB in modello D | 3185 / 3189 MiB, **uguale** a prima, al tetto e dopo il rilascio: il loader ha già dato quasi tutto il pool all'heap, e né l'alias né le viste cambiano il valore |
+| T11.2 tetto: memoria reale, mappata, result code | 771 blocchi impegnati (1542 MiB reali), 17.624 viste, 35.247 MiB mappati nelle viste (36.789 MiB con gli alias). I blocchi si sono fermati per **`aligned_alloc` esaurito**, non per il kernel; le sole viste si sono fermate con `0xCE01` (2001-0103, `OutOfResource`) |
+| T11.3 sequenziale basso: tabella / nfsmw-nx vs diretto | diretto 396,5 ms; tabella **+28,3%**; nfsmw-nx su Switch +0,0%; loro forma PC +52,3% |
+| T11.3 sequenziale misto | diretto 567,3 ms; tabella **+8,0%**; nfsmw-nx +0,1%; forma PC +27,4% |
+| T11.3 casuale basso | diretto 3429,1 ms; tabella **+4,6%**; nfsmw-nx +0,0%; forma PC +5,6% |
+| T11.3 casuale misto | diretto 5972,8 ms; tabella **−38,0%** (3701,5 ms); nfsmw-nx +0,0%; forma PC −37,3% |
 
-### Come decidere
+In tutte le varianti di T11.3 i checksum coincidono.
 
-- Se T11.2 mostra che D entra con margine nel tetto e T11.1 che le viste sono
-  coerenti anche per le atomiche, D dà il codice generato più semplice e
-  veloce (diretto) senza i fault di nfsmw-nx.
-- Se il tetto è vicino, nfsmw-nx (viste su richiesta) o A restano le scelte;
-  fra i due, A non ha fault né concorrenza nel gestore.
-- La scelta cambia le macro NX di `init_h.inja` (tabella o diretto), quindi va
-  fatta prima di compilare il codice generato per Switch.
+Note sui numeri:
+
+- **Il diretto sulle viste è più lento del diretto sull'heap.** Sequenziale basso: 3,96 ns/iter in T11.3 contro 3,49 in T6/T7 sullo stesso schema di accesso con memoria di `malloc`. La tabella resta invece a 5,09 contro 5,19.
+- **Casuale misto: il diretto perde.** Metà degli accessi passa dalla vista 0xE0 e metà dalla vista bassa: sono due intervalli di indirizzi virtuali diversi sulle stesse pagine fisiche, quindi il doppio delle voci di TLB. La tabella porta entrambe le finestre sullo stesso indirizzo host. È un'ipotesi coerente con i numeri, non una misura del TLB.
+- **`aligned_alloc(2 MiB, 2 MiB)` spreca metà dell'heap** quando i blocchi si allocano uno dopo l'altro. T11.2 si è fermato a 1542 MiB su un pool di 3189. Con il `memalign` di newlib il blocco successivo parte subito dopo l'intestazione del chunk, quindi il primo indirizzo allineato è 2 MiB più avanti. Il pezzo davanti (quasi 2 MiB) torna libero, ma lo possono riusare solo allocazioni più piccole. `memory_switch.cpp` alloca i blocchi nello stesso modo: il problema vale anche per il modello A (vedi sotto, "Aperto").
+
+### Decisione definitiva: modello A (2026-09-28)
+
+La regola è stata fissata prima di guardare i numeri: si sceglie D solo se valgono **tutte** e tre le condizioni.
+
+| Condizione | Esito | Numeri |
+|---|---|---|
+| a) T11.1: scritture incrociate, `ldaxr/stlxr`, CAS e somma concorrente corrette su tutte le viste, **e permessi per vista funzionanti** | **non soddisfatta** | Coerenza e atomiche sono corrette. Ma `svcSetMemoryPermission(R)` su una vista fallisce con `0xD401`, e la protezione dell'alias lascia le viste `RW-`. Così il write-watch non può fermare una scrittura dalle finestre 0xA/0xC/0xE: le viste non si possono proteggere. L'unica alternativa sarebbe smappare le viste, come nfsmw-nx, ma non è un permesso per vista, e rimette i fault su richiesta che D voleva evitare |
+| b) T11.2: il tetto del mappato copre D completo con almeno 1 GB di margine | soddisfatta | D completo: circa 512 MiB di alias + 1551 MiB di viste + gli heap virtuali, cioè 2,5–3,5 GiB mappati e circa 800 viste. Il kernel ha rifiutato solo oltre 35 GiB e 17.624 viste. La memoria reale di D è la stessa di A |
+| c) T11.3: D misurabilmente più veloce della tabella, con checksum coincidenti | **non soddisfatta** | D è più veloce in tre casi su quattro (+28,3% / +8,0% / +4,6% per la tabella), ma nel casuale misto è più lento del 61% (5972,8 contro 3701,5 ms). I checksum coincidono |
+
+**Si resta sul modello A.** La condizione a) da sola lo decide, senza ambiguità: senza permessi per vista il write-watch della GPU non funziona. La c) porta nella stessa direzione. La tabella resta nel template (`init_h.inja`, ramo `REX_PLATFORM_NX`) e non cambia nulla in `memory_switch.cpp` né in `xmemory.cpp`. Per un confronto futuro, T11 resta in `switch-smoke`.
+
+### Aperto: spreco di `aligned_alloc` nel backend
+
+I blocchi di `memory_switch.cpp` vengono da `aligned_alloc(2 MiB, 2 MiB)`, come in T11.2. Se il gioco impegna blocchi di fila, lo stesso effetto può fermare il commit guest intorno a 1,5 GiB, anche con il pool libero, e lascia buchi da quasi 2 MiB utilizzabili solo da allocazioni più piccole. Il gioco dovrebbe restare sotto (circa 0,6–1,0 GiB, §3), e i buchi vengono riusati dalle allocazioni piccole del runtime. Va comunque misurato in gioco con `GetGuestArenaStats` e il pool libero.
+
+Correzioni possibili, da scegliere sui numeri:
+
+- sorgenti allineate a 4 KiB (a `svcMapProcessCodeMemory` basta 4 KiB), con il rischio di perdere le mappature da 2 MiB nella destinazione (TLB);
+- un pool di blocchi preso a gruppi.
