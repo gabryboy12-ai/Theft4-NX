@@ -727,6 +727,20 @@ La regola è stata fissata prima di guardare i numeri: si sceglie D solo se valg
 
 **Si resta sul modello A.** La condizione a) da sola lo decide, senza ambiguità: senza permessi per vista il write-watch della GPU non funziona. La c) porta nella stessa direzione. La tabella resta nel template (`init_h.inja`, ramo `REX_PLATFORM_NX`) e non cambia nulla in `memory_switch.cpp` né in `xmemory.cpp`. Per un confronto futuro, T11 resta in `switch-smoke`.
 
+### Step 3 di `switch-smoke` con il modello A
+
+Oltre ai controlli di §11, lo step 3 ora verifica il percorso vero del runtime con la tabella:
+
+- **Traduzione del codice generato.** `rex::memory::GuestToHost`, cioè `REX_GUEST_HOST` del template, e `TranslateVirtual` sulla prima e sull'ultima parola di tutte le 256 fasce da 16 MiB, confrontati con il layout di §8.
+- **Macro.** `REX_STORE_U32` dalla finestra 0xE, poi `REX_LOAD_U32` da 0xA e 0xC; in memoria fisica i byte devono essere big-endian.
+- **Write-watch da ogni vista della fisica.** `EnablePhysicalMemoryAccessCallbacks` su una pagina, poi una scrittura da ciascuna di: finestra 0xA, 0xC, 0xE, `physical_membase` (scrittori host come la GPU) e, per una pagina del writeback, 0x7F. Per ognuna controlla:
+  - la pagina armata è `R--`, e le letture da tutte le viste non chiamano il callback;
+  - almeno un callback con l'intervallo giusto;
+  - il valore è visibile da tutte le viste;
+  - la pagina torna `RW-`, e una seconda scrittura non chiama più il callback.
+
+  Ogni scrittura è preceduta da una riga "about to" durevole.
+
 ### Aperto: spreco di `aligned_alloc` nel backend
 
 I blocchi di `memory_switch.cpp` vengono da `aligned_alloc(2 MiB, 2 MiB)`, come in T11.2. Se il gioco impegna blocchi di fila, lo stesso effetto può fermare il commit guest intorno a 1,5 GiB, anche con il pool libero, e lascia buchi da quasi 2 MiB utilizzabili solo da allocazioni più piccole. Il gioco dovrebbe restare sotto (circa 0,6–1,0 GiB, §3), e i buchi vengono riusati dalle allocazioni piccole del runtime. Va comunque misurato in gioco con `GetGuestArenaStats` e il pool libero.

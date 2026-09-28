@@ -6,8 +6,10 @@
 //   2. svcGetInfo address-space layout (alias, heap, ASLR regions)
 //   3. guest memory through the runtime itself: rex::memory::Memory::Initialize
 //      (design A, docs/switch-port/03-memory.md), translation of every guest
-//      window, commit on demand, aliases 0x80/0x90 and the physical views,
-//      release
+//      window, the generated-code translation (GuestToHost, REX_LOAD/STORE)
+//      on all 256 slices, commit on demand, aliases 0x80/0x90 and the physical
+//      views, the runtime write watch for a write through each view of
+//      physical memory (0xA, 0xC, 0xE, physical_membase, 0x7F), release
 //   4. four threads through rex::thread::Thread, one per core of the process
 //      core mask; each must run on its core, and logical_processor_count()
 //      must match the mask; then the guest CPU -> core mapping of
@@ -27,6 +29,7 @@
 // handle has it open for writing, so a second writer on smoke.log loses
 // every line (run 5 kept only the SDK's three).
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -50,6 +53,7 @@
 #include <rex/cvar.h>
 #include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
+#include <rex/memory/guest_table.h>
 #include <rex/memory/utils.h>
 #include <rex/system/flags.h>
 #include <rex/system/xmemory.h>
@@ -345,6 +349,153 @@ bool CheckTranslation(rex::memory::Memory& memory) {
   return ok;
 }
 
+// The expression generated code uses on NX (init_h.inja: REX_GUEST_HOST, the
+// base of every REX_LOAD_* / REX_STORE_* / REX_RAW_ADDR), against the layout
+// of 03-memory.md section 8, for the first and last word of all 256 slices.
+bool CheckGeneratedCodeTable(rex::memory::Memory& memory) {
+  uint8_t* const v = memory.virtual_membase();
+  uint8_t* const p = memory.physical_membase();
+  auto expected = [v, p](uint32_t a) -> uint8_t* {
+    const uint32_t s = a >> 24;
+    if (s == 0x7F) return p + (a - 0x7F000000u);
+    if (s >= 0x90 && s < 0xA0) return v + (a - 0x10000000u);
+    if (s >= 0xA0 && s < 0xC0) return p + (a - 0xA0000000u);
+    if (s >= 0xC0 && s < 0xE0) return p + (a - 0xC0000000u);
+    if (s >= 0xE0) return p + (a - 0xE0000000u) + 0x1000;
+    return v + a;
+  };
+  int mismatches = 0;
+  for (uint32_t s = 0; s < 256; ++s) {
+    for (const uint32_t a : {s << 24, (s << 24) | 0xFFFFFCu}) {
+      uint8_t* const want = expected(a);
+      uint8_t* const code = rex::memory::GuestToHost(a);
+      uint8_t* const runtime = memory.TranslateVirtual(a);
+      if (code != want || runtime != want) {
+        if (++mismatches <= 4) {
+          Fail("guest memory", "guest " + Hex(a) + ": generated code " +
+                                   Hex(reinterpret_cast<uint64_t>(code)) + ", TranslateVirtual " +
+                                   Hex(reinterpret_cast<uint64_t>(runtime)) + ", expected " +
+                                   Hex(reinterpret_cast<uint64_t>(want)));
+        }
+      }
+    }
+  }
+  SMOKE_INFO("  generated-code translation (GuestToHost) and TranslateVirtual, 256 slices x "
+             "first/last word: %d mismatches -> %s",
+             mismatches, mismatches ? "MISMATCH" : "ok");
+  return mismatches == 0;
+}
+
+// REX_LOAD_U32 / REX_STORE_U32 as the NX branch of init_h.inja expands them.
+uint32_t GeneratedLoad32(uint32_t guest) {
+  return __builtin_bswap32(*(volatile uint32_t*)rex::memory::GuestToHost(guest));
+}
+void GeneratedStore32(uint32_t guest, uint32_t value) {
+  *(volatile uint32_t*)rex::memory::GuestToHost(guest) = __builtin_bswap32(value);
+}
+
+const char* PermStr(const void* host) {
+  MemoryInfo info{};
+  u32 page_info = 0;
+  if (R_FAILED(svcQueryMemory(&info, &page_info, reinterpret_cast<u64>(host)))) {
+    return "?";
+  }
+  static const char* const kPerm[] = {"---", "R--", "-W-", "RW-", "--X", "R-X", "-WX", "RWX"};
+  return kPerm[info.perm & 7];
+}
+
+struct StepWatch {
+  uint32_t calls = 0;
+  uint32_t last_start = 0;
+  uint32_t last_length = 0;
+};
+
+std::pair<uint32_t, uint32_t> StepWatchCallback(void* context, uint32_t physical_address_start,
+                                                uint32_t length, bool exact_range) {
+  (void)exact_range;
+  auto* watch = static_cast<StepWatch*>(context);
+  ++watch->calls;
+  watch->last_start = physical_address_start;
+  watch->last_length = length;
+  return {0, UINT32_MAX};
+}
+
+// The runtime write watch (EnablePhysicalMemoryAccessCallbacks, fault ->
+// MMIOHandler -> Memory::NxPhysicalAccessViolation -> invalidation callback
+// -> page RW -> resume) for a write through each view of guest physical
+// memory: the 0xA/0xC/0xE windows, physical_membase (host writers such as
+// the GPU) and, for the writeback page, 0x7F. Reads of a watched page must
+// not fault. With design A all views are one host page, so every writer must
+// trigger the watch.
+bool CheckWriteWatchAllViews(rex::memory::Memory& memory, uint32_t physical) {
+  struct Writer {
+    const char* name;
+    uint32_t physical;  // page watched
+    uint8_t* host;      // where this writer stores
+  };
+  constexpr uint32_t kWriteback = 0x00100000u;  // committed by Initialize (0xC0000000 + 16 MiB)
+  const Writer kWriters[] = {
+      {"0xA window", physical, memory.TranslateVirtual(0xA0000000u + physical)},
+      {"0xC window", physical, memory.TranslateVirtual(0xC0000000u + physical)},
+      {"0xE window", physical, memory.TranslateVirtual(0xE0000000u + physical - 0x1000)},
+      {"physical_membase", physical, memory.TranslatePhysical(physical)},
+      {"0x7F writeback", kWriteback, memory.TranslateVirtual(0x7F000000u + kWriteback)},
+  };
+  // The memory trace sink must not run inside the exception handler.
+  rex::memory::nx::SetMemoryTraceSink(nullptr);
+  StepWatch watch;
+  void* handle = memory.RegisterPhysicalMemoryInvalidationCallback(StepWatchCallback, &watch);
+  bool all_ok = true;
+  uint32_t value = 0x3A7C0000u;
+  for (const Writer& w : kWriters) {
+    ++value;
+    uint8_t* const page = memory.TranslatePhysical(w.physical);
+    memory.EnablePhysicalMemoryAccessCallbacks(w.physical, 0x1000, true, false);
+    const char* armed = PermStr(page);
+    // Reads through every view: no fault, no callback.
+    const uint32_t before = watch.calls;
+    uint32_t sink = 0;
+    for (const Writer& r : kWriters) {
+      if (r.physical == w.physical) {
+        sink += *reinterpret_cast<volatile uint32_t*>(r.host + 0x100);
+      }
+    }
+    (void)sink;
+    const bool reads_ok = watch.calls == before;
+    SMOKE_INFO("  about to write through %s (physical %08X watched, page %s)", w.name, w.physical,
+               armed);
+    *reinterpret_cast<volatile uint32_t*>(w.host + 0x100) = value;
+    const uint32_t calls = watch.calls - before;
+    const bool range_ok = w.physical >= watch.last_start &&
+                          w.physical - watch.last_start < std::max(watch.last_length, 1u);
+    bool seen_ok = true;
+    for (const Writer& r : kWriters) {
+      if (r.physical == w.physical) {
+        seen_ok &= *reinterpret_cast<volatile uint32_t*>(r.host + 0x100) == value;
+      }
+    }
+    // Unwatched again: a second write must not call back.
+    *reinterpret_cast<volatile uint32_t*>(w.host + 0x104) = value;
+    const bool unwatched = watch.calls - before == calls;
+    const bool ok = strcmp(armed, "R--") == 0 && reads_ok && calls >= 1 && range_ok && seen_ok &&
+                    unwatched && strcmp(PermStr(page), "RW-") == 0;
+    SMOKE_INFO("  write watch via %-16s: armed %s, reads %s, %u callback(s) (last %08X+%X), "
+               "value in every view %s, page now %s, second write %s -> %s",
+               w.name, armed, reads_ok ? "no fault" : "CALLED BACK", calls, watch.last_start,
+               watch.last_length, seen_ok ? "yes" : "NO", PermStr(page),
+               unwatched ? "silent" : "CALLED BACK", ok ? "ok" : "WRONG");
+    if (!ok) {
+      Fail("guest memory", std::string("write watch through ") + w.name);
+      all_ok = false;
+    }
+  }
+  memory.UnregisterPhysicalMemoryInvalidationCallback(handle);
+  if (REXCVAR_GET(nx_memory_trace)) {
+    rex::memory::nx::SetMemoryTraceSink(TraceLine);
+  }
+  return all_ok;
+}
+
 bool WriteRead32(const char* label, void* write_host, void* read_host, uint32_t pattern) {
   *static_cast<volatile uint32_t*>(write_host) = pattern;
   const uint32_t read = *static_cast<volatile uint32_t*>(read_host);
@@ -354,7 +505,7 @@ bool WriteRead32(const char* label, void* write_host, void* read_host, uint32_t 
 }
 
 void StepGuestMemory() {
-  SMOKE_INFO("step 3 guest memory: rex::memory::Memory::Initialize (runtime path, design A)");
+  SMOKE_INFO("step 3 guest memory: rex::memory::Memory::Initialize (runtime path, model A: table)");
   ScopedMemoryTrace trace;
   g_memory = std::make_unique<rex::memory::Memory>();
   SMOKE_INFO("  about to Memory::Initialize");
@@ -368,7 +519,7 @@ void StepGuestMemory() {
              static_cast<void*>(memory.virtual_membase()),
              static_cast<void*>(memory.physical_membase()));
   const auto initial = LogArenaStats("after Initialize");
-  if (!CheckTranslation(memory)) {
+  if (!CheckTranslation(memory) || !CheckGeneratedCodeTable(memory)) {
     return;
   }
 
@@ -420,6 +571,21 @@ void StepGuestMemory() {
   ok &= WriteRead32("0xC -> 0xE     ", memory.TranslateVirtual(0xC0000000u + physical + 16),
                     eh + 16, 0xCAFEBABEu);
   LogArenaStats("with 64 KiB physical");
+
+  // Generated-code accessors: big-endian store through 0xE, loads through
+  // 0xA and 0xC, raw bytes in physical memory.
+  GeneratedStore32(e_address + 0x20, 0x01020304u);
+  const uint32_t via_a = GeneratedLoad32(0xA0000000u + physical + 0x20);
+  const uint32_t via_c = GeneratedLoad32(0xC0000000u + physical + 0x20);
+  const uint8_t* raw = memory.TranslatePhysical(physical + 0x20);
+  const bool macros_ok = via_a == 0x01020304u && via_c == via_a && raw[0] == 1 && raw[3] == 4;
+  SMOKE_INFO("  REX_STORE_U32 via 0xE, REX_LOAD_U32 via 0xA %08X / 0xC %08X, bytes %02X..%02X "
+             "(big-endian) -> %s",
+             via_a, via_c, raw[0], raw[3], macros_ok ? "ok" : "MISMATCH");
+  ok &= macros_ok;
+
+  // Write watch through every view of the physical page just allocated.
+  ok &= CheckWriteWatchAllViews(memory, physical);
 
   SMOKE_INFO("  about to release both allocations");
   v40->Release(virtual_address);
