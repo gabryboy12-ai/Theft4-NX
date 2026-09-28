@@ -86,6 +86,10 @@ target_link_libraries(switch-game PRIVATE
     -Wl,--end-group
 )
 target_link_options(switch-game PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/switch-game.map")
+# Every way out of the process goes through main.cpp's __wrap_* first, which
+# logs the code and the caller before the real function runs.
+target_link_options(switch-game PRIVATE
+    "-Wl,--wrap=exit,--wrap=_exit,--wrap=_Exit,--wrap=abort,--wrap=svcExitProcess")
 
 nx_generate_nacp(switch-game.nacp
     NAME "Theft4 switch-game"

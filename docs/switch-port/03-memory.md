@@ -741,11 +741,13 @@ Oltre ai controlli di §11, lo step 3 ora verifica il percorso vero del runtime 
 
   Ogni scrittura è preceduta da una riga "about to" durevole.
 
-### Aperto: spreco di `aligned_alloc` nel backend
+### Pool dei blocchi (2026-09-28, dopo il run 8)
 
-I blocchi di `memory_switch.cpp` vengono da `aligned_alloc(2 MiB, 2 MiB)`, come in T11.2. Se il gioco impegna blocchi di fila, lo stesso effetto può fermare il commit guest intorno a 1,5 GiB, anche con il pool libero, e lascia buchi da quasi 2 MiB utilizzabili solo da allocazioni più piccole. Il gioco dovrebbe restare sotto (circa 0,6–1,0 GiB, §3), e i buchi vengono riusati dalle allocazioni piccole del runtime. Va comunque misurato in gioco con `GetGuestArenaStats` e il pool libero.
+I blocchi di `memory_switch.cpp` venivano da `aligned_alloc(2 MiB, 2 MiB)`, uno per blocco, come in T11.2 del run 8. Con il `memalign` di newlib, blocchi allocati di fila sprecano quasi 2 MiB ciascuno.
 
-Correzioni possibili, da scegliere sui numeri:
+Ora l'arena, quando viene riservata, fa **una sola** `aligned_alloc` e distribuisce slot da 2 MiB da una free list:
 
-- sorgenti allineate a 4 KiB (a `svcMapProcessCodeMemory` basta 4 KiB), con il rischio di perdere le mappature da 2 MiB nella destinazione (TLB);
-- un pool di blocchi preso a gruppi.
+- **Dimensione:** cvar `nx_guest_pool_mib`, default **1536 MiB** (768 blocchi). Copre 512 MiB di fisica guest più circa 1 GiB di heap virtuali e XEX, il massimo della stima di §3. Lascia circa 1,5 GiB dell'heap (~3,1 GiB) a runtime, Vulkan/Mesa, cache degli shader e audio: il margine chiesto dalla decisione sul modello.
+- **Pool esaurito:** errore con la dimensione e il nome della cvar da alzare. Non si torna alle allocazioni singole.
+- **Statistiche:** `GuestArenaStats.pool_blocks` / `pool_free_blocks`.
+- **Smoke:** lo step 3 usa un pool di 256 MiB, perché le sonde (T5, T8, T11.2) hanno bisogno del resto dell'heap. T11.2 prende i suoi blocchi dalla più grande allocazione allineata che l'heap concede, quindi misura il nuovo tetto al posto dei 1542 MiB del run 8.

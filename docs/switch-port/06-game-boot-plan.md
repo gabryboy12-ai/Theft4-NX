@@ -345,3 +345,49 @@ Il tempo dei file generati è per eccesso. Nei primi minuti girava ancora la bui
 - Avviare in modalità applicazione (title takeover): serve il pool di circa 3,2 GiB.
 - Riportare `game.log`, `game-crash.log` e, se c'è, il crash report di Atmosphère.
 - Primo arresto atteso: una export grafica, oppure MMIO non riconosciuto in 0x7F (03 §12, non implementato).
+
+## 8. Run 9: il gioco esce in silenzio dentro `Runtime::Setup` (2026-09-28)
+
+`out/console-runs/run9/`: smoke completo e OK. `game.log` e `game.prev.log` (due avvii) sono identici fino all'ultima riga; `game-crash.log` esiste ma è **vuoto** (0 byte); nessun crash report di Atmosphère.
+
+### Cosa dice il log
+
+- Ultima riga: `XThread::Execute thid 1 ... 'Kernel Host Tasks'`, cioè il worker dei compiti del kernel avviato alla fine del costruttore di `KernelState`.
+- Prima: `ContentManager roots: user='sdmc:/switch/theft4/sdmc:/switch/theft4/user'` e `Unable to create multiplayer identity directory ...: Invalid argument`.
+- **Non** compaiono `Runtime::Setup failed`, `Mounted ... at \Device\Harddisk0\Partition1` né la riga di `main` dopo `Setup`.
+
+Quindi:
+
+- **Il punto di arresto non è stato raggiunto**, e nessuna export del kernel è stata chiamata: il codice del gioco non è mai partito.
+- **Ultimo sottosistema attivo:** l'inizializzazione del kernel in `Runtime::Setup`, dopo il costruttore di `KernelState` e prima di `SetupVfs`, cioè `InitializeKernel` (app XAM, moduli xboxkrnl/xam/xbdm).
+- **Percorso di uscita:** non passa dal logger (un `REX_FATAL` avrebbe scritto una riga CRITICAL) né dal gestore dei fault (`game-crash.log` vuoto, nessun crash report). Resta un'uscita "normale" di newlib: `abort` → `_exit` → ritorno al loader. È il comportamento di `rex::FatalError`, degli assert a **due argomenti** (`assert_true(expr, msg)` e simili, attivi anche in Release) e di un'eccezione non catturata (`std::terminate`). Tutti questi scrivono il motivo **solo su stderr**, che il run 9 non registrava. Dal codice statico non si ricava quale sia: il run 10 lo dirà.
+
+### Correzioni
+
+- **Percorsi `sdmc:/`.** `std::filesystem::absolute` di newlib non conosce i dispositivi e antepone la cartella corrente. È l'origine del percorso utente raddoppiato. Lo stesso errore c'era in `SetupVfs` per `game:` e `update:`, quindi anche il montaggio del gioco sarebbe fallito. Ora c'è `rex::filesystem::MakeAbsolute`, che su Switch lascia invariati i percorsi con dispositivo.
+- **Ogni uscita lascia una traccia in `game.log`:**
+  - `exit`, `_exit`, `_Exit`, `abort` e `svcExitProcess` passano da wrapper di link (`-Wl,--wrap`), che registrano il codice e l'LR del chiamante come offset dalla base del modulo (indirizzo ELF, per `addr2line`);
+  - `std::terminate` registra il tipo e il `what()` dell'eccezione;
+  - un gestore `atexit` segna le uscite da `exit()`;
+  - `main` registra `main returned`;
+  - stderr è copiato in `game.log` riga per riga (prefisso `[stderr]`);
+  - `kernel_init` ha una riga prima e una dopo.
+
+  Ho verificato nell'ELF che solo i wrapper chiamano le funzioni reali.
+- **Stub del kernel:** ogni `REX_EXPORT_STUB` viene registrato alla prima chiamata (nome e LR guest) e contato; il riepilogo va nel log all'arresto e all'uscita. La cvar `nx_fatal_stubs` (default `false`) li rende fatali.
+- **Pool dei blocchi guest:** vedi 03 §13, "Pool dei blocchi".
+
+**Allocazioni fallite nel run 9: nessuna.** Il log non ha errori di `memory_switch`, e l'arena si è riservata normalmente.
+
+**File del gioco sulla SD:** il run 9 conferma solo `default.xex` (11.841.536 byte) e l'assenza di `default.xexp`. Il resto del disco non è mai stato letto, perché il run non è arrivato a `SetupVfs`.
+
+### Build
+
+| | |
+|---|---|
+| Smoke (SDK toccato + smoke) | 9 min 16 s |
+| Gioco (212 passi, tutti gli 84 file generati) | 27 min 37 s, 0 errori |
+| `switch-smoke.nro` | 2.332.869 byte |
+| `switch-game.nro` | 43.899.077 byte |
+
+Il gioco è stato ricompilato per intero perché il codice generato include `rex/hook.h` (e `rex/filesystem.h`, `rex/memory/utils.h`): cambiare `REX_EXPORT_STUB` in `hook.h` tocca per forza tutti i file generati.
