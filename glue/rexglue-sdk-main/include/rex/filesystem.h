@@ -39,6 +39,12 @@ std::filesystem::path GetExecutableFolder();
 // Get user folder.
 std::filesystem::path GetUserFolder();
 
+// std::filesystem::absolute, except that on Switch a path with a device
+// prefix ("sdmc:/...", "romfs:/...") is already absolute and is returned as
+// is: newlib's std::filesystem does not know device names and would prepend
+// the current directory ("sdmc:/switch/x/sdmc:/switch/x/user").
+std::filesystem::path MakeAbsolute(const std::filesystem::path& path);
+
 // Creates the parent folder of the specified path if needed.
 // This can be used to ensure the destination path for a new file exists before
 // attempting to create it.

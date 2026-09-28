@@ -18,6 +18,7 @@
 
 #include <fmt/format.h>
 #include <rex/assert.h>
+#include <rex/filesystem.h>
 #include <rex/image_info.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -71,7 +72,7 @@ KernelState::KernelState(Runtime* emulator)
 
   auto user_data_root = emulator_->user_data_root();
   if (!user_data_root.empty()) {
-    user_data_root = std::filesystem::absolute(user_data_root);
+    user_data_root = rex::filesystem::MakeAbsolute(user_data_root);
   }
   content_manager_ = std::make_unique<xam::ContentManager>(
       this, user_data_root, emulator_->marketplace_content_root(),

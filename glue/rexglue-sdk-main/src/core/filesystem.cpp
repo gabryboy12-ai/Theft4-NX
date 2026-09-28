@@ -16,6 +16,17 @@
 namespace rex {
 namespace filesystem {
 
+std::filesystem::path MakeAbsolute(const std::filesystem::path& path) {
+#if REX_PLATFORM_NX
+  const std::string text = path.generic_string();
+  const size_t colon = text.find(':');
+  if (colon != std::string::npos && colon > 0 && text.find('/') > colon) {
+    return path;
+  }
+#endif
+  return std::filesystem::absolute(path);
+}
+
 bool CreateParentFolder(const std::filesystem::path& path) {
   if (path.has_parent_path()) {
     auto parent_path = path.parent_path();
