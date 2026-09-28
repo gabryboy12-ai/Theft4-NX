@@ -172,6 +172,20 @@ extern PPCFuncMapping PPCFuncMappings[];
 #define REX_MEMORY_SIZE 0x100000000ull
 
 //=============================================================================
+// Spin-wait hint
+//=============================================================================
+
+// Xenon's db16cyc (builders/system.cpp): the host's spin-loop hint, as the
+// AArch64 backend of Xenia emits YIELD for it.
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define REX_DB16CYC() __asm__ volatile("yield" ::: "memory")
+#elif defined(__x86_64__) || defined(__i386__)
+#define REX_DB16CYC() __builtin_ia32_pause()
+#else
+#define REX_DB16CYC() ((void)0)
+#endif
+
+//=============================================================================
 // MMIO
 //=============================================================================
 
