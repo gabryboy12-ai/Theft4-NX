@@ -244,6 +244,10 @@ class BaseHeap {
   // Rollback of NxCommitPages: drops the reference of the pages of
   // [first_page, last_page] whose table state is not committed.
   void NxDecommitUncommitted(uint32_t first_page, uint32_t last_page);
+  // Pages whose host reference survived a Reset (1 = orphaned): Reset makes
+  // the heap forget its allocations but, as on the desktop, the memory stays
+  // backed with its contents. Dispose drops these references.
+  std::vector<uint8_t> nx_orphaned_;
 #endif
 
   memory::Memory* memory_;
@@ -538,6 +542,12 @@ class Memory {
   bool InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uint32_t image_base,
                                uint32_t image_size);
   bool DestroyFunctionTable(uint32_t code_base);
+  // BaseHeap::Reset of the heap holding `address`, keeping the function
+  // tables that live in it allocated in the heap's page table: the XEX loader
+  // resets the image heap after Runtime::Setup has filled the table, and a
+  // plain Reset would let later allocations land on it. (The table's memory
+  // and entries survive any Reset; on NX that too since switch-game run 10.)
+  void ResetHeapKeepingFunctionTables(uint32_t address);
   // Returns false if guest_address is outside every registered module range.
   bool SetFunction(uint32_t guest_address, PPCFunc* host_function);
   bool HasAnyFunctionTable() const;

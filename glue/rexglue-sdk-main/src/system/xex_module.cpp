@@ -460,7 +460,9 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length, bool use_dev_k
     return 0;
   }
 
-  memory()->LookupHeap(base_address_)->Reset();
+  // Not a plain Reset: the function table Runtime::Setup filled lives in this
+  // heap too (Memory::ResetHeapKeepingFunctionTables).
+  memory()->ResetHeapKeepingFunctionTables(base_address_);
 
   aes_decrypt_buffer(use_dev_key ? xe_xex2_devkit_key : xe_xex2_retail_key,
                      reinterpret_cast<const uint8_t*>(xex_security_info()->aes_key), 16,

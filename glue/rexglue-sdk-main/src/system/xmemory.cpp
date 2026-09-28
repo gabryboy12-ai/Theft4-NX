@@ -920,6 +920,38 @@ bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uin
   return true;
 }
 
+void Memory::ResetHeapKeepingFunctionTables(uint32_t address) {
+  BaseHeap* heap = LookupHeap(address);
+  if (!heap) {
+    return;
+  }
+  struct Kept {
+    uint32_t base;
+    uint32_t size;
+  };
+  std::vector<Kept> kept;
+  {
+    std::lock_guard lock(function_tables_mutex_);
+    for (const FunctionTableEntry& table : function_tables_) {
+      if (LookupHeap(table.table_base) == heap) {
+        kept.push_back({table.table_base, (table.code_size + table.thunk_reserve) * 2});
+      }
+    }
+  }
+  heap->Reset();  // the memory stays backed (see BaseHeap::Reset)
+  for (const Kept& k : kept) {
+    // Commit on pages that are already backed keeps their contents.
+    if (!heap->AllocFixed(k.base, k.size, 0x10000,
+                          memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
+                          memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
+      REXSYS_ERROR("Heap reset: failed to keep the function table at {:08X}+{:X}", k.base,
+                   k.size);
+    } else {
+      REXSYS_DEBUG("Heap reset: kept the function table at {:08X}+{:X}", k.base, k.size);
+    }
+  }
+}
+
 bool Memory::DestroyFunctionTable(uint32_t code_base) {
   uint32_t table_base = 0;
   uint32_t table_size = 0;
@@ -1120,6 +1152,14 @@ void BaseHeap::Dispose() {
       page_entry.state &= ~memory::kMemoryAllocationCommit;
     }
   }
+  for (uint32_t page_number = 0; page_number < nx_orphaned_.size(); ++page_number) {
+    if (nx_orphaned_[page_number]) {
+      rex::memory::DeallocFixed(TranslateRelative(page_number << page_size_shift_),
+                                size_t(1) << page_size_shift_,
+                                rex::memory::DeallocationType::kDecommit);
+    }
+  }
+  nx_orphaned_.clear();
 #else
   // Walk table and release all regions.
   for (uint32_t page_number = 0; page_number < page_table_.size(); ++page_number) {
@@ -1290,8 +1330,26 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
 
 void BaseHeap::Reset() {
 #if REX_PLATFORM_NX
-  if (!page_table_.empty()) {
-    NxDecommitPages(0, uint32_t(page_table_.size()) - 1);
+  // As on the desktop, where Reset only clears the page table and the views
+  // stay mapped: the committed pages keep their backing and contents (the
+  // XEX loader resets the image heap after Runtime::Setup has filled the
+  // function table in it, and after Memory::Initialize wrote 0x8000001C).
+  // The reference each committed page held becomes an orphaned one, dropped
+  // in Dispose; a page already orphaned drops the newer reference.
+  if (nx_orphaned_.size() != page_table_.size()) {
+    nx_orphaned_.assign(page_table_.size(), 0);
+  }
+  for (uint32_t page_number = 0; page_number < page_table_.size(); ++page_number) {
+    if (!(page_table_[page_number].state & memory::kMemoryAllocationCommit)) {
+      continue;
+    }
+    if (nx_orphaned_[page_number]) {
+      rex::memory::DeallocFixed(TranslateRelative(page_number << page_size_shift_),
+                                size_t(1) << page_size_shift_,
+                                rex::memory::DeallocationType::kDecommit);
+    } else {
+      nx_orphaned_[page_number] = 1;
+    }
   }
 #endif
   // TODO(DrChat): protect pages.
