@@ -292,4 +292,56 @@ copiato. L'output va in `gta4-recomp/generated/eu-base/`, ignorata da git.
   - `direct_calls.py`: **123.940 chiamate dirette su 123.948 (99,99 %)**;
     restano deboli le 8 verso i 18 indirizzi del config, contati come agganciati
     per prudenza. Output: 84 file, 170,7 MB.
-  - Non compilato per Switch: le macro di memoria dipendono dall'esito di T11.
+  - Non compilato per Switch: le macro di memoria dipendevano dall'esito di T11 (vedi §7).
+
+## 7. Prima compilazione del gioco per Switch (2026-09-28)
+
+**Macro definitive:** modello A, tabella (03 §13, run 8). Il template non cambia per la memoria.
+
+### Rigenerazione
+
+`rexglue` ricostruito da questo albero, poi `rexglue codegen config-eu-base/gta4_eu_base_manifest.toml` e `direct_calls.py --hooked-from config-eu-base`:
+
+- 47,9 s, 0 errori, 84 file, 163 MB;
+- 123.940 chiamate dirette su 123.948;
+- `read_before_write.py`: solo il falso positivo noto (`0x829A88C0`).
+
+**Unico errore del primo tentativo di compilazione.** `REX_DB16CYC()` (per `db16cyc`, cicli di spin-wait) veniva emesso da `builders/system.cpp`, ma non era definito in nessun header. Ora è nel template: `yield` su ARM64 (come il backend AArch64 di Xenia), `pause` su x86. Ho confrontato ogni nome `REX_*` dei sorgenti generati con le definizioni dell'header e dell'SDK: non ne manca nessun altro.
+
+### `tools/switch-game`
+
+| Parte | Cosa fa |
+|---|---|
+| File del gioco | letti da `sdmc:/switch/theft4/game` (`game:`/`d:`). Serve `default.xex`; se c'è `default.xexp` il programma si ferma, perché il codice è generato dall'eseguibile base |
+| Runtime | `rex::Runtime` con `InitializeKernel` e senza grafica, audio o input; `Setup(PPCImageConfig)`, `LoadXexImage`, `PrepareModuleLaunch`, `Resume` del thread principale all'entry point dell'XEX |
+| Log durevole | `sdmc:/switch/theft4/game.log`, come nello smoke: ogni riga (anche dell'SDK) aperta, scritta, `fsync`, chiusa; righe "about to" prima di ogni passo. Il run precedente resta in `game.prev.log` |
+| Crash log | `sdmc:/switch/theft4/game-crash.log`: un gestore installato per ultimo registra i fault che nessun gestore del runtime prende. Scrive PC, LR, SP, FAR, x0–x30 e PC/LR come offset dalla base del modulo (stampata anche in `game.log`), poi lascia il fault al kernel, cioè al crash report di Atmosphère |
+| Arresto | `rex::diagnostics::StopAtMissingFunction` (nuovo punto unico dell'SDK, debole) ridefinito in `main.cpp`. Il primo arrivo scrive una riga `STOP at the first function missing on Switch: <nome> (<motivo>), guest LR …` e lo stato della memoria guest, poi ferma il thread; con + si esce |
+| Cosa porta all'arresto | export del kernel headless non disponibili; export che richiedono la grafica (`VdInitializeRingBuffer`, `VdSetGraphicsInterruptCallback`, `VdEnableRingBufferRPtrWriteBack`); `seh_rethrow`; import che l'SDK non definisce (`missing_imports.py` genera uno stub per ognuna, confrontando le 237 import dell'header con `nm` delle librerie linkate: oggi **0 su 237**) |
+| Uscita | `svcExitProcess`: i thread guest sono ancora vivi, e tornare al loader scaricherebbe codice che stanno eseguendo (04 §5) |
+
+**Non fermano il run** le export che il kernel implementa come `REX_EXPORT_STUB`: come sul desktop, scrivono un warning nel log e ritornano.
+
+### Build
+
+Senza LTO, Ninja `-j3`, GCC 16.1, `-O3`, `-g1` sui file generati (solo tabelle di riga, per `addr2line`).
+
+| Misura | Valore |
+|---|---|
+| SDK + `main.cpp` + un file generato (prima build, 355 passi) | 9 min 00 s |
+| 84 file generati + link + NRO | 25 min 08 s |
+| Totale | circa 34 min |
+| Errori / warning nel codice generato | 0 / 0 (dopo `REX_DB16CYC`) |
+| `switch-game.nro` | 44.062.917 byte (42,0 MiB) |
+| `switch-game.elf` | 261 MB con le informazioni di debug; `.text` 41,3 MiB, `.data` 0,7 MiB, `.bss` 8,8 MiB |
+
+Il tempo dei file generati è per eccesso. Nei primi minuti girava ancora la build precedente (fallita su `REX_DB16CYC`), che finiva i suoi file in corso: per un po' i job erano più di tre.
+
+**Percorso:** `out/build/switch-game/switch-game.nro`. La configurazione è nel commento in testa a `tools/switch-game/CMakeLists.txt`. Da Bash va esportato `DEVKITPRO=/opt/devkitpro` e va usato `/usr/bin/ninja`.
+
+### Sulla console
+
+- Copiare `default.xex` europeo (e i dati del gioco) in `sdmc:/switch/theft4/game/`, senza `default.xexp`.
+- Avviare in modalità applicazione (title takeover): serve il pool di circa 3,2 GiB.
+- Riportare `game.log`, `game-crash.log` e, se c'è, il crash report di Atmosphère.
+- Primo arresto atteso: una export grafica, oppure MMIO non riconosciuto in 0x7F (03 §12, non implementato).
