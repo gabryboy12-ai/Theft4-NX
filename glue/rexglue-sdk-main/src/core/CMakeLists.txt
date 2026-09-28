@@ -21,6 +21,7 @@ add_library(rexcore ${REXCORE_LIBRARY_TYPE}
     input_trace.cpp
     logging.cpp
     memory.cpp
+    missing_function.cpp
     mutex.cpp
     ring_buffer.cpp
     sha256.cpp

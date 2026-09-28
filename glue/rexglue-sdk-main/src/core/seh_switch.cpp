@@ -19,6 +19,7 @@
 
 static_assert(REX_PLATFORM_NX, "This file is Switch-only");
 
+#include <rex/diagnostics/missing_function.h>
 #include <rex/platform/exceptions.h>
 
 extern "C" {
@@ -44,9 +45,8 @@ int seh_filter(uint32_t /*code*/, void* /*ep*/) {
   // native exception to re-raise.
   static const char kMessage[] = "[rex] seh_rethrow: not supported on Switch\n";
   svcOutputDebugString(kMessage, sizeof(kMessage) - 1);
-  svcBreak(BreakReason_Panic, 0, 0);
-  for (;;) {
-  }
+  rex::diagnostics::StopAtMissingFunction("runtime function not available on Switch",
+                                          "seh_rethrow", 0);
 }
 
 void seh_initialize() {
