@@ -14,6 +14,7 @@ add_library(rexcore ${REXCORE_LIBRARY_TYPE}
     cvar.cpp
     diagnostics_policy.cpp
     exception_handler.cpp
+    export_stubs.cpp
     filesystem.cpp
     filesystem_wildcard.cpp
     gta4_transition.cpp

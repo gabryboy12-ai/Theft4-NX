@@ -18,6 +18,7 @@
 #include <fmt/format.h>
 
 #include <rex/logging.h>
+#include <rex/diagnostics/export_stubs.h>
 #include <rex/diagnostics/policy.h>
 #include <rex/ppc/context.h>
 #include <rex/ppc/function.h>
@@ -76,12 +77,23 @@
   REX_HOOK(name, function)         \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 
-#define REX_EXPORT_STUB(name) \
-  REX_STUB(name)              \
+// Stub export: logged on its first call and counted
+// (rex/diagnostics/export_stubs.h); fatal with the cvar nx_fatal_stubs.
+#define REX_EXPORT_STUB(name)                                              \
+  extern "C" REX_FUNC(name) {                                              \
+    (void)base;                                                            \
+    static ::rex::diagnostics::ExportStubSite _stub_site{#name};           \
+    ::rex::diagnostics::RecordExportStubHit(_stub_site, uint32_t(ctx.lr)); \
+  }                                                                        \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 
-#define REX_EXPORT_STUB_RETURN(name, retval) \
-  REX_STUB_RETURN(name, retval)              \
+#define REX_EXPORT_STUB_RETURN(name, retval)                               \
+  extern "C" REX_FUNC(name) {                                              \
+    (void)base;                                                            \
+    static ::rex::diagnostics::ExportStubSite _stub_site{#name};           \
+    ::rex::diagnostics::RecordExportStubHit(_stub_site, uint32_t(ctx.lr)); \
+    ctx.r3.u64 = (retval);                                                 \
+  }                                                                        \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 
 namespace rex {
