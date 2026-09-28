@@ -30,9 +30,21 @@
  *   - rex_nx_exception_dispatch turns frame + saved registers into a rex::arch
  *     Exception and runs the same handler list as the other platforms
  *     (MMIOHandler::ExceptionCallback etc.), writing modified registers back;
- *   - restore the saved registers and svcReturnFromException: 0 resumes at the
- *     (possibly advanced) pc, 0xF801 leaves an unhandled fault to the kernel
- *     with the original context, so the crash report shows the real PC.
+ *   - restore the saved registers and svcReturnFromException(0), which
+ *     resumes at the (possibly advanced) pc.
+ *
+ * An unhandled exception must end in Atmosphere's crash report. Returning it
+ * to the kernel with svcReturnFromException(0xF801) does not do that:
+ * switch-game run 10 closed with no report (svcBreak does: run 5's "User
+ * Break"). So the dispatcher resumes the faulting thread, with its own
+ * registers and stack, at rex_nx_unhandled_break, which calls
+ * svcBreak(BreakReason_Panic) with the fault details as the break argument;
+ * LR is set to the faulting PC so the report shows it, and the full register
+ * set is logged before (switch-game: game-crash.log).
+ *
+ * A fault while the entry is already handling one on this thread (inside a
+ * handler) must not reuse the exception stack, which holds the outer frame:
+ * a depth counter sends it to an emergency stack and straight to svcBreak.
  *
  * Faults are therefore handled one at a time, process-wide. A handler that
  * waits for a lock held by a thread which then faults deadlocks (see
@@ -72,6 +84,20 @@ extern "C" {
 extern "C" {
 alignas(16) u8 __nx_exception_stack[0x10000];
 u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+// Nonzero while the entry handles an exception (one thread at a time).
+u32 rex_nx_exception_depth = 0;
+alignas(16) u8 rex_nx_emergency_stack[0x2000];
+
+// What an unhandled exception passes to svcBreak (and to the report).
+struct RexNxFaultInfo {
+  u64 pc;
+  u64 lr;
+  u64 sp;
+  u64 far;
+  u64 esr;
+  u64 type;
+};
+RexNxFaultInfo rex_nx_fault_info;
 }
 
 // Registers the entry saves on the exception stack; the offsets are used by
@@ -90,6 +116,9 @@ static_assert(sizeof(ThreadExceptionFrameA64) == 0x78);
 
 extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64* frame,
                                           NxSavedRegisters* saved);
+extern "C" [[noreturn]] void rex_nx_exception_nested(uint32_t type,
+                                                     ThreadExceptionFrameA64* frame);
+extern "C" void rex_nx_unhandled_break();
 
 // Strong definition of libnx's weak __libnx_exception_entry (crt0 branches to
 // it when the kernel delivers an exception). x0 = type, x1 = frame; x0-x8 are
@@ -100,6 +129,11 @@ asm(R"(
     .type   __libnx_exception_entry, %function
     .balign 16
 __libnx_exception_entry:
+    adrp    x2, rex_nx_exception_depth
+    ldr     w3, [x2, #:lo12:rex_nx_exception_depth]
+    cbnz    w3, 2f               // a fault inside the handler: see below
+    mov     w3, #1
+    str     w3, [x2, #:lo12:rex_nx_exception_depth]
     adrp    x2, __nx_exception_stack
     add     x2, x2, #:lo12:__nx_exception_stack
     adrp    x3, __nx_exception_stack_size
@@ -174,12 +208,40 @@ __libnx_exception_entry:
     ldp     x25, x26, [sp, #0x80]
     ldp     x27, x28, [sp, #0x90]
     ldr     x29,      [sp, #0xa0]
+    adrp    x5, rex_nx_exception_depth
+    str     wzr, [x5, #:lo12:rex_nx_exception_depth]
     mov     w0, #0xf801
     cmp     w6, #0
     csel    w0, w0, wzr, eq
     svc     0x28
     b       .
+2:
+    // Nested: the exception stack holds the outer frame. Emergency stack,
+    // then svcBreak (never returns).
+    adrp    x2, rex_nx_emergency_stack
+    add     x2, x2, #:lo12:rex_nx_emergency_stack
+    add     x2, x2, #0x2000
+    mov     sp, x2
+    mov     x29, xzr
+    bl      rex_nx_exception_nested
+    b       .
     .size   __libnx_exception_entry, . - __libnx_exception_entry
+
+    // Where an unhandled exception resumes, on the faulting thread's own
+    // registers and stack: svcBreak(BreakReason_Panic, &rex_nx_fault_info,
+    // sizeof) so that Atmosphere's creport writes the crash report.
+    .section .text.rex_nx_unhandled_break, "ax", %progbits
+    .global rex_nx_unhandled_break
+    .type   rex_nx_unhandled_break, %function
+    .balign 16
+rex_nx_unhandled_break:
+    mov     x0, #0               // BreakReason_Panic
+    adrp    x1, rex_nx_fault_info
+    add     x1, x1, #:lo12:rex_nx_fault_info
+    mov     x2, #48              // sizeof(RexNxFaultInfo)
+    svc     0x26                 // svcBreak
+    b       .
+    .size   rex_nx_unhandled_break, . - rex_nx_unhandled_break
     .text
 )");
 
@@ -338,9 +400,19 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
 
 }  // namespace rex::arch
 
+// Unhandled: record the fault, then resume the thread with its own registers
+// at rex_nx_unhandled_break (svcBreak), LR = faulting PC for the report.
+static void ResumeAtUnhandledBreak(uint32_t type, ThreadExceptionFrameA64* frame) {
+  rex_nx_fault_info = {frame->elr_el1, frame->lr, frame->sp, frame->far, frame->esr, type};
+  frame->lr = frame->elr_el1;
+  frame->elr_el1 = reinterpret_cast<u64>(&rex_nx_unhandled_break);
+}
+
 // Called by __libnx_exception_entry with the user-exception claim held.
-// true: resume with the (possibly modified) registers; false: the kernel
-// treats the exception as unhandled, with the original context.
+// Returns true: a handled exception resumes with the (possibly modified)
+// registers, an unhandled one at rex_nx_unhandled_break (svcBreak, crash
+// report). false would hand it to the kernel with 0xF801, which ends the
+// process without a report (run 10); no path returns it any more.
 extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64* frame,
                                           NxSavedRegisters* saved) {
   using namespace rex::arch;
@@ -360,7 +432,8 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
     SigSafeWriteLabelHex("pc", fault_pc);
     SigSafeWriteLabelHex("far", fault_addr);
     SigSafeWriteLabelHex("esr", static_cast<uint64_t>(esr));
-    return false;
+    ResumeAtUnhandledBreak(type, frame);
+    return true;
   }
 
   HostThreadContext thread_context{};
@@ -388,7 +461,29 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
   SigSafeWriteLabelHex("far", fault_addr);
   SigSafeWriteLabelHex("esr", static_cast<uint64_t>(esr));
   SigSafeWriteLabelHex("is_write", is_write ? 1ULL : 0ULL);
-  return false;
+  ResumeAtUnhandledBreak(type, frame);
+  return true;
+}
+
+// A fault while this thread was already inside the entry (a handler or the
+// logging faulted). Minimal report on the emergency stack, then svcBreak with
+// the inner fault's details; the outer fault was logged when it came in.
+extern "C" [[noreturn]] void rex_nx_exception_nested(uint32_t type,
+                                                     ThreadExceptionFrameA64* frame) {
+  using namespace rex::arch;
+  static bool reported = false;
+  rex_nx_fault_info = {frame->elr_el1, frame->lr, frame->sp, frame->far, frame->esr, type};
+  if (!reported) {
+    reported = true;
+    SigSafeWriteCStr("[rex] Fault inside the Switch exception handler\n");
+    SigSafeWriteLabelHex("pc", frame->elr_el1);
+    SigSafeWriteLabelHex("far", frame->far);
+    SigSafeWriteLabelHex("esr", static_cast<uint64_t>(frame->esr));
+  }
+  svcBreak(BreakReason_Panic, reinterpret_cast<uintptr_t>(&rex_nx_fault_info),
+           sizeof(rex_nx_fault_info));
+  for (;;) {
+  }
 }
 
 #endif  // REX_PLATFORM_NX
