@@ -391,3 +391,71 @@ Quindi:
 | `switch-game.nro` | 43.899.077 byte |
 
 Il gioco è stato ricompilato per intero perché il codice generato include `rex/hook.h` (e `rex/filesystem.h`, `rex/memory/utils.h`): cambiare `REX_EXPORT_STUB` in `hook.h` tocca per forza tutti i file generati.
+
+## 9. Run 10: fault sulla tabella delle funzioni, nessun crash report (2026-09-29)
+
+`out/console-runs/run10/`. Lo smoke arriva in fondo, OK. Il gioco supera `Setup` (corretto il percorso `sdmc:/`), monta `game:`, carica il XEX (entry point `829A0810`), fa `Resume` del thread principale e poi si chiude.
+
+### Cosa è successo
+
+- **Nessuna riga `TERMINATION`.** Le righe `[stderr]` sono quelle del runtime: `Unhandled Switch access violation`, `pc=0x34e9cba424`, `far=0x774a0e1b40`, `esr=0x92000006` (data abort, translation fault), `is_write=0`.
+- **`game-crash.log`** ha il fault completo: PC `base + 0x21A3424`, LR `base + 0x21A35C4`.
+- **Tipo:** un fault in lettura non gestito, sul thread principale del gioco. Non è un abort, né un'eccezione, né un exit, né un blocco.
+- **addr2line** sull'ELF di quel build (`out/build/switch-game/switch-game.elf`, 23:50):
+  - PC → `__imp__sub_82998DD0`, `gta4_recomp.75.cpp:25543`, cioè `REX_CALL_INDIRECT_FUNC(ctr.u32)`;
+  - LR → `sub_829989F8`, `gta4_recomp.75.cpp:24896`, il chiamante.
+- **Indirizzo:** `far - virtual_base = 0x842E1B40` = `x2`. È la voce della tabella delle funzioni (base `0x831F0000`, dal log) per la destinazione `0x82998DA0` (= `x0`, = `r11` nel codice): `0x831F0000 + (0x82998DA0 - 0x82120000) × 2`.
+- **Causa:** `XexModule` fa `LookupHeap(0x82000000)->Reset()` (xex_module.cpp:463) su tutto l'heap `0x80000000`, dopo che `Runtime::Setup` vi ha creato e riempito la tabella (36.880 voci).
+  - Sul desktop `Reset` azzera solo la tabella delle pagine dell'heap.
+  - Su NX restituiva al pool ogni blocco impegnato. Si vede nel log: 23 blocchi dopo `Setup`, 21 dopo `LoadXexImage`.
+
+### Correzioni
+
+- **`BaseHeap::Reset` su NX come sul desktop:** le pagine impegnate restano mappate con il loro contenuto. Il loro riferimento diventa "orfano" e lo rilascia `Dispose`, quindi a fine run i conti tornano a zero.
+- **`Memory::ResetHeapKeepingFunctionTables`** (usata dal loader) segna di nuovo come allocate le tabelle delle funzioni di quell'heap. Anche sul desktop, dopo `Reset`, l'heap poteva assegnare quelle pagine ad altro.
+- **Crash report di Atmosphère.**
+  - Il nostro `__libnx_exception_entry` restituiva i fault non gestiti con `svcReturnFromException(0xF801)`: il run 10 mostra che così il processo si chiude senza report. Il run 5, con `svcBreak`, il report l'aveva prodotto.
+  - Ora il dispatcher riprende il thread in fault, con i suoi registri e il suo stack, in `rex_nx_unhandled_break`, che chiama `svcBreak(BreakReason_Panic, &info, 48)`; `info` contiene pc, lr, sp, far, esr e tipo. LR viene impostato al PC del fault.
+  - Prima di arrivarci, il gestore di `switch-game` scrive `game-crash.log`.
+  - **Fault dentro il gestore:** un contatore di profondità nell'entry lo manda su uno stack di emergenza, con una sola riga su stderr, poi `svcBreak`. Il frame esterno non viene sovrascritto.
+  - Nessun percorso chiude il processo prima: il wrapper di `svcExitProcess` scatta solo quando qualcuno chiama `svcExitProcess`.
+
+### Smoke: tetto del pool
+
+| | Run 8 | Run 10 |
+|---|---|---|
+| Blocchi da 2 MiB ottenibili | 1542 MiB (`aligned_alloc` per blocco) | **1984 MiB** in una sola allocazione, più 256 MiB del pool del runtime = **2240 MiB** (+45%) |
+| Motivo dello stop | heap esaurito | heap esaurito (non il kernel) |
+| Rifiuto del kernel, solo viste | 2001-0103 a 17.624 viste | 2001-0103 a 17.965 viste |
+
+Il gioco prende il suo pool da 1536 MiB all'avvio senza errori.
+
+### Header del codice generato
+
+Inventario misurato con `g++ -MM` su `gta4_recomp.0.cpp`:
+
+| | Prima | Dopo |
+|---|---|---|
+| Header dell'SDK | circa 64 (`rex/ppc.h` → `hook.h`, `function.h`, `stack.h` → `kernel_state.h`, `xmemory.h`, logging, filesystem, thread, achievement, xam…; più `logging.h`, `chrono/clock.h`, `perf/counter.h`, `thread/mutex.h`, `system/mmio_handler.h`) | **9**: `ppc/generated.h`, `ppc/context.h`, `ppc/intrinsics.h`, `platform/fpscr.h`, `types.h`, `assert.h`, `platform.h`, `image_info.h`, `memory/guest_table.h` (+ simde) |
+
+Come funziona:
+
+- **`rex/ppc/generated.h`** contiene solo quello che il codice generato deve vedere inline: il layout di `PPCContext`, gli intrinseci, il descrittore dell'immagine e la tabella di traduzione di Switch.
+- **Servizi fuori linea.** Trap, `mftb`, lock delle interruzioni e MMIO riconosciuto chiamano funzioni in `src/system/ppc_generated.cpp`: nessuna è un percorso caldo.
+- **`REX_RECOMPILED_TU`.** Il generatore scrive `#define REX_RECOMPILED_TU` in testa a ogni `gta4_recomp.N.cpp` e a `gta4_init.cpp`. Hook e app che includono `gta4_init.h` senza la define ricevono l'API completa come prima.
+- **Dipendenze che restano, e perché:**
+  - il **layout di `PPCContext`** e le **macro di funzione** (`context.h`): sono l'ABI fra codice generato e runtime, un cambio lì deve ricompilare;
+  - gli **intrinseci** (`intrinsics.h`, `fpscr.h`, simde): vanno inline per le prestazioni;
+  - **`guest_table.h`**: la traduzione inline di ogni accesso su Switch;
+  - `types.h`, `assert.h`, `platform.h`, `image_info.h`: piccoli e stabili;
+  - fra i file generati, **`gta4_register.cpp`** include ancora `function_dispatcher.h` per l'interfaccia del registrar: un file solo.
+- **Rigenerazione necessaria:** la define viene dal generatore. Rigenerato: 48,3 s, 0 errori, 123.940/123.948 chiamate dirette.
+- **Primo tentativo di build:** mancava `<atomic>` (`std::atomic_thread_fence` per `sync`/`lwsync`). Rimesso fra gli header standard del template. Un controllo di tutti i nomi `std::` del codice generato trova solo `fma`/`isnan` (`<cmath>`, già incluso) e le fence.
+
+### Stato delle build
+
+- **Smoke:** ricompilato con tutte le modifiche all'SDK (5 min 9 s, 0 errori): `out/build/switch-smoke/switch-smoke.nro`.
+- **Gioco: build interrotta.** Claude Code l'ha fermata per memoria di sistema esaurita. La causa è una mia svista: il Ninja della build precedente, fallita su `<atomic>`, era ancora attivo, e per circa dieci minuti due Ninja hanno compilato nella stessa cartella, fino a 6 file generati insieme.
+  - 34 degli 84 file generati hanno compilato con il nuovo header, senza errori.
+  - Ho terminato i due processi Ninja rimasti e riparato `.ninja_deps` con `ninja -t recompact`.
+  - Restano 46 file generati e il link. `out/build/switch-game/switch-game.nro` è ancora quello del run 10.

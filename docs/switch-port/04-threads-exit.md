@@ -205,7 +205,7 @@ Di conseguenza, su Switch nessun fault era mai stato ripreso: né MMIO né write
 3. Chiama `rex_nx_exception_dispatch`, che costruisce `HostThreadContext` da frame e registri salvati, esegue la lista dei gestori e riscrive i registri modificati (x0–x8, lr, sp, pc nel frame; il resto nell'area salvata).
 4. Ripristina i registri e chiama `svc 0x28` (`svcReturnFromException`):
    - `0`: il kernel ricarica il frame e riprende al pc, eventualmente fatto avanzare dal gestore;
-   - `0xF801` (non gestito): il kernel tratta l'eccezione come non gestita con il contesto **originale**. Il crash report mostra quindi il PC vero invece di `svcBreak`.
+   - `0xF801` (non gestito): il kernel tratta l'eccezione come non gestita con il contesto originale. **Smentito dal run 10:** il processo si chiude **senza** crash report. Correzione in 06 §9: non si restituisce più `0xF801`, ma si riprende il thread in un trampolino che chiama `svcBreak`.
 
 Verificato nel link: crt0 salta al nuovo `__libnx_exception_entry` e `libnx.a(exception.o)` non viene più incluso.
 
