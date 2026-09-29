@@ -21,8 +21,9 @@
 // its own descriptor, fsync'd and closed before the next operation, and the
 // SDK logger writes through the same path, so after a crash the last line is
 // the last operation attempted. An unhandled fault is also written to
-// game-crash.log (registers, PC and LR as offsets from the module base) before
-// it goes back to the kernel, which writes Atmosphere's crash report.
+// game-crash.log (registers, PC and LR as offsets from the module base);
+// the runtime then ends it in svcBreak on the faulting thread's own stack, so
+// Atmosphere writes its crash report (exception_handler_switch.cpp).
 //
 // Every termination leaves a line in game.log (run 9 ended silently inside
 // Runtime::Setup): exit, _exit, _Exit, abort and svcExitProcess are wrapped at
@@ -193,8 +194,8 @@ void CrashHex(const char* label, uint64_t value) {
 }
 
 // Installed last: runs only for access violations no runtime handler claimed
-// (MMIO, physical write watch). Records the fault and lets it go to the
-// kernel.
+// (MMIO, physical write watch). Records the fault; returning false leaves it
+// unhandled, and the runtime ends it in svcBreak (Atmosphere crash report).
 bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
   const auto* tc = ex->thread_context();
   CrashWrite("=== unhandled access violation ===\n");

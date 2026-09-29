@@ -228,14 +228,20 @@ bool CodegenWriter::write(bool force) {
   // Generate recomp files with size-based splitting
   REXCODEGEN_TRACE("Recompiling {} functions...", functions.size());
   size_t currentFileBytes = 0;
-  println("#include \"{}_init.h\"\n", projectName);
+  // Recompiled files see only rex/ppc/generated.h through the init header
+  // (REX_RECOMPILED_TU), so runtime changes do not recompile them.
+  const auto print_recomp_preamble = [&] {
+    println("#define REX_RECOMPILED_TU");
+    println("#include \"{}_init.h\"\n", projectName);
+  };
+  print_recomp_preamble();
 
   for (size_t i = 0; i < functions.size(); i++) {
     std::string code = functions[i]->emitCpp(emitCtx);
 
     if (currentFileBytes > 0 && currentFileBytes + code.size() > REXCVAR_GET(max_file_size_bytes)) {
       SaveCurrentOutData();
-      println("#include \"{}_init.h\"\n", projectName);
+      print_recomp_preamble();
       currentFileBytes = 0;
     }
 

@@ -38,6 +38,7 @@ set(REXSYSTEM_SOURCES
     xam/user_profile.cpp
     xam/xsession.cpp
 
+    ppc_generated.cpp
     ppc_types.cpp
     elf_module.cpp
     entry_table.cpp
