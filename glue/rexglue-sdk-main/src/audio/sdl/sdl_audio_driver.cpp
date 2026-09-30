@@ -68,24 +68,33 @@ bool SDLAudioDriver::Initialize() {
   // Set app name for audio device identification
   SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "rexglue");
 
-  SDLSubsystemResult subsystem_result;
-  if (SDL_IsMainThread()) {
-    InitializeAudioSubsystem(&subsystem_result);
-  } else if (!SDL_RunOnMainThread(InitializeAudioSubsystem, &subsystem_result, true)) {
-    REXAPU_ERROR(
-        "SDL_RunOnMainThread() for audio initialization failed: {}; using paced silent "
-        "fallback",
-        SDL_GetError());
-    silent_fallback_ = true;
-    return true;
+  // Already initialised by the application on its main thread: use it as is.
+  // This runs on the guest thread calling XAudioRegisterRenderDriverClient,
+  // inside AudioSystem::RegisterClient, which holds the kernel's global lock;
+  // waiting there for the main thread deadlocks when the main thread needs
+  // that lock (tools/pc-eu-base, docs/switch-port/06 section 14).
+  if (SDL_WasInit(SDL_INIT_AUDIO)) {
+    // Not ours to quit: sdl_initialized_ stays false.
+  } else {
+    SDLSubsystemResult subsystem_result;
+    if (SDL_IsMainThread()) {
+      InitializeAudioSubsystem(&subsystem_result);
+    } else if (!SDL_RunOnMainThread(InitializeAudioSubsystem, &subsystem_result, true)) {
+      REXAPU_ERROR(
+          "SDL_RunOnMainThread() for audio initialization failed: {}; using paced silent "
+          "fallback",
+          SDL_GetError());
+      silent_fallback_ = true;
+      return true;
+    }
+    if (!subsystem_result.success) {
+      REXAPU_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}; using paced silent fallback",
+                   subsystem_result.error);
+      silent_fallback_ = true;
+      return true;
+    }
+    sdl_initialized_ = true;
   }
-  if (!subsystem_result.success) {
-    REXAPU_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}; using paced silent fallback",
-                 subsystem_result.error);
-    silent_fallback_ = true;
-    return true;
-  }
-  sdl_initialized_ = true;
 
   SDL_AudioSpec desired_spec = {};
   SDL_AudioSpec obtained_spec = {};

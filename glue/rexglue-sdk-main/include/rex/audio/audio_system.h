@@ -99,6 +99,9 @@ class AudioSystem : public system::IAudioSystem {
     uint32_t wrapped_callback_arg = 0;
     bool in_use = false;
   } clients_[kMaximumClientCount];
+  // Slot taken by a RegisterClient that is creating its driver outside the
+  // global lock (under global_critical_region_).
+  bool client_reserved_[kMaximumClientCount] = {};
 
   int FindFreeClient();
 

@@ -224,7 +224,7 @@ void AudioSystem::WorkerThreadMain() {
 int AudioSystem::FindFreeClient() {
   for (size_t i = 0; i < kMaximumClientCount; i++) {
     auto& client = clients_[i];
-    if (!client.in_use) {
+    if (!client.in_use && !client_reserved_[i]) {
       return i;
     }
   }
@@ -276,16 +276,30 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
   handoff::Record("audio-register", callback, {callback_arg});
   REXAPU_DEBUG("AudioSystem::RegisterClient: callback={:08X} callback_arg={:08X}", callback,
                callback_arg);
-  auto global_lock = global_critical_region_.Acquire();
-
-  auto index = FindFreeClient();
-  assert_true(index >= 0);
+  int index;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    index = FindFreeClient();
+    assert_true(index >= 0);
+    if (index < 0) {
+      return X_STATUS_UNSUCCESSFUL;
+    }
+    client_reserved_[index] = true;
+  }
   REXAPU_DEBUG("AudioSystem::RegisterClient: using client index={} queued_frames={}", index,
                queued_frames_);
 
+  // The driver is created outside the kernel's global lock: host audio
+  // libraries take locks of their own (SDL: hints, properties, calls on the
+  // main thread), and a host thread holding one of those while it waits for
+  // the global lock deadlocked the PC build with this call inside it
+  // (docs/switch-port/06-game-boot-plan.md section 14).
   auto* client_semaphore = client_semaphores_[index].get();
   AudioDriver* raw_driver = nullptr;
   auto result = CreateDriver(index, client_semaphore, &raw_driver);
+
+  auto global_lock = global_critical_region_.Acquire();
+  client_reserved_[index] = false;
   if (XFAILED(result)) {
     return result;
   }

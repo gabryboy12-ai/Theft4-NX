@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include <SDL3/SDL.h>
+
 #include <rex/cvar.h>
 #include <rex/diagnostics/export_stubs.h>
 #include <rex/logging.h>
@@ -31,6 +33,10 @@
 
 #include "gta4_init.h"
 
+
+REXCVAR_DEFINE_BOOL(pc_audio, false, "pc-eu-base",
+                    "Host audio (SDL). Off by default, as in switch-game, which runs without an "
+                    "audio system: XAudioRegisterRenderDriverClient then fails the same way on both");
 
 namespace {
 
@@ -51,6 +57,18 @@ class EuBaseApp final : public rex::ReXApp {
     // has already copied the cvar into config, so the default goes there.
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
+    }
+    if (!REXCVAR_GET(pc_audio)) {
+      config.audio_factory = nullptr;
+      return;
+    }
+    // SDL's audio subsystem on the main thread, now: the audio driver is
+    // created later on the guest thread that registers the audio client,
+    // while it holds the kernel's global lock, and asking the main thread
+    // from there deadlocked (PC run of 2026-09-30: the game's main thread
+    // stayed in XAudioRegisterRenderDriverClient).
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+      REXLOG_WARN("pc-eu-base: SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}", SDL_GetError());
     }
   }
 
@@ -102,9 +120,14 @@ class EuBaseApp final : public rex::ReXApp {
     REXLOG_INFO("heartbeat {} s: exports {} distinct, {} calls", seconds, distinct, calls);
     rex::diagnostics::ExportThreadSnapshot traces[64];
     const size_t n = rex::diagnostics::SnapshotExportThreads(traces, 64);
+    // Only tries: a guest thread may hold the kernel's global lock for good
+    // (the first PC runs stopped here after one heartbeat).
     std::vector<rex::system::object_ref<rex::system::XThread>> threads;
     if (auto* kernel = rex::system::kernel_state()) {
-      threads = kernel->object_table()->GetObjectsByType<rex::system::XThread>();
+      if (!kernel->object_table()->TryGetObjectsByType<rex::system::XThread>(
+              &threads, std::chrono::milliseconds(200))) {
+        REXLOG_INFO("  (kernel global lock busy for 200 ms: thread names unavailable)");
+      }
     }
     for (size_t i = 0; i < n; ++i) {
       const auto& t = traces[i];
