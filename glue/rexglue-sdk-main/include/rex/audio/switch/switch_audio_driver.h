@@ -69,6 +69,7 @@ class SwitchAudioDriver : public AudioDriver {
   AudioDriverWaveBuf wavebufs_[kWaveBufCount] = {};
   int16_t* pcm_buffers_[kWaveBufCount] = {};
   int current_buf_ = 0;
+  uint64_t slot_wait_timeouts_ = 0;  // frames dropped by WaitForCurrentSlotReusable
 
   // Aligned memory pool registered with audren.
   void* mempool_ptr_ = nullptr;
@@ -88,7 +89,7 @@ class SwitchAudioDriver : public AudioDriver {
   // Block (poll via audrenWaitFrame + audrvUpdate) until the current wave
   // buffer slot is reusable. Caller's unique_lock owns `audren_mutex_` on
   // entry; the function may drop and reacquire it, but returns with it held.
-  void WaitForCurrentSlotReusable(std::unique_lock<std::mutex>& drv_lock);
+  bool WaitForCurrentSlotReusable(std::unique_lock<std::mutex>& drv_lock);
 };
 
 }  // namespace rex::audio::nx

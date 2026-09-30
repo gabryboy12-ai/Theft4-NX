@@ -160,13 +160,11 @@ bool SwitchAudioDriver::Initialize() {
     return false;
   }
 
-  // Raise thread priority for the audio worker that calls SubmitFrame.
-  // Switch default is 0x2C; audio glitches under rendering load unless we
-  // bump to 0x28 (higher priority on Switch = lower numeric value).
-  Result prio_rc = svcSetThreadPriority(CUR_THREAD_HANDLE, 0x28);
-  if (R_FAILED(prio_rc)) {
-    REXAPU_WARN("svcSetThreadPriority(0x28) failed: 0x{:08X} (non-fatal)", prio_rc);
-  }
+  // No priority change here: this runs on the thread that registers the
+  // audio client, i.e. the guest thread calling
+  // XAudioRegisterRenderDriverClient, which it used to move to 0x28, a
+  // cooperative band where a spinning guest holds its core. The Audio Worker
+  // that calls SubmitFrame gets 0x2B by name (04-threads-exit.md section 7).
 
   // Start the voice.
   audrvVoiceStart(&audren_driver_, 0);
@@ -184,18 +182,45 @@ bool SwitchAudioDriver::CurrentSlotIsReusable() {
 }
 
 // Wait for the current wave-buffer slot to transition to Done/Free before
-// returning. Polls audrvUpdate, gated on audrenWaitFrame() to avoid a busy
-// loop. Caller passes the unique_lock owning `audren_mutex_`; this function
-// drops and reacquires it around the blocking frame wait. On return the
-// caller's lock is re-held.
-void SwitchAudioDriver::WaitForCurrentSlotReusable(
+// returning. Polls audrvUpdate every millisecond (audren renders a 5 ms
+// frame). Caller passes the unique_lock owning `audren_mutex_`; this function
+// drops and reacquires it around each sleep. On return the caller's lock is
+// re-held.
+//
+// Bounded (docs/switch-port/09-rules.md): it used to wait in audrenWaitFrame()
+// with no timeout, so a renderer that stopped consuming left the audio worker
+// blocked forever and the game silent, with nothing in the log (the failure
+// UnleashedRecomp-NX saw with SDL's audio thread). Now a wait longer than
+// 100 ms is logged, and after 500 ms the caller drops the frame (the wave
+// buffer is still linked in the voice's queue, so it cannot be reused): the
+// worker never hangs. false = the wait timed out.
+bool SwitchAudioDriver::WaitForCurrentSlotReusable(
     std::unique_lock<std::mutex>& drv_lock) {
+  constexpr uint64_t kSliceNs = 1'000'000;
+  constexpr uint64_t kLogAfterNs = 100'000'000;
+  constexpr uint64_t kGiveUpAfterNs = 500'000'000;
+  uint64_t waited_ns = 0;
+  bool logged = false;
   while (!CurrentSlotIsReusable()) {
+    if (waited_ns >= kGiveUpAfterNs) {
+      ++slot_wait_timeouts_;
+      REXAPU_WARN("Switch audio: wave buffer {} still owned by the renderer after {} ms; "
+                  "dropping one frame ({} dropped so far)",
+                  current_buf_, waited_ns / 1'000'000, slot_wait_timeouts_);
+      return false;
+    }
+    if (!logged && waited_ns >= kLogAfterNs) {
+      logged = true;
+      REXAPU_WARN("Switch audio: waiting {} ms for wave buffer {} (renderer late or stopped)",
+                  waited_ns / 1'000'000, current_buf_);
+    }
     drv_lock.unlock();
-    audrenWaitFrame();
+    svcSleepThread(kSliceNs);
+    waited_ns += kSliceNs;
     drv_lock.lock();
     audrvUpdate(&audren_driver_);
   }
+  return true;
 }
 
 void SwitchAudioDriver::SubmitFrame(uint32_t frame_ptr) {
@@ -257,8 +282,9 @@ void SwitchAudioDriver::SubmitFrame(uint32_t frame_ptr) {
       // Block until the current slot is safe to overwrite (per libnx
       // `audren_user` sample: do NOT write a wave buffer whose state is
       // Queued / Waiting / Playing).
-      WaitForCurrentSlotReusable(drv_guard);
-      ConvertAndSubmit(queued);
+      if (WaitForCurrentSlotReusable(drv_guard)) {
+        ConvertAndSubmit(queued);
+      }
     }
 
     {
