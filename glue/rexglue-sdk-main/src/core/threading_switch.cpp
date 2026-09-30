@@ -925,19 +925,25 @@ class PosixCondition<Thread> : public PosixConditionBase {
           "5s for cooperative exit on handle {:#x}",
           static_cast<uint32_t>(nx_handle_));
       constexpr u64 kTerminateTimeoutNs = 5ULL * 1000ULL * 1000ULL * 1000ULL;
+      bool exited = false;
       if (nx_handle_ != INVALID_HANDLE) {
         Result rc = svcWaitSynchronizationSingle(nx_handle_, kTerminateTimeoutNs);
-        if (R_FAILED(rc)) {
+        exited = R_SUCCEEDED(rc);
+        if (!exited) {
           REXSYS_WARN(
               "Thread::Terminate: svcWaitSynchronizationSingle returned "
               "{:#x}; thread may not have exited.",
               static_cast<uint32_t>(rc));
         }
       }
-      // Best-effort detach so the pthread record is released even if the
-      // kernel thread is stuck. Cannot use pthread_join here — it is
-      // unbounded on libnx without async cancel.
-      (void)pthread_detach(thread_);
+      // No pthread_detach (docs/switch-port/09-rules.md): post_execution
+      // joins, and a join after a detach is undefined (on libnx the record
+      // may already be freed). An exited thread is joined there, bounded; one
+      // still running is abandoned, its record and stack leaked rather than
+      // joined without a bound.
+      if (!exited) {
+        abandoned_ = true;
+      }
     }
   }
 
@@ -959,8 +965,10 @@ class PosixCondition<Thread> : public PosixConditionBase {
  private:
   static void* ThreadStartRoutine(void* parameter);
   inline bool signaled() const override { return signaled_; }
+  // Runs after every successful wait on the thread: join once only (a second
+  // pthread_join of the same thread is undefined, like a join after detach).
   inline void post_execution() override {
-    if (thread_) {
+    if (thread_ && !abandoned_ && !joined_.exchange(true)) {
       pthread_join(thread_, nullptr);
     }
     sem_destroy(&suspend_sem_);
@@ -980,6 +988,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
   // svcSetThreadPriority/Activity/CoreMask.
   Handle nx_handle_ = INVALID_HANDLE;
   int nx_deferred_priority_ = 0;
+  // Terminate timed out with the thread still running: never joined.
+  bool abandoned_ = false;
+  std::atomic<bool> joined_{false};
 #if REX_PLATFORM_ANDROID
   // Name accessible via name() on Android before API 26 which added
   // pthread_getname_np.
