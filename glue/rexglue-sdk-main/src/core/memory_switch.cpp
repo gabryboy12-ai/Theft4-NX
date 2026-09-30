@@ -82,12 +82,14 @@ uint8_t* rex_guest_physical_base;
 
 // Every commit and protect goes through here in the game, so the trace (one
 // sink call per SVC) stays off unless asked for.
-// Default 1536 MiB = 768 blocks: guest physical memory (512 MiB) plus about
-// 1 GiB of virtual heaps and XEX, the upper end of the game's estimate
-// (03-memory.md section 3), and about 1.5 GiB of the ~3.1 GiB heap left for
-// the runtime, Vulkan/Mesa, the shader caches and audio (the margin the model
-// decision asked for).
-REXCVAR_DEFINE_INT32(nx_guest_pool_mib, 1536, "Memory",
+// Default 768 MiB = 384 blocks: the 360's 512 MiB plus room for the XEX and
+// for 2 MiB blocks only partly used. Everything else comes from the same
+// ~3.1 GiB heap, and the GPU is the big consumer: nfsmw-nx measures about
+// 500 MB of GPU memory in a race on a 1.4-1.5 GB Vulkan budget
+// (platform-notes.md), all from this heap. Until run 11 the default was
+// 1536 MiB. game.log records the peak of blocks in use; when the pool runs
+// out, the error names this cvar.
+REXCVAR_DEFINE_INT32(nx_guest_pool_mib, 768, "Memory",
                      "Switch: MiB of heap taken once when the guest arena is reserved, from "
                      "which the 2 MiB guest blocks are handed out (rounded to 2 MiB)");
 
@@ -212,8 +214,10 @@ bool MapBlock(size_t block) {
   if (g_arena.free_slots.empty()) {
     REXSYS_ERROR(
         "memory_switch: guest pool exhausted: all {} blocks ({} MiB) in use, arena block {} "
-        "refused; raise the cvar nx_guest_pool_mib",
-        g_arena.stats.pool_blocks, g_arena.stats.pool_blocks * 2, block);
+        "refused; raise the cvar nx_guest_pool_mib (now {} MiB), e.g. nx_guest_pool_mib = {} "
+        "in game.toml",
+        g_arena.stats.pool_blocks, g_arena.stats.pool_blocks * 2, block,
+        g_arena.stats.pool_blocks * 2, g_arena.stats.pool_blocks * 2 + 256);
     TraceMemory("MapBlock %zu: guest pool exhausted (%zu blocks)", block,
                 g_arena.stats.pool_blocks);
     return false;

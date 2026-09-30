@@ -511,10 +511,10 @@ void StepGuestMemory() {
   SMOKE_INFO("step 3 guest memory: rex::memory::Memory::Initialize (runtime path, model A: table)");
   ScopedMemoryTrace trace;
   // The guest pool takes its heap once, up front (memory_switch.cpp). The
-  // game's 1536 MiB default would leave the probes too little heap (T5, T8,
+  // game's 768 MiB default would leave the probes less heap (T5, T8,
   // T11.2 measure with the rest), so the smoke uses 256 MiB unless
   // smoke.toml sets nx_guest_pool_mib.
-  if (REXCVAR_GET(nx_guest_pool_mib) == 1536) {
+  if (REXCVAR_GET(nx_guest_pool_mib) == 768) {
     REXCVAR_SET(nx_guest_pool_mib, 256);
   }
   SMOKE_INFO("  guest pool: nx_guest_pool_mib = %d", int(REXCVAR_GET(nx_guest_pool_mib)));
