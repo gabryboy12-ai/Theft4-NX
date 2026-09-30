@@ -13,7 +13,9 @@
 //   T9 fault round trip on guest memory (read-only / no-access page, handler
 //      restores RW and resumes) and the runtime's physical write watch
 //   T10 concurrent write faults: 3 threads, one per core, 10,000 faults each
-//      on separate watched pages (is libnx's single exception stack a problem?)
+//      on separate watched pages (is libnx's single exception stack a problem?),
+//      and register integrity: x0-x28 and q8-q15 unique per thread before each
+//      fault, compared after the resume (0 discrepancies required)
 //   T11 guest-memory models with svcMapProcessMemory aliases: the alias
 //      primitive on our 2 MiB blocks, model D (every view at commit) and its
 //      ceiling, and the access cost of direct / table / nfsmw-nx's macros
@@ -30,6 +32,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1335,6 +1338,160 @@ void ProbeFaultRoundTrip(rex::memory::Memory* memory) {
 constexpr int kT10Threads = 3;
 constexpr u32 kT10Rounds = 10000;
 
+// Register integrity (nfsmw-nx's "invisible failure": with one exception
+// stack and dump shared by the process, a thread was resumed with the
+// registers another thread had saved, and a test that only checked that the
+// process stayed alive passed). Before each faulting store, every thread
+// loads values unique to it and to the round into x0-x28 and q8-q15; after
+// the resume it stores them back and compares. A value carrying another
+// thread's tag means it came back with that thread's registers.
+//
+// Layout (byte offsets, what the asm below uses):
+//   0..231   x0-x28 to load      232 address of the store (into x29)
+//   256..383 q8-q15 to load      384..615 x0-x28 after the resume
+//   640..767 q8-q15 after the resume
+struct alignas(16) T10RegisterBlock {
+  u64 x_in[29];
+  u64 store_address;
+  u64 pad0[2];
+  u64 q_in[16];  // q8-q15, low then high half
+  u64 x_out[29];
+  u64 pad1[3];
+  u64 q_out[16];
+};
+static_assert(offsetof(T10RegisterBlock, store_address) == 232);
+static_assert(offsetof(T10RegisterBlock, q_in) == 256);
+static_assert(offsetof(T10RegisterBlock, x_out) == 384);
+static_assert(offsetof(T10RegisterBlock, q_out) == 640);
+
+constexpr u64 T10Tag(u32 kind, int thread) { return u64(kind + u32(thread)) << 56; }
+
+u64 T10RegisterValue(u32 kind, int thread, u32 reg, u32 round) {
+  return T10Tag(kind, thread) | (u64(reg) << 40) | (u64(u32(thread)) << 24) | round;
+}
+
+// Fills the block for one round; returns the 32-bit value the store writes
+// (the low half of x0: (thread << 24) | round, as before).
+u32 T10FillBlock(T10RegisterBlock* b, int thread, u32 round, volatile u32* word) {
+  for (u32 r = 0; r < 29; ++r) {
+    b->x_in[r] = T10RegisterValue(0xA0, thread, r, round);
+    b->x_out[r] = 0;
+  }
+  for (u32 q = 0; q < 8; ++q) {
+    const u64 lo = T10RegisterValue(0xB0, thread, 8 + q, round);
+    b->q_in[2 * q] = lo;
+    b->q_in[2 * q + 1] = ~lo;
+    b->q_out[2 * q] = b->q_out[2 * q + 1] = 0;
+  }
+  b->store_address = reinterpret_cast<u64>(word);
+  return u32(b->x_in[0]);
+}
+
+// Loads the registers, stores w0 to *store_address (the fault), and saves the
+// registers as they are after the resume. x29 carries the address and x30
+// the block; both are saved on the stack and restored.
+__attribute__((noinline)) void T10StoreWithRegisters(T10RegisterBlock* block) {
+  register T10RegisterBlock* base asm("x30") = block;
+  asm volatile(
+      "stp x29, x30, [sp, #-16]!\n\t"
+      "ldr x29, [x30, #232]\n\t"
+      "ldp q8, q9, [x30, #256]\n\t"
+      "ldp q10, q11, [x30, #288]\n\t"
+      "ldp q12, q13, [x30, #320]\n\t"
+      "ldp q14, q15, [x30, #352]\n\t"
+      "ldp x0, x1, [x30, #0]\n\t"
+      "ldp x2, x3, [x30, #16]\n\t"
+      "ldp x4, x5, [x30, #32]\n\t"
+      "ldp x6, x7, [x30, #48]\n\t"
+      "ldp x8, x9, [x30, #64]\n\t"
+      "ldp x10, x11, [x30, #80]\n\t"
+      "ldp x12, x13, [x30, #96]\n\t"
+      "ldp x14, x15, [x30, #112]\n\t"
+      "ldp x16, x17, [x30, #128]\n\t"
+      "ldp x18, x19, [x30, #144]\n\t"
+      "ldp x20, x21, [x30, #160]\n\t"
+      "ldp x22, x23, [x30, #176]\n\t"
+      "ldp x24, x25, [x30, #192]\n\t"
+      "ldp x26, x27, [x30, #208]\n\t"
+      "ldr x28, [x30, #224]\n\t"
+      "str w0, [x29]\n\t"  // write fault -> handler -> resume here
+      "add x30, x30, #384\n\t"
+      "stp x0, x1, [x30, #0]\n\t"
+      "stp x2, x3, [x30, #16]\n\t"
+      "stp x4, x5, [x30, #32]\n\t"
+      "stp x6, x7, [x30, #48]\n\t"
+      "stp x8, x9, [x30, #64]\n\t"
+      "stp x10, x11, [x30, #80]\n\t"
+      "stp x12, x13, [x30, #96]\n\t"
+      "stp x14, x15, [x30, #112]\n\t"
+      "stp x16, x17, [x30, #128]\n\t"
+      "stp x18, x19, [x30, #144]\n\t"
+      "stp x20, x21, [x30, #160]\n\t"
+      "stp x22, x23, [x30, #176]\n\t"
+      "stp x24, x25, [x30, #192]\n\t"
+      "stp x26, x27, [x30, #208]\n\t"
+      "str x28, [x30, #224]\n\t"
+      "stp q8, q9, [x30, #256]\n\t"
+      "stp q10, q11, [x30, #288]\n\t"
+      "stp q12, q13, [x30, #320]\n\t"
+      "stp q14, q15, [x30, #352]\n\t"
+      "ldp x29, x30, [sp], #16\n\t"
+      : "+r"(base)
+      :
+      : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+        "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+        "x26", "x27", "x28", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "memory");
+}
+
+// Per thread, written only by that thread (plain counters, no atomics).
+struct T10RegisterCheck {
+  u32 mismatched_rounds = 0;
+  u64 mismatched_registers = 0;
+  u64 foreign_registers = 0;  // value tagged with another thread
+  u32 first_round = 0;
+  u32 first_register = 0;
+  bool first_is_vector = false;
+  u64 first_expected = 0;
+  u64 first_got = 0;
+
+  void Note(bool vector, u32 reg, u64 expected, u64 got, int thread, u32 round, bool* any) {
+    ++mismatched_registers;
+    const u64 tag = got >> 56;
+    const u64 base = vector ? 0xB0 : 0xA0;
+    const u64 own = base + u64(thread);
+    if (tag >= base && tag < base + kT10Threads && tag != own) {
+      ++foreign_registers;
+    }
+    if (!*any && mismatched_rounds == 0) {
+      first_round = round;
+      first_register = reg;
+      first_is_vector = vector;
+      first_expected = expected;
+      first_got = got;
+    }
+    *any = true;
+  }
+
+  void Check(const T10RegisterBlock& b, int thread, u32 round) {
+    bool any = false;
+    for (u32 r = 0; r < 29; ++r) {
+      if (b.x_out[r] != b.x_in[r]) {
+        Note(false, r, b.x_in[r], b.x_out[r], thread, round, &any);
+      }
+    }
+    for (u32 q = 0; q < 16; ++q) {
+      if (b.q_out[q] != b.q_in[q]) {
+        // Only the low half carries the tag; the high half is its complement.
+        const u64 got = (q & 1) ? ~b.q_out[q] : b.q_out[q];
+        Note(true, 8 + q / 2, b.q_in[q & ~1u], got, thread, round, &any);
+      }
+    }
+    if (any) {
+      ++mismatched_rounds;
+    }
+  }
+};
+
 struct T10Slot {
   uint32_t physical = 0;
   std::atomic<u32> calls{0};
@@ -1355,6 +1512,7 @@ struct T10Run {
   std::atomic<u32> bad_reads[kT10Threads] = {};
   std::atomic<int> ran_on[kT10Threads] = {};
   std::atomic<u64> ticks[kT10Threads] = {};
+  T10RegisterCheck registers[kT10Threads];  // each written by its own thread only
   std::vector<std::unique_ptr<rex::thread::Thread>> threads;
 };
 
@@ -1432,10 +1590,12 @@ void ProbeConcurrentFaults(rex::memory::Memory* memory) {
           while (!r->go.load()) {
           }
           const u64 t0 = armGetSystemTick();
+          T10RegisterBlock block;
           for (u32 k = 0; k < kT10Rounds; ++k) {
             memory->EnablePhysicalMemoryAccessCallbacks(physical, 0x1000, true, false);
-            const u32 value = (u32(i) << 24) | k;
-            *word = value;  // write fault on the read-only page
+            const u32 value = T10FillBlock(&block, i, k, word);
+            T10StoreWithRegisters(&block);  // write fault on the read-only page
+            r->registers[i].Check(block, i, k);
             if (*word != value) {
               r->bad_reads[i].fetch_add(1);
             }
@@ -1464,6 +1624,25 @@ void ProbeConcurrentFaults(rex::memory::Memory* memory) {
   }
   const double total_ms = TicksToMs(armGetSystemTick() - t0);
   bool ok = !timed_out && watch.stray_calls.load() == 0;
+  u64 register_mismatches = 0;
+  for (int i = 0; i < kT10Threads && !timed_out; ++i) {
+    const T10RegisterCheck& c = run->registers[i];
+    register_mismatches += c.mismatched_registers;
+    if (c.mismatched_rounds == 0) {
+      SMOKE_INFO("T10 registers thread %d: x0-x28 and q8-q15 intact after %u resumes -> ok", i,
+                 kT10Rounds);
+    } else {
+      SMOKE_INFO("T10 registers thread %d: %u of %u rounds resumed with wrong registers, %" PRIu64
+                 " registers in all (%" PRIu64 " carrying another thread's tag); first: round %u "
+                 "%s%u expected %016" PRIx64 " got %016" PRIx64 " -> WRONG",
+                 i, c.mismatched_rounds, kT10Rounds, c.mismatched_registers, c.foreign_registers,
+                 c.first_round, c.first_is_vector ? "q" : "x", c.first_register, c.first_expected,
+                 c.first_got);
+    }
+  }
+  SMOKE_INFO("T10 RESULT register integrity: %" PRIu64 " discrepancies (must be 0) -> %s",
+             register_mismatches, register_mismatches == 0 ? "ok" : "WRONG");
+  ok &= register_mismatches == 0;
   for (int i = 0; i < kT10Threads; ++i) {
     const u32 calls = watch.slots[i].calls.load();
     const bool thread_ok =
