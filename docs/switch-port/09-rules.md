@@ -1,0 +1,144 @@
+# 09 – Regole per il codice NX
+
+Regole ricavate dai guasti visti qui e in nfsmw-nx / UnleashedRecomp-NX
+(`platform-notes.md`, `porting-another-game.md`, 10-unleashed-nx.md). Ogni
+regola ha il motivo, e sotto le eccezioni che il codice NX aveva al
+2026-09-30 (controllo fatto su `src/core/*switch*`, `src/audio/switch`,
+`threading_switch.cpp`, `export_stubs.cpp`, `tools/switch-game`,
+`tools/switch-smoke`, e sui punti del codice condiviso che su Switch girano).
+
+## 1. Ogni attesa ha un timeout e scrive nel log quanto sta aspettando
+
+Condvar, eventi, semafori, spin, `svcWaitSynchronization`, `eventWait`: con un
+limite, e una riga di log quando l'attesa supera una soglia. Un risveglio perso
+deve diventare una riga nel log, non un blocco silenzioso (nfsmw-nx: un thread
+di copia dei vertici bloccato da un risveglio perso su milioni; UnleashedRecomp:
+il thread audio di SDL fermo per sempre).
+
+**Eccezioni, e perché:**
+
+| Dove | Attesa | Stato |
+|---|---|---|
+| `threading_switch.cpp` `PosixCondition::Wait` con timeout infinito (`cond_.wait`) | le attese **INFINITE del gioco** (`KeWaitForSingleObject` & co.) | lasciata: è la semantica che il gioco chiede. Resta visibile: dal run 12 l'istantanea dei thread di switch-game dice "IN KeWaitForSingleObject for 40 s" |
+| `threading_switch.cpp` `WaitStarted` (`state_signal_.wait`) | l'avvio di un thread appena creato | senza limite; il thread parte in microsecondi. Da limitare se mai compare in un'istantanea |
+| `threading_switch.cpp` `ThreadStartRoutine`, thread creato sospeso (`state_signal_.wait` fino al Resume) | un thread guest creato sospeso | senza limite per definizione (aspetta il Resume del gioco) |
+| `threading_switch.cpp` `WaitSuspended` (`sem_wait`) | un thread che si è sospeso da solo | idem |
+| `switch-game` `StopAtMissingFunction` (`svcSleepThread(INT64_MAX)`) | il thread che ha raggiunto il punto di arresto | voluto: il thread resta fermo fino al + |
+
+**Corretto in questo giro:** `switch_audio_driver.cpp`
+`WaitForCurrentSlotReusable` aspettava in `audrenWaitFrame()` senza limite (vedi
+§4 di 10-unleashed-nx.md): ora sonda ogni ms, scrive un warning dopo 100 ms e
+dopo 500 ms scarta il frame. `Thread::Terminate` aveva già un limite (5 s).
+
+## 2. Hook e codice host toccano la memoria guest solo con `GuestToHost` / `TranslateVirtual`
+
+Mai `base + addr`: nel modello A le finestre 0x7F/0xA0/0xC0/0xE0 e la memoria
+fisica sono raggiunte attraverso `rex_guest_table`, e sopra 16 MiB l'aritmetica
+host non è contigua fra finestre (03 §8). Sul PC, inoltre, ≥ 0xE0000000 c'è
+lo scarto di 0x1000.
+
+**Eccezioni trovate** (nessuna su un percorso attivo in switch-game oggi):
+
+| Dove | Codice | Perché regge oggi | Da fare |
+|---|---|---|---|
+| `include/rex/ppc/stack.h` `stack_limit_from_pcr` | `base + ctx.r13.u32 + 0x74` | il KPCR viene da `SystemHeapAlloc` nell'heap virtuale da 4 KiB (< 0xA0000000, contiguo); `stack_bounds_check` non ha chiamanti | passare a `GuestToHost` se torna in uso |
+| `src/kernel/crt/heap.cpp` `ReXHeap::GuestToHost` | `membase_ + guest_addr` | usato solo con `[rexcrt]` (sostituzione dell'heap del CRT), assente in `config-eu-base` | passare a `memory->TranslateVirtual` prima di usare `[rexcrt]` su Switch |
+| `src/system/ppc_generated.cpp` `GuestString` | `base + guest_address` | ramo solo desktop; su NX usa già `GuestToHost` | — |
+
+## 3. Niente `std::thread::detach()` (né `pthread_detach`) su NX
+
+Con libnx 4.12 `detach()` può lanciare `std::system_error` se il thread è già
+finito, e si finisce in `std::terminate` (nfsmw-nx). Su NX: thread persistenti
+con una coda di lavori e `join` all'uscita.
+
+**Controllo:** nessun `.detach()` nel runtime, nell'SDK (`src/`, `include/`),
+in `tools/switch-game`, `tools/switch-smoke`, né nelle librerie di terze parti
+linkate su Switch (spdlog, fmt, toml++, xxHash, snappy, o1heap: i `detach()` di
+toml++ sono metodi del suo formatter, non thread). Nessun `std::async`.
+
+**Corretto in questo giro:** `threading_switch.cpp` `Thread::Terminate` (thread
+diverso dal chiamante) faceva `pthread_detach` e poi, in `post_execution`,
+`pthread_join` sullo stesso thread: una join dopo una detach è indefinita, e su
+libnx il record del thread può essere già liberato. Ora: niente detach; se il
+thread è uscito entro 5 s viene joinato (una volta sola, flag `joined_`: anche
+due attese successive sullo stesso thread facevano due join), altrimenti è
+abbandonato (`abandoned_`) e mai joinato.
+
+**Thread `std::thread`/`std::jthread` compilati su Switch:** `TimerQueue`
+(`std::jthread`, fermato da `Shutdown()` registrato con `atexit`, 04 §5),
+`xam_voice.cpp` (due `std::jthread`), `live_compatibility.cpp` e
+`arbitration_async.h` (`std::thread`, joinati nei distruttori). Nessuno è
+staccato. Attenzione diversa ma collegata: su libnx i distruttori statici non
+girano (04 §5), e uno `std::thread` joinable distrutto chiama
+`std::terminate`.
+
+## 4. Niente atomiche per contatori scritti da un solo thread
+
+L'A57 non ha LSE: `fetch_add` è un ciclo `ldxr`/`stxr`, con barriere se non è
+relaxed. Un contatore con un solo scrittore (verificato: tutti gli scrittori)
+si scrive con load + store; se un altro thread lo legge, `std::atomic` con
+`load`/`store` relaxed (stesso codice di un `ldr`/`str`), mai
+read-modify-write. UnleashedRecomp-NX ha misurato questi cicli sul thread del
+gioco (round 9, "Statistics without atomic read-modify-writes").
+
+**Percorsi caldi, stato:**
+
+| Percorso | Contatori | Scrittori | Stato |
+|---|---|---|---|
+| Fault (`exception_handler_switch.cpp`) | `rex_nx_exception_depth` | il thread nel gestore (il kernel serializza, T10: mai 2 insieme) | intero semplice, `ldr`/`str` in asm: ok |
+| Commit memoria (`memory_switch.cpp`) | `GuestArenaStats` (blocchi, pagine, map/unmap, tick) | sotto `g_arena.mutex` | interi semplici: ok. `g_trace_sink` è un puntatore atomico letto per chiamata (load, non RMW) |
+| Stub (`export_stubs.cpp`) | `ExportStubSite::hits` | **ogni** thread che chiama lo stub | multi-scrittore: `fetch_add` relaxed giustificato |
+| Export implementate (nuovo, run 12) | `ExportCallSite::calls` | ogni thread | multi-scrittore: `fetch_add` relaxed |
+| Export implementate, per thread (nuovo) | `ExportThreadTrace::calls`, `current`, `last`, `enter_ticks` | il thread stesso | load + store relaxed (`BumpOwn`), niente RMW: la regola applicata |
+| Audio (`switch_audio_driver.cpp`) | `slot_wait_timeouts_` | sotto `audren_mutex_` | intero semplice |
+
+Quindi **sui percorsi caldi non c'erano contatori atomici a thread singolo**.
+Le uniche RMW a thread singolo sono nel codice di prova di switch-smoke (T10:
+`bad_reads[i]` e `slots[i].calls`, ciascuno di un solo thread): codice di
+misura, lasciato.
+
+## 5. `static_assert(std::has_unique_object_representations_v<T>)` su chiavi hash e confronti byte per byte
+
+Una struttura con padding confrontata con `memcmp` o hashata sui byte dà
+risultati diversi per valori uguali (nfsmw-nx: chiave delle pipeline "senza
+padding"; UnleashedRecomp: xxHash con strict aliasing).
+
+**Stato:**
+
+- Il template generico `rex::XXHasher<Key>` (`include/rex/hash.h`) hasha i byte
+  di `Key`. Oggi lo usano solo `TextureKey` (`pipeline/texture/cache.h`) e
+  `FramebufferKey` (`vulkan/render_target_cache.h`), entrambi nella grafica
+  desktop, non compilata su Switch. **Il posto giusto per l'assert è dentro
+  `XXHasher`**, così ogni chiave futura (il renderer Switch) è coperta. Non
+  aggiunto ora: compilerebbe per la prima volta quelle due chiavi con l'assert
+  nella build PC di C, e se hanno padding va corretta la chiave, non spento
+  l'assert. Da fare insieme al primo codice grafico su Switch.
+- `ThunkKey` (`kernel_module.h`) e la chiave di `live_compatibility.cpp`
+  hanno hash per campi e `operator==` per campi: non servono.
+- I `memcmp` del runtime (`xex_module.cpp`, `stfs_container_device.cpp`,
+  `disc_image_device.cpp`) confrontano digest e magic, array di byte: non
+  servono.
+
+## 6. Nei cicli caldi, copiare in locali i campi letti da strutture passate per riferimento
+
+GCC non può tenere in un registro un campo di `const T&` letto in un ciclo se
+nel ciclo c'è una scrittura che potrebbe fare alias (e con
+`-fno-strict-aliasing`, che l'SDK usa, quasi ogni scrittura lo è): lo rilegge
+dalla memoria a ogni giro. Si copia prima del ciclo.
+
+Controllato su `memory_switch.cpp` (`MapBlock`/commit: i cicli usano già
+indici locali), sul gestore dei fault (asm e dispatch senza cicli caldi),
+`export_stubs.cpp` (nessun ciclo sul percorso della chiamata),
+`ConvertAndSubmit` dell'audio (legge da un buffer locale). Nessuna eccezione
+trovata; la regola conta soprattutto per il renderer e gli hook futuri.
+
+## 7. Build: mai due build insieme
+
+Prima di ogni build: `ps -ef | grep -E "ninja|cc1plus"` (escludendo la riga del
+comando stesso) non deve mostrare niente. Mai due build insieme, nemmeno in
+cartelle diverse: smoke e gioco scrivono le stesse librerie dell'SDK
+(`glue/rexglue-sdk-main/out/switch-aarch64/*.a`). **Al massimo `-j3` sui file
+generati** (circa 2 MB di C++ l'uno, 1–2 GB di RAM per processo GCC): il
+2026-09-29 due Ninja nella stessa cartella, 6 GCC insieme, hanno esaurito i
+16 GB. Se un Ninja viene interrotto a metà, `ninja -t recompact` ripara
+`.ninja_deps`.
