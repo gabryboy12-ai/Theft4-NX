@@ -459,3 +459,397 @@ Come funziona:
   - 34 degli 84 file generati hanno compilato con il nuovo header, senza errori.
   - Ho terminato i due processi Ninja rimasti e riparato `.ninja_deps` con `ninja -t recompact`.
   - Restano 46 file generati e il link. `out/build/switch-game/switch-game.nro` è ancora quello del run 10.
+
+## 10. Run 11: il gioco parte e non lascia traccia; il crash del + è nostro (2026-09-30)
+
+`out/console-runs/run11/`: `game.log`, `game-crash.log`, `smoke.log`. Il gioco
+supera `Setup`, `LoadXexImage` e `PrepareModuleLaunch`, fa `Resume` del thread
+principale all'entry point `829A0810`, e poi il log tace fino al +. Dopo circa
+un minuto il + chiude il processo con un crash report di Atmosphère.
+
+### Dove si è fermato
+
+- **Non è il nostro punto di arresto**: nessuna riga `STOP at the first function
+  missing on Switch`. Quindi nessuna export headless mancante, nessuna export
+  grafica (`VdInitializeRingBuffer` & co.), nessun import senza definizione.
+- **Nessuno stub chiamato**: `export stubs at exit: 0 distinct, 0 calls`.
+- **Nessun altro thread nel log**: l'unico `XThread::Execute` è `Kernel Host
+  Tasks` (thid 1). Per i thread guest quella riga è `NOISY_DEBUG`, non scritta:
+  il log non può dire se il gioco ne ha creati.
+- **Nessun file aperto dal gioco**: le uniche righe `[fs]` sono quelle del
+  loader (`default.xexp` cercato e assente).
+- **Il thread principale non è finito**: la riga "main guest thread is no
+  longer running" non c'è, quindi `is_running()` è rimasto vero fino al +.
+
+**Conclusione: il thread principale gira (o aspetta) dentro il codice del
+gioco o dentro export implementate, che non scrivono niente.** Il log del run 11
+non può dire dove: le export implementate (`REX_EXPORT`) non lasciavano traccia.
+È il motivo delle modifiche di questo giro (sotto).
+
+### Il crash report del +
+
+`game-crash.log` (e `[stderr]` in `game.log`): data abort in scrittura,
+`far = 0`, PC `base + 0x255B500`, LR 0. Con `addr2line` sull'ELF di quella build
+(`out/build/switch-game/switch-game.elf` del 2026-09-29 01:51, sorgenti del
+commit `882fce2`):
+
+| Indirizzo | Funzione |
+|---|---|
+| PC `+0x255B500` | `ConsoleSwRenderer_drawChar` (libnx `console_sw.c:161`), `strh w1, [x10, w4, uxtw #1]` con `x10 = 0` |
+| LR `0` | `drawChar` usa x30 come registro di lavoro (`mov w4, w30`): LR non significativo |
+
+**Non sono i thread guest.** `main` chiamava `consoleExit` e poi
+`svcExitProcess`; il wrapper di `svcExitProcess` registra la terminazione con
+`GAME_ERROR`, che faceva `printf` sulla console appena chiusa: framebuffer
+nullo, fault nel disegno del carattere, trampolino verso `svcBreak` e crash
+report. La riga `TERMINATION: svcExitProcess` infatti manca nel log: il fault
+avviene nel `printf`, prima della scrittura su file. `svcExitProcess` in sé
+termina tutti i thread del processo insieme e non produce report.
+
+**Correzione** (`tools/switch-game/main.cpp`): tutta l'uscita a schermo passa da
+`ConsolePrint`, sotto `g_console_mutex` (attesa limitata a 200 ms);
+`CloseConsole` chiude la console una volta sola sotto lo stesso mutex, e dopo
+nessuno disegna più, compresa la copia di stderr (che dal gestore dei fault
+prova il mutex senza aspettare). Le righe dopo la chiusura vanno solo in
+`game.log`. Non serve fermare i thread guest: `svcExitProcess` li chiude con il
+processo.
+
+Il crash report di Atmosphère non è nella cartella del run: i dati sono quelli
+di `game-crash.log`, scritti dallo stesso fault.
+
+### Le correzioni del run 10 funzionano
+
+| Correzione | Prova nel run 11 |
+|---|---|
+| `BaseHeap::Reset` tiene la memoria su NX | `Heap reset: kept the function table at 831F0000+1207AB8`; blocchi guest da 23 dopo `Setup` a **31** dopo `LoadXexImage` (nel run 10 scendevano a 21) |
+| Tabella delle funzioni preservata | nessun fault sulla tabella: nel run 10 il fault a `__imp__sub_82998DD0` (`REX_CALL_INDIRECT_FUNC`) arrivava subito dopo il `Resume`; qui il thread gira un minuto senza fault |
+| Trampolino verso `svcBreak` | il fault della console è finito in `game-crash.log`, poi in `svcBreak` con il crash report di Atmosphère (nel run 10 il processo si chiudeva senza report) |
+
+### Cosa aggiunge il run 12
+
+- **Traccia delle export implementate** (solo NX, `REX_EXPORT` in
+  `rex/hook.h`, `export_stubs.{h,cpp}`): la prima chiamata di ogni export va nel
+  log (`export first call: <nome> (guest LR …, thread …)`), ogni export conta le
+  chiamate, e ogni thread registra l'export in cui si trova, da quando, e
+  l'ultima da cui è uscito. All'uscita: `exports called at exit` con i
+  conteggi.
+- **Battito ogni 10 s**: export distinte e chiamate, blocchi guest (attuali,
+  picco, pool).
+- **Istantanea di ogni XThread** a 5, 20 e 60 s, poi ogni 2 minuti e al +:
+  nome, guest/host, export in corso e da quanto ("IN KeWaitForSingleObject for
+  40.2 s") o ultima export, LR guest e r1, e dall'host PC, LR e fino a 12
+  indirizzi di ritorno trovati sullo stack (thread messo in pausa con
+  `svcSetThreadActivity` solo per leggere registri e stack; niente lock né
+  allocazioni mentre è in pausa). `python tools/switch-game/where.py game.log`
+  traduce gli offset con `addr2line`.
+- Memoria guest all'uscita con il picco (`peak N = M MiB`) e il pool.
+
+Con questo il run 12 dice dove sta ogni thread: in un'export che aspetta (e
+quale), o in una funzione ricompilata (`sub_…` dall'`addr2line` del PC host).
+
+Due aggiunte venute dalla fase PC (§14), già nella NRO del run 12:
+
+- l'istantanea prende la lista degli XThread con `TryGetObjectsByType` (al
+  massimo 200 ms): il lock globale del kernel può essere tenuto da un thread
+  guest, e dal thread dell'interfaccia avrebbe bloccato anche il +. Se resta
+  occupato, la riga lo dice ("the kernel's global lock stayed busy") e le righe
+  vengono dalle tracce delle export;
+- il codice generato include le 659 funzioni che l'analisi non aveva raggiunto
+  (`gta4_eu_base_gaps*.toml`): il PC si fermava sulla prima dopo 12 export.
+
+### Prossimo passo se l'arresto è su una funzione grafica (proposta, non implementata)
+
+Se il run 12 si ferma su `VdInitializeRingBuffer` (o `VdSetGraphicsInterruptCallback`,
+`VdEnableRingBufferRPtrWriteBack`), il minimo per andare avanti senza grafica
+vera è una **GPU nulla** che tiene il gioco in passo senza disegnare:
+
+1. **Export `Vd*` accettate**: `VdInitializeRingBuffer` registra base e
+   dimensione del ring; `VdEnableRingBufferRPtrWriteBack` registra l'indirizzo
+   di writeback del puntatore di lettura; `VdSetGraphicsInterruptCallback`
+   registra callback e argomento; `VdQueryVideoMode`/`VdGetCurrentDisplayInformation`
+   rispondono 1280x720; `VdSwap` ritorna subito.
+2. **Consumo del ring**: alla scrittura del puntatore di scrittura (MMIO
+   `CP_RB_WPTR` nella finestra 0x7FC8…) un thread host "consuma" subito: legge i
+   pacchetti PM4 fino al nuovo WPTR e scrive RPTR nel writeback. Dei pacchetti
+   esegue **solo quelli che il gioco aspetta**: scritture in memoria e fence
+   (`MEM_WRITE`, `EVENT_WRITE_SHD`/`EOP`, le scritture di `SCRATCH_REG` verso
+   `SCRATCH_ADDR`: nfsmw-nx nota che senza quella il gioco si blocca entro un
+   secondo), `WAIT_REG_MEM` ignorato, `INDIRECT_BUFFER` seguito; draw, stati e
+   resolve scartati.
+3. **Interrupt di vblank a 60 Hz** da un thread host (0x2C), che chiama la
+   callback registrata come fa il `GPU VSync` del runtime; e l'interrupt di swap
+   dopo ogni `VdSwap`.
+4. Letture MMIO dei registri di stato della GPU (idle, `RBBM_STATUS`) con i
+   valori di "GPU ferma e libera".
+
+È quello che il `CommandProcessor` di ReXGlue fa già con la grafica completa,
+ridotto alle scritture in memoria: il codice da cui partire è lì (gestione di
+`PM4_MEM_WRITE`/`EVENT_WRITE_*` e del writeback). Stima: 1–2 giorni. Se invece
+il run 12 mostra il thread in attesa dentro un'export non grafica, si guarda
+quella.
+
+## 11. Strategia grafica in tre fasi
+
+Decisa dopo 08 (nfsmw-nx) e 10 (UnleashedRecomp-NX).
+
+### a) Primi fotogrammi con la grafica imitata di ReXGlue su NVK
+
+La grafica di ReXGlue (plugin `xenos`: emulazione del command processor, EDRAM
+imitata, traduzione degli shader durante il gioco) su NVK, **solo per
+verificare che la logica del gioco giri** fino ai menu e in partita.
+nfsmw-nx misura con questo percorso circa 2 FPS in gara; GTA IV, con più draw
+per frame e streaming continuo, andrà peggio. Non si ottimizza niente qui:
+serve a separare gli errori della logica da quelli del renderer. Prima, la GPU
+nulla di §10 se serve per arrivarci.
+
+### b) Tracciamento del D3D del gioco
+
+Wrap delle funzioni D3D del gioco (creazione di shader, texture, render target,
+`SetRenderState`, draw, `Resolve`, `Present`) con una riga di log per chiamata,
+come `app/src/nfsmw_d3d_trace.cpp` di nfsmw-nx. Scopo: **confermare ogni
+indirizzo sull'eseguibile europeo** prima di sostituire qualcosa. Gli indirizzi
+di partenza sono quelli della v8 USA di `gta4_native` (~135 funzioni del D3D),
+tradotti con il confronto di sequenze di istruzioni normalizzate già usato per i
+confini delle funzioni (06 §6), o con `tools/editions` di nfsmw-nx (08 §5). Un
+indirizzo tradotto è confermato quando il tracciamento mostra la chiamata con
+argomenti plausibili nel punto atteso del frame.
+
+### c) Nucleo del renderer nativo di nfsmw-nx
+
+Porting del nucleo PM4 → Vulkan di nfsmw-nx (`app/src/nfsmw_nativo_*`), con gli
+hook minimi per GTA IV:
+
+- **dal loro nucleo**: lettura del ring PM4 e decodifica dei pacchetti; stato
+  dei registri della GPU; registrazione dei draw; render target come immagini
+  Vulkan; resolve senza copia; cache delle texture con untiling al caricamento;
+  cache e precompilazione delle pipeline; tre slot di lavoro (64 MB l'uno);
+  sotto-allocazione della memoria GPU; il pattern "funzione nativa + guardia
+  che confronta con l'originale";
+- **hook di GTA IV**: solo la creazione degli shader (per riconoscerli nella
+  libreria precompilata) e l'annotazione dei draw (quale passo del frame:
+  ombre, riflessi, post-processing), confermati in (b).
+
+**Parti specifiche di GTA IV** (dalla conoscenza di `gta4_native`):
+
+- **immagini da restituire al gioco per l'HDR**: GTA IV rilegge risultati della
+  GPU (luminanza media per l'esposizione adattiva e simili); il renderer deve
+  scriverli nella memoria guest dove il gioco li aspetta, come il readback
+  dell'esposizione di nfsmw-nx;
+- **cache di lettura per lo streaming**: GTA IV carica di continuo texture e
+  modelli; la cache deve riconoscere per hash i dati già caricati e non
+  ricaricarli a ogni ciclo di streaming (UnleashedRecomp-NX: upload di
+  streaming raggruppati nel command buffer del frame, 10 §7);
+- **tetto della cache delle texture**: nfsmw-nx lo tiene a 384–512 MB; per GTA
+  IV va misurato, sapendo che tutto viene dallo stesso heap del pool guest
+  (768 MiB) e che il limite vero è il numero di NvMap (circa 4.000, §12).
+
+**Vincolo del modello A:** le scritture del renderer nella memoria del gioco
+(readback, fence, `SCRATCH_REG`, RPTR) **non devono passare dal fault del
+write-watch**. Nel modello A una pagina sorvegliata è in sola lettura e una
+scrittura host provocherebbe un fault nel thread del renderer. Il renderer
+scrive con `GuestToHost` e chiama esplicitamente l'invalidazione del range
+(le callback di invalidazione della memoria fisica), invece di lasciare che sia
+il fault a farlo.
+
+## 12. Trappole di NVK su Horizon (da `platform-notes.md` di nfsmw-nx)
+
+| Trappola | Cosa fare |
+|---|---|
+| **`__nx_nv_transfermem_size`**: libnx dà a nvdrv 8 MB di transfer memory, circa **4.000 NvMap**. Esauriti, la creazione fallisce con `0x235C` (`LibnxNvidiaError_SharedMemoryTooSmall`), che sembra un out of memory ma non lo è (nfsmw-nx: 3.585 texture, 600 MB) | il simbolo è weak: alzarlo dall'applicazione **prima** che Mesa chiami `nvInitialize()` (loro: cvar `nfsmw_switch_nvmap_mb`) |
+| **Allocazioni GPU lente**: una texture con allocazione dedicata costava ~1,9 ms di CPU (`nvMapCreate` 422 µs, `nvAddressSpaceAllocFixed` 127 µs ×2, `MapBufferEx` 626 µs ×2) | **sotto-allocazione** da blocchi grandi (32 MB: 0,75 ms per texture; 15 texture nuove in un frame da 28,5 a 11,3 ms). `requiresDedicatedAllocation` non è mai vero su questo driver |
+| **Fence**: ogni `vkGetFenceStatus`/`vkWaitForFences` è un ioctl, anche a GPU finita | contare le fence per frame; non sondare |
+| **Submit**: ogni `vkQueueSubmit` è una chiamata IPC; il WSI aggiunge un submit vuoto per present. Due submit per frame lasciavano la GPU ferma 3,6 ms | un submit per frame |
+| **Pipeline**: ~**59 ms** l'una senza cache (112 in 6,6 s) | `VkPipelineCache` su SD **più** l'elenco delle pipeline usate, ricreate su un thread in background all'avvio (loro: 113 pronte in 0,3 s) |
+| **Cache degli shader di Mesa su SD** (`sdmc:/.mesa`, thread `disk$` con stack da 8 MB) | duplicato della propria cache: **`MESA_SHADER_CACHE_DISABLE`** |
+| **Presentazione**: una sola coda Vulkan; esattamente tre immagini di swapchain; un solo acquire alla volta; solo FIFO e IMMEDIATE (IMMEDIATE non strappa: compone nvnflinger a 60 Hz) | progettare il frame pacing su questi limiti; un thread di presentazione separato ha peggiorato il pacing in nfsmw-nx |
+| **Timestamp GPU**: `timestampPeriod` dice 1 ns, il contatore avanza ogni **1,627 ns** | moltiplicare ogni tempo GPU per 1,627 (il profiler di UnleashedRecomp-NX leggeva il 60 % del vero) |
+| **Clock in portatile**: un homebrew parte con la GPU a 307,2 MHz | chiedere la configurazione standard **`0x92220008`** (GPU 460,8 MHz, RAM 1331,2 MHz) con `apm`; `apmSetPerformanceConfiguration` ritorna prima del cambio; `pcv` rimette la frequenza della RAM se la si cambia con `clkrst`; gli ID vanno letti dalla tabella (0x92220006 non esiste) |
+| **Memoria libera**: `InfoType_UsedMemorySize` vale già 3185 su 3189 MB all'avvio sotto hbloader (tutto è heap) | misurare dentro l'heap; per la GPU `VK_EXT_memory_budget` (in gara ~500 MB su 1,4–1,5 GB) |
+| **Due tipi di memoria**: tipo 0 `HOST_CACHED` (serve `vkFlushMappedMemoryRanges`), tipo 1 `HOST_COHERENT` senza cache | memoria che la CPU solo scrive senza cache CPU (`NVK_SWITCH_CPU_WRITE_MEM_UNCACHED`, attivo per default; sostituisce le due variabili vecchie) |
+
+**Correzioni Mesa obbligatorie** (già in §5b, ripetute perché sono la
+condizione per entrare nella fase c): fix `FADD32I` + `.SAT` in NAK
+(correttezza: il "mare nero"), ZCULL sul percorso Vulkan (geometria dal kernel,
+contesto legato al canale 3D, depth senza `TRANSFER_DST`), latenze di
+scheduling a 200 cicli e `peephole_select` a 8 (con `NVK_SHADER_STATS=1` per
+controllare che la memoria locale resti a 0), e revisione di NAK alzata nella
+chiave della cache a ogni modifica. UnleashedRecomp-NX ha portato le stesse
+modifiche su mesa-switch 26.2.2 (10 §5 e il loro `SWITCH-MESA.md`): è un
+secondo punto di partenza per costruirla.
+
+## 13. LTO e PGO di switch-game: preparati, da attivare solo quando il gioco gira
+
+Non attivati: servono un gioco che gira (PGO) e misure A/B (LTO, `-O2`). Da
+10 §1–2 e 08 §4.
+
+**Prerequisiti:**
+
+1. `XXH_FORCE_MEMORY_ACCESS 0` prima di LTO (nfsmw-nx: xxHash con accesso a 1 e
+   LTO/PGO ha rotto le chiavi delle texture); `-fno-strict-aliasing` resta.
+2. Controllo che `_start` resti all'offset 0 dell'ELF (nfsmw-nx: quattro build
+   non partivano).
+3. RAM: il link LTO di tutto il codice generato; loro con 2 job entrano in
+   16 GB. Nessun'altra build in corso (09 §7).
+
+**LTO** (`tools/switch-game/CMakeLists.txt`, opzione da aggiungere, default OFF):
+
+```cmake
+option(SWITCH_GAME_LTO "LTO for switch-game (docs 06 section 13)" OFF)
+set(SWITCH_GAME_LTO_JOBS 2 CACHE STRING "LTRANS jobs")
+if(SWITCH_GAME_LTO)
+  target_compile_options(switch-game PRIVATE -flto -fno-fat-lto-objects)
+  target_link_options(switch-game PRIVATE
+      -flto=${SWITCH_GAME_LTO_JOBS} -flto-partition=balanced)
+  # anche le librerie dell'SDK con -flto, o l'LTO si ferma al confine dell'archivio
+endif()
+```
+
+A/B nella stessa sessione, con le stesse cvar.
+
+**`-O2` e `-fipa-pta`**: due opzioni separate (`SWITCH_GAME_O2`,
+`SWITCH_GAME_IPA_PTA`), ciascuna misurata da sola; `-fipa-pta` solo con LTO.
+`-fomit-frame-pointer` e `-fno-math-errno` sui file generati sono indipendenti
+da LTO, provabili subito dopo il primo gioco che gira (10 §1).
+
+**PGO**, stessa cartella di build per le due fasi:
+
+1. `SWITCH_GAME_PGO=generate` (senza LTO):
+   `-fprofile-generate=<cartella pgo sul PC> -fprofile-prefix-path=<cartella di build> -fprofile-update=single -fno-profile-values`;
+   link `-fprofile-generate -Wl,--wrap=fopen`. Un `pgo_switch.cpp` (da
+   UnleashedRecomp-NX, che l'ha preso da nfsmw-nx) ridirige i `.gcda` su
+   `sdmc:/switch/theft4/pgo/` e fa `__gcov_dump()` + `__gcov_reset()` ogni 3
+   minuti da un thread a 0x3B.
+2. Giocare a lungo, su tutto il gioco (menu, città, missioni, cutscene, guida).
+3. Copiare `sdmc:/switch/theft4/pgo/*.gcda` nella cartella pgo del PC.
+4. `SWITCH_GAME_PGO=use` con LTO:
+   `-fprofile-use=<cartella> -fprofile-prefix-path=... -fprofile-partial-training -fno-profile-values -fprofile-correction -Wno-missing-profile -Wno-error=coverage-mismatch`.
+5. Contare nel log di build i `-Wcoverage-mismatch`: raccogliere e usare con
+   lo **stesso `-O`** (UnleashedRecomp-NX: profilo da `-O3` su build `-O2`,
+   solo 87 % delle funzioni col profilo). Ogni rigenerazione del codice o
+   cambio degli hook invalida il profilo.
+
+`-fno-profile-values` è obbligatorio con `-mtp=soft`; `-fprofile-update=single`
+perché l'A57 non ha atomiche veloci (e da lì i contatori negativi che
+`-fprofile-correction` accetta).
+
+**Funzioni calde** (dopo il primo profilo CPU): le 300 più calde con
+`__attribute__((hot))` in `.text.hot`, o un file di ordinamento del linker come
+nfsmw-nx.
+
+## 14. Prima fase su PC: `tools/pc-eu-base` (2026-09-30)
+
+nfsmw-nx ha fatto girare il gioco su PC prima della Switch, per separare gli
+errori della traduzione da quelli della piattaforma
+(`porting-another-game.md`). Qui lo stesso codice generato di switch-game
+(`config-eu-base`, eseguibile europeo di base, nessun hook, nessuna TU) gira
+su Windows con la grafica di ReXGlue.
+
+### Il progetto
+
+- **Perché un progetto nuovo.** I preset desktop di Theft4 (`x64-Clang-*` nel
+  `CMakePresets.json` della radice) costruiscono `LibertyRecomp`, cioè il
+  percorso XenonRecomp/plume, e `gta4-recomp` costruisce un'applicazione solo su
+  macOS. `tools/pc-eu-base` è un `ReXApp` minimo sopra l'SDK, con le impostazioni
+  desktop di Theft4 per ReXGlue (`glue/CMakeLists.txt`: Vulkan sì, D3D12 no,
+  FidelityFX no), il plugin `xenos` (GPU imitata), e i flag del preset Windows
+  dell'SDK (clang di Visual Studio, `-march=x86-64-v3`, C++23).
+- **Build:** `tools/pc-eu-base/build.bat` (vcvars64, CMake e Ninja di Visual
+  Studio, `-j3`). Il `.bat` ripulisce il `PATH`: ereditato da MSYS, il
+  `python3` di MSYS (che non legge i percorsi `C:/`) veniva trovato dal
+  configure di glslang; si usa `D:/Python/python.exe`. 939 passi; i file
+  generati compilano in circa 5 minuti con clang (con GCC per Switch ~25).
+- **Due correzioni dell'SDK per costruirlo:** opzione
+  `REXGLUE_BUILD_GTA4_NATIVE` (il plugin `gta4-native` richiede la cache degli
+  shader di `LibertyRecompLib`, esclusa dal repository) e `dxgi` collegata a
+  `rexui` anche senza D3D12 (`presenter.cpp` usa una factory DXGI su Windows).
+- **Stessa traccia della Switch:** `REX_TRACE_EXPORTS` attiva su PC la traccia
+  delle export di `rex/hook.h`; un battito ogni 10 s scrive, per ogni thread,
+  l'export in cui si trova e da quanto. Per lanciarlo:
+
+  ```
+  theft4-eu-base.exe --diagnostics=true --diagnostics_categories=logging
+      --log_flush_interval=1 --log_level=debug --log_file=<log>
+      "--game_data_root=D:/Mod Switch/gta4/Grand Theft Auto IV (Europe) (En,Fr,De,Es,It)"
+  ```
+
+  Senza `--diagnostics=true` il main dell'SDK sopprime ogni riga di log; senza
+  `--log_flush_interval` le ultime righe si perdono quando il processo viene
+  chiuso.
+
+### Fin dove arriva
+
+| Run | Cosa cambiava | Esito |
+|---|---|---|
+| 1–2 | codice generato del run 11, con e senza grafica | 12 export (`RtlImageXexHeaderField` … `KeTlsGetValue`, tutte nel CRT), poi **`[FATAL] Call to invalid or unregistered function at guest address 0x829F6F10`** dopo 0,14 s. Con la grafica (Vulkan su Intel HD 630) identico |
+| 3–7 | un indirizzo dichiarato per run (`gta4_eu_base_gaps.toml`) | `829F6F30`, `…6F50`, `…6F70`, `829F6FD0`, `829F7090`: una fila di funzioni da 32 byte raggiunte solo da una tabella di puntatori, 32 byte l'una dopo l'altra (il caso "più funzioni in un vuoto" di nfsmw-nx). Un indirizzo ogni 6 minuti: troppo lento |
+| 8 | **653 vuoti dichiarati in blocco** (`gta4_eu_base_gaps_bulk.toml`, sotto) | passa l'avvio del CRT: 76 export, thread creati (`ExCreateThread`), file, GPU (`VdInitializeRingBuffer`, `VdSetGraphicsInterruptCallback`, EDRAM), utente (`XamUserGetSigninState`), poi il thread principale resta **dentro `XAudioRegisterRenderDriverClient`** con il lock globale del kernel preso |
+| 9–10 | driver audio creato fuori dal lock globale | il lock è libero, il gioco **presenta fotogrammi 1280x720** (~59 al secondo), ma il thread principale resta nel driver audio di SDL |
+| 11 | senza sistema audio (come switch-game) | **97 export, 1,55 milioni di chiamate in 90 s, circa 25 thread, 5.381 fotogrammi presentati, nessun errore fatale**; il thread principale alterna `KeDelayExecutionThread` e lavoro, gli altri aspettano eventi |
+
+Ultimo stato (run 11, 90 s): mancano i file `game:\xbox360\audio\config\*`
+(`sounds.dat15`, `game.dat16`, `curves.dat12`, `categories.dat15`,
+`speech.dat`, `engineSettings.xml`, `driverSettings.xml`): la copia del disco
+su D: ha solo `xbox360/audio/sfx`. Mancano anche i dispositivi `cache:` e
+`cache1:` (partizioni di cache della 360). Sono limiti dei dati e del montaggio,
+non della traduzione; il prossimo passo è ricopiare la cartella audio completa
+dal disco e montare le due cache (come `NullDevice` o su una cartella).
+
+### Dichiarare in blocco i pezzi non raggiunti
+
+`tools/switch-codegen/gaps.py` (da `tools/huecos.py` di nfsmw-nx) trova i
+vuoti fra la fine calcolata di una funzione (inizio + 4 × commenti di
+istruzione) e l'inizio della successiva: 19.194 vuoti, 18.032 da 4 byte
+(riempimento), 1.160 da almeno 8 byte. Dichiararli tutti rompe il codice: molti
+sono code della funzione precedente. Filtri, ciascuno verificato rigenerando:
+
+1. **rami non risolti** (`Unresolved conditional branch/b target`): 35 vuoti
+   bersaglio di un ramo della funzione precedente e 158 che saltano all'indietro
+   dentro di essa (le "continuazioni" di nfsmw-nx): tolti;
+2. **`read_before_write.py`**: 313 vuoti leggevano registri mai scritti, cioè
+   frammenti in cui la funzione precedente "cade" (con i registri come locali
+   riceverebbero zeri): tolti;
+3. **dichiarato ma non emesso**: `0x82A0238C` (4.212 byte, dati): tolto.
+
+Risultato: 653 funzioni, 0 rami non risolti, nessun nuovo frammento
+(`read_before_write.py` riporta solo il falso positivo noto `0x829A88C0`),
+124.291 chiamate dirette su 124.299. La prima delle funzioni che servivano,
+`0x829F6F10`, è fra queste.
+
+### Due problemi della piattaforma PC trovati e corretti
+
+- **Il lock globale del kernel negli strumenti di diagnosi.** La tabella degli
+  oggetti è protetta dal lock globale (lo stesso che modella IRQL alzato e spin
+  lock); un thread guest può tenerlo a lungo. Il battito del PC si fermava lì
+  dopo la prima riga. Su Switch la stessa chiamata avviene dal thread
+  dell'interfaccia e avrebbe bloccato anche il +. Ora `TryGetObjectsByType`
+  (200 ms), e senza la lista degli XThread l'istantanea usa le tracce delle
+  export.
+- **Il driver audio creato sotto il lock globale.** `AudioSystem::RegisterClient`
+  creava il driver host tenendo il lock globale; SDL prende lock suoi e chiede
+  lavoro al thread principale. Ora lo slot si prenota sotto il lock, il driver
+  si crea fuori, e si installa di nuovo sotto il lock. Il driver SDL non chiede
+  più al thread principale se il sottosistema audio è già attivo. Sul PC di
+  prova il thread resta comunque fermo nel driver SDL: da indagare con un
+  debugger, non blocca il confronto (senza audio PC e Switch rispondono
+  uguale).
+
+### Confronto con la Switch
+
+Il criterio: il PC deve arrivare almeno dove arriva la Switch; se si ferma
+prima o nello stesso punto, il problema è nella traduzione.
+
+- **Con il codice del run 11 il PC si fermava in 0,14 s su `0x829F6F10`
+  (traduzione).** La Switch del run 11 **non ci è arrivata**: il `REX_FATAL`
+  avrebbe scritto una riga CRITICAL e chiamato `abort` (registrato dal
+  wrapper), e nel `game.log` non c'è né l'una né l'altro. Quindi la Switch si
+  ferma **prima**, dentro le prime 12 export o prima ancora: lì il problema è
+  della piattaforma, e il run 12 dice dove (la sequenza delle prime chiamate
+  del PC è l'elenco da confrontare: `RtlImageXexHeaderField`,
+  `NtAllocateVirtualMemory`, `KeGetCurrentProcessType`,
+  `RtlInitializeCriticalSection`, `RtlEnterCriticalSection`,
+  `RtlLeaveCriticalSection`, `XexCheckExecutablePrivilege`, `KeTlsAlloc`,
+  `KeTlsSetValue`, `MmAllocatePhysicalMemoryEx` (130 ms sul PC: la grande
+  allocazione fisica), `NtCreateSemaphore`, `KeTlsGetValue`).
+- **Con le dichiarazioni dei vuoti il PC arriva a far girare il gioco** (thread,
+  GPU, fotogrammi). La NRO del run 12 è ricompilata con lo stesso codice, quindi
+  su Switch non si fermerà più su `0x829F6F10`.

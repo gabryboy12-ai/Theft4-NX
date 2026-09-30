@@ -24,6 +24,7 @@ il thread audio di SDL fermo per sempre).
 | `threading_switch.cpp` `ThreadStartRoutine`, thread creato sospeso (`state_signal_.wait` fino al Resume) | un thread guest creato sospeso | senza limite per definizione (aspetta il Resume del gioco) |
 | `threading_switch.cpp` `WaitSuspended` (`sem_wait`) | un thread che si è sospeso da solo | idem |
 | `switch-game` `StopAtMissingFunction` (`svcSleepThread(INT64_MAX)`) | il thread che ha raggiunto il punto di arresto | voluto: il thread resta fermo fino al + |
+| il lock globale del kernel (`global_critical_region`, un `std::recursive_mutex`), preso da IRQL alzato, spin lock, tabella degli oggetti, sistema audio | semantica del kernel della 360 | lasciato per il codice del kernel. **Gli strumenti di diagnosi non lo aspettano più**: `ObjectTable::TryGetObjectsByType` (200 ms) nell'istantanea di switch-game e nel battito del PC, che sul PC si era bloccato proprio lì. E niente codice host esterno sotto quel lock: `AudioSystem::RegisterClient` creava il driver (SDL) tenendolo, e sul PC il gioco è rimasto lì dentro (06 §14) |
 
 **Corretto in questo giro:** `switch_audio_driver.cpp`
 `WaitForCurrentSlotReusable` aspettava in `audrenWaitFrame()` senza limite (vedi
