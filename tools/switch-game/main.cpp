@@ -36,6 +36,18 @@
 //
 // Exit is svcExitProcess: guest threads are still running, and returning to
 // the loader would unload code they execute (04-threads-exit.md section 5).
+// svcExitProcess ends every thread of the process at once; the only thing
+// to avoid before it is drawing on the console after consoleExit (run 11:
+// the termination line's printf faulted in ConsoleSwRenderer_drawChar and
+// produced a crash report on every +). Console output goes through
+// ConsolePrint under g_console_mutex, and CloseConsole shuts it once.
+//
+// Where the game is (run 11 resumed the main thread and then logged nothing):
+// every implemented export is traced on Switch (export_stubs.h). A heartbeat
+// line every 10 s, and a snapshot of every XThread at 5, 20 and 60 s, then
+// every 2 min and at +: the export it is inside and for how long, the last
+// export, the guest LR, and the host PC, LR and return addresses found on its
+// stack, as offsets for addr2line (tools/switch-game/where.py decodes them).
 
 #include <atomic>
 #include <chrono>
@@ -51,6 +63,7 @@
 #include <mutex>
 #include <string>
 #include <typeinfo>
+#include <vector>
 
 #include <fcntl.h>
 #include <sys/iosupport.h>
@@ -68,9 +81,12 @@
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/runtime.h>
+#include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xthread.h>
+#include <rex/thread.h>
 
 #include <spdlog/sinks/base_sink.h>
 
@@ -89,6 +105,7 @@ bool g_logging_ready = false;
 std::atomic<bool> g_stopped{false};
 std::atomic<bool> g_main_thread_returned{false};
 u64 g_module_base = 0;
+u64 g_module_text_size = 0;  // the R-X block at the base (for the stack scan)
 u64 g_host_main_thread_id = 0;
 int g_crash_fd = -1;
 
@@ -98,6 +115,42 @@ int g_crash_fd = -1;
 extern "C" char _start;
 
 namespace {
+
+// ── Console ────────────────────────────────────────────────────────────────
+
+// The console belongs to whoever holds this mutex; after CloseConsole nothing
+// draws (the framebuffer is gone). Bounded: a thread that cannot take it
+// within 200 ms skips the screen, and the line still reaches game.log.
+std::timed_mutex g_console_mutex;
+bool g_console_open = false;  // under g_console_mutex
+
+void ConsolePrint(const char* text) {
+  if (!g_console_mutex.try_lock_for(std::chrono::milliseconds(200))) {
+    return;
+  }
+  if (g_console_open) {
+    std::fputs(text, stdout);
+    consoleUpdate(nullptr);
+  }
+  g_console_mutex.unlock();
+}
+
+void ConsoleRefresh() {
+  if (g_console_mutex.try_lock()) {
+    if (g_console_open) {
+      consoleUpdate(nullptr);
+    }
+    g_console_mutex.unlock();
+  }
+}
+
+void CloseConsole() {
+  std::lock_guard<std::timed_mutex> lock(g_console_mutex);
+  if (g_console_open) {
+    g_console_open = false;
+    consoleExit(nullptr);
+  }
+}
 
 // ── Durable log (as in switch-smoke) ───────────────────────────────────────
 
@@ -109,8 +162,10 @@ void DurableWriteLocked(const char* data, size_t size) {
     static bool reported = false;
     if (!reported) {
       reported = true;
-      std::printf("game.log: open failed (errno %d); lines are on screen only\n", errno);
-      consoleUpdate(nullptr);
+      char text[96];
+      std::snprintf(text, sizeof(text),
+                    "game.log: open failed (errno %d); lines are on screen only\n", errno);
+      ConsolePrint(text);
     }
     return;
   }
@@ -156,8 +211,11 @@ void Report(bool error, const char* fmt, ...) {
   va_start(args, fmt);
   std::vsnprintf(line + prefix_len, sizeof(line) - prefix_len - 1, fmt, args);
   va_end(args);
-  std::printf("%s\n", line + std::strlen("[game] "));
-  consoleUpdate(nullptr);
+  {
+    std::string screen(line + std::strlen("[game] "));
+    screen += '\n';
+    ConsolePrint(screen.c_str());
+  }
   if (g_logging_ready) {
     std::string text(line);
     text += '\n';
@@ -314,8 +372,13 @@ std::mutex g_stderr_mutex;
 std::string g_stderr_pending;
 
 ssize_t StderrWrite(struct _reent* r, void* fd, const char* ptr, size_t len) {
-  if (g_console_stderr && g_console_stderr->write_r) {
-    g_console_stderr->write_r(r, fd, ptr, len);
+  // Screen only while the console is open and free right now (this path also
+  // runs from the fault handler, which must not wait for it).
+  if (g_console_stderr && g_console_stderr->write_r && g_console_mutex.try_lock()) {
+    if (g_console_open) {
+      g_console_stderr->write_r(r, fd, ptr, len);
+    }
+    g_console_mutex.unlock();
   }
   std::unique_lock<std::mutex> lock(g_stderr_mutex, std::try_to_lock);
   if (!lock.owns_lock()) {
@@ -377,8 +440,16 @@ void StartLogging() {
   }
 
   g_module_base = reinterpret_cast<u64>(&_start);
-  GAME_INFO("module base (_start) 0x%" PRIx64 ": ELF address = runtime address - base",
-            g_module_base);
+  {
+    MemoryInfo mi{};
+    u32 pi = 0;
+    if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, g_module_base)) && mi.addr == g_module_base) {
+      g_module_text_size = mi.size;
+    }
+  }
+  GAME_INFO("module base (_start) 0x%" PRIx64 ", code block 0x%" PRIx64
+            " bytes: ELF address = runtime address - base",
+            g_module_base, g_module_text_size);
   u64 total = 0, used = 0;
   svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
   svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
@@ -412,26 +483,218 @@ void LogArena(const char* when) {
   const auto s = rex::memory::nx::GetGuestArenaStats();
   u64 used = 0;
   svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
-  GAME_INFO("guest memory %s: %zu blocks mapped (%zu MiB, peak %zu), %zu pages committed",
-            when, s.mapped_blocks, s.mapped_blocks * 2, s.peak_mapped_blocks, s.committed_pages);
+  GAME_INFO("guest memory %s: %zu blocks mapped (%zu MiB, peak %zu = %zu MiB), %zu pages "
+            "committed; pool %zu blocks (%zu MiB, cvar nx_guest_pool_mib), %zu free",
+            when, s.mapped_blocks, s.mapped_blocks * 2, s.peak_mapped_blocks,
+            s.peak_mapped_blocks * 2, s.committed_pages, s.pool_blocks, s.pool_blocks * 2,
+            s.pool_free_blocks);
+}
+
+// ── Where every thread is ──────────────────────────────────────────────────
+
+// A return address found on a stack: inside this module, right after a bl
+// or blr (the check crash_match.py makes).
+bool IsReturnAddress(u64 value) {
+  if (value < g_module_base + 4 || value >= g_module_base + g_module_text_size || (value & 3)) {
+    return false;
+  }
+  const u32 insn = *reinterpret_cast<const u32*>(value - 4);
+  return (insn & 0xFC000000u) == 0x94000000u ||  // bl
+         (insn & 0xFFFFFC1Fu) == 0xD63F0000u;    // blr
+}
+
+constexpr int kStackReturns = 12;
+constexpr size_t kStackScanWords = 4096;  // 32 KiB above sp
+
+struct ThreadRow {
+  // Filled before any thread is paused (these take locks and allocate).
+  std::string name;
+  uint32_t handle = 0;
+  uint32_t thread_id = 0;
+  bool guest = false;
+  bool running = false;
+  uint32_t nx_handle = 0;
+  const PPCContext* guest_ctx = nullptr;
+  rex::diagnostics::ExportThreadSnapshot exports{};
+  bool has_exports = false;
+  // Filled while the thread is paused: no locks, no allocation.
+  Result pause_rc = 0;
+  Result context_rc = 0;
+  u64 pc = 0, lr = 0, sp = 0;
+  u64 returns[kStackReturns] = {};
+  int n_returns = 0;
+  u32 guest_lr = 0;
+  u32 guest_r1 = 0;
+};
+
+// One line per XThread. Each thread is paused (svcSetThreadActivity) only
+// long enough to read its registers and scan its stack; a thread the game
+// had already suspended is read but not resumed by us.
+void LogThreadSnapshot(const char* when) {
+  auto* kernel = rex::system::kernel_state();
+  if (!kernel || g_module_text_size == 0) {
+    return;
+  }
+  auto threads = kernel->object_table()->GetObjectsByType<rex::system::XThread>();
+  rex::diagnostics::ExportThreadSnapshot traces[64];
+  const size_t n_traces = rex::diagnostics::SnapshotExportThreads(traces, 64);
+
+  std::vector<ThreadRow> rows(threads.size());
+  for (size_t i = 0; i < threads.size(); ++i) {
+    auto& t = threads[i];
+    ThreadRow& row = rows[i];
+    row.name = t->name();
+    row.handle = t->handle();
+    row.thread_id = t->thread_id();
+    row.guest = t->is_guest_thread();
+    row.running = t->is_running();
+    if (auto* host = t->thread()) {
+      row.nx_handle = host->nx_kernel_handle();
+    }
+    if (auto* state = t->thread_state()) {
+      row.guest_ctx = state->context();
+    }
+    for (size_t k = 0; k < n_traces; ++k) {
+      if (row.nx_handle && traces[k].nx_handle == row.nx_handle) {
+        row.exports = traces[k];
+        row.has_exports = true;
+      }
+    }
+  }
+
+  u64 self_id = 0;
+  svcGetThreadId(&self_id, CUR_THREAD_HANDLE);
+  for (ThreadRow& row : rows) {
+    if (!row.nx_handle) {
+      continue;
+    }
+    u64 id = 0;
+    if (R_SUCCEEDED(svcGetThreadId(&id, row.nx_handle)) && id == self_id) {
+      continue;
+    }
+    row.pause_rc = svcSetThreadActivity(row.nx_handle, ThreadActivity_Paused);
+    ThreadContext ctx{};
+    row.context_rc = svcGetThreadContext3(&ctx, row.nx_handle);
+    if (R_SUCCEEDED(row.context_rc)) {
+      row.pc = ctx.pc.x;
+      row.lr = ctx.lr;
+      row.sp = ctx.sp;
+      MemoryInfo mi{};
+      u32 pi = 0;
+      if (row.sp && R_SUCCEEDED(svcQueryMemory(&mi, &pi, row.sp)) && (mi.perm & Perm_R)) {
+        const u64 end = std::min<u64>(mi.addr + mi.size, row.sp + kStackScanWords * 8);
+        for (u64 a = row.sp & ~u64(7); a + 8 <= end && row.n_returns < kStackReturns; a += 8) {
+          const u64 value = *reinterpret_cast<const u64*>(a);
+          if (IsReturnAddress(value)) {
+            row.returns[row.n_returns++] = value;
+          }
+        }
+      }
+    }
+    if (row.guest_ctx) {
+      row.guest_lr = u32(row.guest_ctx->lr);
+      row.guest_r1 = row.guest_ctx->r1.u32;
+    }
+    if (R_SUCCEEDED(row.pause_rc)) {
+      svcSetThreadActivity(row.nx_handle, ThreadActivity_Runnable);
+    }
+  }
+
+  GAME_INFO("threads %s: %zu XThreads (addr2line: tools/switch-game/where.py game.log)", when,
+            rows.size());
+  for (const ThreadRow& row : rows) {
+    char exports[224] = "no export call yet";
+    if (row.has_exports) {
+      if (row.exports.current) {
+        std::snprintf(exports, sizeof(exports),
+                      "IN %s for %.1f s (guest LR %08X), %" PRIu64 " export calls",
+                      row.exports.current, row.exports.seconds_in_current, row.exports.guest_lr,
+                      row.exports.calls);
+      } else {
+        std::snprintf(exports, sizeof(exports),
+                      "in guest code, last export %s (guest LR %08X), %" PRIu64 " export calls",
+                      row.exports.last ? row.exports.last : "-", row.exports.guest_lr,
+                      row.exports.calls);
+      }
+    }
+    std::string stack;
+    for (int k = 0; k < row.n_returns; ++k) {
+      char item[24];
+      std::snprintf(item, sizeof(item), " +0x%" PRIx64, row.returns[k] - g_module_base);
+      stack += item;
+    }
+    if (R_SUCCEEDED(row.context_rc) && row.pc) {
+      GAME_INFO("  thread %08X id %u '%s' %s%s: %s; guest lr %08X r1 %08X; host pc +0x%" PRIx64
+                " lr +0x%" PRIx64 " stack%s%s",
+                row.handle, row.thread_id, row.name.c_str(), row.guest ? "guest" : "host",
+                row.running ? ", running" : ", not running", exports, row.guest_lr,
+                row.guest_r1, row.pc - g_module_base, row.lr - g_module_base, stack.c_str(),
+                R_SUCCEEDED(row.pause_rc) ? "" : " (already paused by the game)");
+    } else {
+      GAME_INFO("  thread %08X id %u '%s' %s%s: %s; guest lr %08X r1 %08X; host context not "
+                "read (handle %08X, pause rc 0x%X, context rc 0x%X)",
+                row.handle, row.thread_id, row.name.c_str(), row.guest ? "guest" : "host",
+                row.running ? ", running" : ", not running", exports, row.guest_lr,
+                row.guest_r1, row.nx_handle, row.pause_rc, row.context_rc);
+    }
+  }
+}
+
+// Every 10 s: one line; at 5, 20, 60 s and then every 120 s: the snapshot.
+struct Heartbeat {
+  u64 start = 0;
+  u64 next_line_s = 10;
+  u64 next_snapshot_s = 5;
+
+  void Tick() {
+    const u64 seconds = armTicksToNs(armGetSystemTick() - start) / 1'000'000'000ull;
+    if (seconds >= next_line_s) {
+      next_line_s = seconds + 10;
+      size_t distinct = 0;
+      uint64_t calls = 0;
+      rex::diagnostics::GetExportCallTotals(&distinct, &calls);
+      const auto a = rex::memory::nx::GetGuestArenaStats();
+      GAME_INFO("heartbeat %" PRIu64 " s: exports %zu distinct, %" PRIu64
+                " calls; guest memory %zu blocks (peak %zu of %zu)",
+                seconds, distinct, calls, a.mapped_blocks, a.peak_mapped_blocks, a.pool_blocks);
+    }
+    if (seconds >= next_snapshot_s) {
+      next_snapshot_s = next_snapshot_s < 20 ? 20 : next_snapshot_s < 60 ? 60 : seconds + 120;
+      char when[32];
+      std::snprintf(when, sizeof(when), "at %" PRIu64 " s", seconds);
+      LogThreadSnapshot(when);
+    }
+  }
+};
+
+// What + records before leaving: where the threads are, the exports and
+// stubs called, the guest memory peak.
+void LogExitSummary() {
+  static std::atomic<bool> done{false};
+  if (done.exchange(true)) {
+    return;
+  }
+  LogThreadSnapshot("at exit");
+  rex::diagnostics::LogExportCallSummary("at exit");
+  LogStubSummaryOnce("at exit");
+  LogArena("at exit");
+  rex::FlushLogging();
 }
 
 [[noreturn]] void WaitForPlusAndExit(PadState* pad) {
-  std::printf("\nPress + to exit.\n");
-  consoleUpdate(nullptr);
+  ConsolePrint("\nPress + to exit.\n");
   while (appletMainLoop()) {
     padUpdate(pad);
     if (padGetButtonsDown(pad) & HidNpadButton_Plus) {
       break;
     }
-    consoleUpdate(nullptr);
+    ConsoleRefresh();
     svcSleepThread(16'000'000);
   }
   GAME_INFO("exit requested (+)%s", g_stopped.load() ? " after the stop" : "");
-  LogStubSummaryOnce("at exit");
-  rex::FlushLogging();
-  consoleExit(nullptr);
-  svcExitProcess();  // wrapped: logged
+  LogExitSummary();
+  CloseConsole();
+  svcExitProcess();  // wrapped: logged (game.log only: the console is closed)
 }
 
 PadState g_pad;
@@ -469,11 +732,11 @@ namespace {
 int GameMain(int argc, char** argv) {
   rex::cvar::Init(argc, argv);
   consoleInit(nullptr);
+  g_console_open = true;  // still single-threaded
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
   padInitializeDefault(&g_pad);
   svcGetThreadId(&g_host_main_thread_id, CUR_THREAD_HANDLE);
-  std::printf("Theft4 switch-game (no graphics)\n\n");
-  consoleUpdate(nullptr);
+  ConsolePrint("Theft4 switch-game (no graphics)\n\n");
 
   StartLogging();
   CaptureTerminations();
@@ -529,8 +792,11 @@ int GameMain(int argc, char** argv) {
   thread->Resume();
   GAME_INFO("main guest thread resumed; waiting (the log records the first stop)");
 
-  // The UI thread: watch for + and for the main guest thread ending.
+  // The UI thread: watch for + and for the main guest thread ending; log the
+  // heartbeat and the thread snapshots.
   bool seen_running = false;
+  Heartbeat heartbeat;
+  heartbeat.start = armGetSystemTick();
   while (appletMainLoop()) {
     padUpdate(&g_pad);
     if (padGetButtonsDown(&g_pad) & HidNpadButton_Plus) {
@@ -541,7 +807,8 @@ int GameMain(int argc, char** argv) {
       g_main_thread_returned.store(true);
       GAME_INFO("main guest thread is no longer running");
     }
-    consoleUpdate(nullptr);
+    heartbeat.Tick();
+    ConsoleRefresh();
     svcSleepThread(16'000'000);
   }
   GAME_INFO("exit requested (+)%s", g_stopped.load() ? " after the stop" : "");
@@ -552,9 +819,9 @@ int GameMain(int argc, char** argv) {
 
 int main(int argc, char** argv) {
   const int rc = GameMain(argc, argv);
-  GAME_INFO("main returned %d; leaving with svcExitProcess (guest threads are still alive)", rc);
-  LogStubSummaryOnce("at exit");
-  rex::FlushLogging();
-  consoleExit(nullptr);
-  svcExitProcess();  // wrapped: logged
+  GAME_INFO("main returned %d; leaving with svcExitProcess, which ends the guest threads too",
+            rc);
+  LogExitSummary();
+  CloseConsole();
+  svcExitProcess();  // wrapped: logged (game.log only: the console is closed)
 }

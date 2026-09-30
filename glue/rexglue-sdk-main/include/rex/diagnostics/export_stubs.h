@@ -32,4 +32,74 @@ void RecordExportStubHit(ExportStubSite& site, uint32_t guest_lr);
 // most called first. `when` says at which point ("at the stop", "at exit").
 void LogExportStubSummary(const char* when);
 
+// ── Implemented exports (REX_EXPORT), Switch only ──────────────────────────
+//
+// Run 11 resumed the game's main thread and then logged nothing: implemented
+// exports leave no trace, so the log could not say how far the game got nor
+// where each thread was. On NX, REX_EXPORT goes through ExportCallScope:
+// the first call of each export is logged (with the guest LR and the thread),
+// each export counts its calls, and each host thread records the export it is
+// inside (with the entry time) and the last one it left. A snapshot of every
+// thread (switch-game) then says "blocked in KeWaitForSingleObject for 40 s".
+
+// One per REX_EXPORT, a function-local static. `calls` is written by every
+// thread that calls the export, so it is an atomic (relaxed).
+struct ExportCallSite {
+  const char* name;  // "__imp__<Export>"
+  std::atomic<uint64_t> calls{0};
+  ExportCallSite* next = nullptr;  // list of the exports called, linked on the first call
+};
+
+// Per host thread, created on its first export call and never freed. Each
+// field is written only by its own thread (plain load + store, no
+// read-modify-write) and read by the snapshot on another thread (relaxed).
+struct ExportThreadTrace {
+  std::atomic<const char*> current{nullptr};  // export the thread is inside, or null
+  std::atomic<const char*> last{nullptr};     // last export entered
+  std::atomic<uint64_t> enter_ticks{0};       // monotonic ticks at the entry of `current`
+  std::atomic<uint32_t> guest_lr{0};          // guest LR of the call to `current`/`last`
+  std::atomic<uint64_t> calls{0};             // export calls made by this thread
+  uint32_t nx_handle = 0;                     // Horizon thread handle (0 elsewhere)
+  uint64_t nx_thread_id = 0;                  // Horizon thread id (0 elsewhere)
+  ExportThreadTrace* next = nullptr;
+};
+
+// Entry and exit of an export; Enter returns what Leave needs to restore
+// (exports may nest through guest callbacks).
+const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr);
+void ExportLeave(const char* previous);
+
+class ExportCallScope {
+ public:
+  ExportCallScope(ExportCallSite& site, uint32_t guest_lr)
+      : previous_(ExportEnter(site, guest_lr)) {}
+  ~ExportCallScope() { ExportLeave(previous_); }
+  ExportCallScope(const ExportCallScope&) = delete;
+  ExportCallScope& operator=(const ExportCallScope&) = delete;
+
+ private:
+  const char* previous_;
+};
+
+// A copy of one thread's trace (names without the "__imp__" prefix).
+struct ExportThreadSnapshot {
+  const char* current = nullptr;
+  const char* last = nullptr;
+  double seconds_in_current = 0;
+  uint32_t guest_lr = 0;
+  uint64_t calls = 0;
+  uint32_t nx_handle = 0;
+  uint64_t nx_thread_id = 0;
+};
+
+// Copies every thread's trace (takes a mutex: call it before pausing any
+// thread). Returns the number of threads written, at most `capacity`.
+size_t SnapshotExportThreads(ExportThreadSnapshot* out, size_t capacity);
+
+// Totals of the implemented exports: distinct exports called, calls.
+void GetExportCallTotals(size_t* distinct, uint64_t* calls);
+
+// Logs every export called with its count, most called first.
+void LogExportCallSummary(const char* when);
+
 }  // namespace rex::diagnostics

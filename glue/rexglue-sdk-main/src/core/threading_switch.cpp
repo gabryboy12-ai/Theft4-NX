@@ -794,6 +794,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
     svcSetThreadPriority(nx_handle_, static_cast<u32>(hos_priority));
   }
 
+  // Written once by the thread itself at start; INVALID_HANDLE (0) before.
+  uint32_t nx_kernel_handle() const { return nx_handle_; }
+
   void QueueUserCallback(std::function<void()> callback) {
     WaitStarted();
     {
@@ -1331,6 +1334,7 @@ class PosixThread : public PosixConditionHandle<Thread> {
   int priority() override { return handle_.priority(); }
   void set_priority(int new_priority) override { handle_.set_priority(new_priority); }
   void set_nx_priority(int32_t hos_priority) override { handle_.set_nx_priority(hos_priority); }
+  uint32_t nx_kernel_handle() const override { return handle_.nx_kernel_handle(); }
 
   void QueueUserCallback(std::function<void()> callback) override {
     handle_.QueueUserCallback(std::move(callback));

@@ -480,6 +480,10 @@ class Thread : public WaitHandle {
   // Sets the Horizon priority (0x00-0x3F) as is, without the generic
   // ThreadPriority mapping of set_priority. priority() reads it back.
   virtual void set_nx_priority(int32_t hos_priority) = 0;
+
+  // Horizon kernel handle of the thread (for svcGetThreadContext3 and the
+  // like), or 0 before the thread has started.
+  virtual uint32_t nx_kernel_handle() const = 0;
 #endif
 
   // Adds a user-mode asynchronous procedure call request to the thread queue.

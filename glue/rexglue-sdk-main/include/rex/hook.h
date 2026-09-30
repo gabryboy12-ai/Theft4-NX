@@ -73,9 +73,22 @@
   }
 
 // Export: hook + register in global registry for kernel ordinal lookup.
+// On Switch every call is traced (rex/diagnostics/export_stubs.h): first call
+// logged, calls counted, and the export each thread is inside recorded.
+#if REX_PLATFORM_NX
+#define REX_EXPORT(name, function)                                             \
+  extern "C" REX_FUNC(name) {                                                  \
+    static ::rex::diagnostics::ExportCallSite _export_site{#name};             \
+    ::rex::diagnostics::ExportCallScope _export_scope(_export_site,            \
+                                                      uint32_t(ctx.lr));       \
+    rex::ppc::HostToGuestFunction<function>(ctx, base);                        \
+  }                                                                            \
+  static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
+#else
 #define REX_EXPORT(name, function) \
   REX_HOOK(name, function)         \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
+#endif
 
 // Stub export: logged on its first call and counted
 // (rex/diagnostics/export_stubs.h); fatal with the cvar nx_fatal_stubs.
