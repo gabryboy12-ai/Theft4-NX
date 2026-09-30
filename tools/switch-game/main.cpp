@@ -535,11 +535,26 @@ void LogThreadSnapshot(const char* when) {
   if (!kernel || g_module_text_size == 0) {
     return;
   }
-  auto threads = kernel->object_table()->GetObjectsByType<rex::system::XThread>();
+  // The object table is guarded by the kernel's global lock, which a guest
+  // thread may hold for good (raised IRQL, spin lock): this is the UI
+  // thread, so it only tries. Without the XThreads, the rows come from the
+  // export traces, which carry each thread's Horizon handle too.
+  std::vector<rex::system::object_ref<rex::system::XThread>> threads;
+  const bool have_xthreads = kernel->object_table()->TryGetObjectsByType<rex::system::XThread>(
+      &threads, std::chrono::milliseconds(200));
   rex::diagnostics::ExportThreadSnapshot traces[64];
   const size_t n_traces = rex::diagnostics::SnapshotExportThreads(traces, 64);
 
-  std::vector<ThreadRow> rows(threads.size());
+  std::vector<ThreadRow> rows(have_xthreads ? threads.size() : n_traces);
+  if (!have_xthreads) {
+    for (size_t k = 0; k < n_traces; ++k) {
+      rows[k].name = "? (kernel lock busy)";
+      rows[k].thread_id = uint32_t(traces[k].nx_thread_id);
+      rows[k].nx_handle = traces[k].nx_handle;
+      rows[k].exports = traces[k];
+      rows[k].has_exports = true;
+    }
+  }
   for (size_t i = 0; i < threads.size(); ++i) {
     auto& t = threads[i];
     ThreadRow& row = rows[i];
@@ -600,8 +615,14 @@ void LogThreadSnapshot(const char* when) {
     }
   }
 
-  GAME_INFO("threads %s: %zu XThreads (addr2line: tools/switch-game/where.py game.log)", when,
-            rows.size());
+  if (have_xthreads) {
+    GAME_INFO("threads %s: %zu XThreads (addr2line: tools/switch-game/where.py game.log)", when,
+              rows.size());
+  } else {
+    GAME_INFO("threads %s: the kernel's global lock stayed busy for 200 ms (a guest thread at "
+              "raised IRQL or in a spin lock?); %zu threads from the export traces instead",
+              when, rows.size());
+  }
   for (const ThreadRow& row : rows) {
     char exports[224] = "no export call yet";
     if (row.has_exports) {

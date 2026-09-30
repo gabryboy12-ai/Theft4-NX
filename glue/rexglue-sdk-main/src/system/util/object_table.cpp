@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <thread>
 
 #include <rex/logging.h>
 #include <rex/stream.h>
@@ -312,6 +313,29 @@ void ObjectTable::GetObjectsByType(XObject::Type type, std::vector<object_ref<XO
       }
     }
   }
+}
+
+bool ObjectTable::TryGetObjectsByType(XObject::Type type,
+                                      std::vector<object_ref<XObject>>* results,
+                                      std::chrono::milliseconds timeout) {
+  std::unique_lock<std::recursive_mutex> global_lock(
+      rex::thread::global_critical_region::mutex(), std::try_to_lock);
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!global_lock.owns_lock()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    global_lock.try_lock();
+  }
+  for (uint32_t slot = 0; slot < table_capacity_; ++slot) {
+    auto& entry = table_[slot];
+    if (entry.object && entry.object->type() == type) {
+      entry.object->Retain();
+      results->push_back(object_ref<XObject>(entry.object));
+    }
+  }
+  return true;
 }
 
 X_HANDLE ObjectTable::TranslateHandle(X_HANDLE handle) {

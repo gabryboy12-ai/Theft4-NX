@@ -1,4 +1,6 @@
 #pragma once
+
+#include <chrono>
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -75,6 +77,16 @@ class ObjectTable {
     return results;
   }
 
+  // Like GetObjectsByType, for diagnostics that must not block: the table is
+  // guarded by the kernel's global critical region, which a guest thread
+  // holds while at raised IRQL or inside a spin lock, possibly for good.
+  // Tries for at most `timeout`; false (and nothing added) if it stayed busy.
+  template <typename T>
+  bool TryGetObjectsByType(std::vector<object_ref<T>>* out, std::chrono::milliseconds timeout) {
+    return TryGetObjectsByType(T::kObjectType,
+                               reinterpret_cast<std::vector<object_ref<XObject>>*>(out), timeout);
+  }
+
   std::vector<object_ref<XObject>> GetAllObjects();
   void PurgeAllObjects();  // Purges the object table of all guest objects
 
@@ -87,6 +99,8 @@ class ObjectTable {
   ObjectTableEntry* LookupTable(X_HANDLE handle);
   XObject* LookupObject(X_HANDLE handle, bool already_locked);
   void GetObjectsByType(XObject::Type type, std::vector<object_ref<XObject>>* results);
+  bool TryGetObjectsByType(XObject::Type type, std::vector<object_ref<XObject>>* results,
+                           std::chrono::milliseconds timeout);
 
   X_HANDLE TranslateHandle(X_HANDLE handle);
   static constexpr uint32_t GetHandleSlot(X_HANDLE handle) {
