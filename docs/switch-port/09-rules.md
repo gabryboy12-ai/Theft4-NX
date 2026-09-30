@@ -148,5 +148,5 @@ generati** (circa 2 MB di C++ l'uno, 1–2 GB di RAM per processo GCC): il
 
 Nei documenti, nei commit e nei riepiloghi una correzione è "corretta" solo
 dopo un run sulla console che la mostra funzionare; prima è "da verificare".
-Il run 12 ha smentito la correzione dell uscita del run 11, dichiarata
+Il run 12 ha smentito la correzione dell'uscita del run 11, dichiarata
 corretta senza prova.

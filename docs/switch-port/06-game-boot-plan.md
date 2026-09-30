@@ -853,3 +853,76 @@ prima o nello stesso punto, il problema è nella traduzione.
 - **Con le dichiarazioni dei vuoti il PC arriva a far girare il gioco** (thread,
   GPU, fotogrammi). La NRO del run 12 è ricompilata con lo stesso codice, quindi
   su Switch non si fermerà più su `0x829F6F10`.
+
+## 15. Run 12: il gioco gira per sempre in `while (mftb == 0)` (2026-09-30)
+
+`out/console-runs/run12/`, NRO del commit `38ff073`.
+
+### Dove si ferma
+
+- 11 export (le stesse del PC, nello stesso ordine e dagli stessi LR guest),
+  poi il battito ripete per 20 minuti "11 distinct, 73 calls, 216 blocks of
+  384": il thread del gioco non chiama più il kernel.
+- Istantanee (5, 20, 60 s … al +), con `where.py` sull'ELF di `run12-build`:
+  - `F8000018` (thread principale del gioco): "in guest code", ultima export
+    `RtlLeaveCriticalSection`, catena `xstart → sub_829A7D78 → sub_829E9CC8 →
+    rex::chrono::UpdateGuestClock`;
+  - `F8000004` (Kernel Host Tasks): in attesa sulla sua coda, normale.
+- `sub_829E9CC8` è `do { r11 = mftb; } while ((uint32_t)r11 == 0);`.
+- `tools/compare_export_traces.py` (PC di riferimento contro Switch): prima
+  divergenza `KeTlsGetValue` (#12 sul PC), che la Switch non chiama mai.
+
+### Causa
+
+`clock_posix.cpp` leggeva il tick host con `clock_gettime(CLOCK_MONOTONIC_RAW)`.
+Il `__syscall_clock_gettime` di libnx accetta solo `CLOCK_REALTIME` (1) e
+`CLOCK_MONOTONIC` (4) (verificato nel disassemblato): con 5 restituisce
+`EINVAL` e non tocca il `timespec`. Gli `assert_zero` sono spenti in Release,
+quindi il tick host non avanzava e il time base guest restava 0. Sul PC
+(`QueryPerformanceCounter`) il problema non esiste: è un errore della
+piattaforma, non della traduzione.
+
+**Correzione (da verificare):** su NX il clock host è il contatore di sistema
+ARM (`armGetSystemTick`, `armGetSystemTickFreq`, 19,2 MHz). Il passo 5 dello
+smoke controlla che tick host e time base guest (50 MHz) avanzino su 20 ms.
+
+### Crash alla chiusura
+
+`game-crash.log` vuoto, report di Atmosphère non copiato. Dal `game.log`: al +
+`GameMain` ritornava e il `unique_ptr<Runtime>` veniva distrutto **prima** di
+`svcExitProcess` ("Host task worker stopped", poi "guest memory at exit: 0
+blocks mapped", nessuna istantanea all'uscita), mentre il thread del gioco
+girava ancora. **Correzione (da verificare):** il runtime non viene mai
+distrutto (`runtime.release()`); `svcExitProcess` chiude tutto insieme.
+
+### Smoke
+
+SMOKE OK; T10: 0 discrepanze nei registri (x0–x28, q8–q15) su 3 × 10.000
+fault, 81 µs per fault.
+
+### Altro in questo giro (da verificare)
+
+- `cache:` e `cache1:` montati su cartelle (`Runtime::MountCacheDevices`):
+  Switch `sdmc:/switch/theft4/cache` e `cache1`, PC `xbox-cache*` nella
+  cartella utente. La cache del runtime su Switch passa a `runtime-cache`.
+- `xbox360\audio\config` non è nell'ISO europea (`extract-xiso -l`): non è un
+  errore dell'estrazione. La configurazione sta in `audio.rpf` (782 KB, radice);
+  le aperture fallite sono tentativi su file sciolti.
+- Ogni export registra anche l'esito della prima chiamata ("export first
+  result"), su Switch e PC.
+
+## 16. Per dopo (quando il gioco gira)
+
+- **Accessi guest non volatili e atomiche rilassate.** Il generatore emette
+  `REX_LOAD_*`/`REX_STORE_*` con `volatile` e `stwcx.`/`stdcx.` con
+  `__sync_bool_compare_and_swap` (barriera piena), come XenonRecomp prima delle
+  modifiche di UnleashedRecomp-NX (10 §1). Toglierli è un'ottimizzazione che
+  cambia la correttezza (ordinamento della memoria visto dal gioco): va fatta a
+  gioco avviabile, ciascuna con il suo interruttore e un test fisso.
+- **LZX nativo.** `gta4_lzx_hooks.cpp` aggancia il decoder LZX persistente del
+  gioco (`sub_82A21BF0` e vicine, indirizzi della v8 USA). Gli indirizzi vanno
+  ritrovati sull'eseguibile europeo, poi il modo `verify` sulla console prima di
+  `host` (10 §3).
+- **Filmati Bink** (`xbox360/movies/*.bik`): se il decoder ricompilato è troppo
+  lento, dare i byte a FFmpeg (decoder `bink` e `binkaudio`) attraverso le
+  callback di lettura del gioco, come nfsmw-nx fa per WMV3 (08 §9).
