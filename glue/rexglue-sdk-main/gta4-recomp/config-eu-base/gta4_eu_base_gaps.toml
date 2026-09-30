@@ -1,0 +1,13 @@
+# Functions the analysis did not reach, found at run time as
+#   [FATAL] Call to invalid or unregistered function at guest address 0x...
+# (the PC build, tools/pc-eu-base, finds them first). Candidates from
+# tools/switch-codegen/gaps.py; one entry per address a run proved. A gap that
+# turns out to be the tail of the previous function needs { end = ... } on
+# that function instead (see gaps.py).
+[functions]
+"0x829F6F10" = {}   # gap 829F6F10-829F6F90 after 829F6EF0; indirect call after KeTlsGetValue (PC run 1)
+"0x829F6F30" = {}   # +0x20 in the same gap: several functions in a row (PC run 2)
+"0x829F6F50" = {}   # indirect call after KeTlsGetValue (PC run 3)
+"0x829F6F70" = {}   # indirect call after KeTlsGetValue (PC run 4)
+"0x829F6FD0" = {}   # indirect call after KeTlsGetValue (PC run 5)
+"0x829F7090" = {}   # indirect call after KeTlsGetValue (PC run 6)
