@@ -910,6 +910,14 @@ fault, 81 µs per fault.
   le aperture fallite sono tentativi su file sciolti.
 - Ogni export registra anche l'esito della prima chiamata ("export first
   result"), su Switch e PC.
+- **File che il gioco apre sul PC** (log dei percorsi risolti, solo build PC,
+  90 s): `default.xex`, `audio.rpf`, `common.rpf`, `xbox360.rpf`, e le radici di
+  `cache:` e `cache1:`. Sulla SD, in `sdmc:/switch/theft4/game/`, servono
+  almeno questi quattro file; il run 12 conferma solo `default.xex` (non è
+  arrivato oltre).
+- **Cache sul PC (provato):** il gioco crea `valid.txt` in `cache:` e
+  `cache1:`; un secondo avvio con i file già presenti arriva allo stesso punto
+  (97 export, fotogrammi presentati), senza errori. Sulla Switch da verificare.
 
 ## 16. Per dopo (quando il gioco gira)
 

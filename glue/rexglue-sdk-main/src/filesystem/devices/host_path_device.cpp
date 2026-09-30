@@ -19,6 +19,12 @@
 #include <rex/math.h>
 #include <rex/string/utf8.h>
 
+#if defined(REX_TRACE_EXPORTS)
+#include <mutex>
+#include <set>
+#include <string>
+#endif
+
 namespace rex::filesystem {
 
 HostPathDevice::HostPathDevice(const std::string_view mount_path,
@@ -63,6 +69,16 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
   // some\PATH.foo
   auto* resolved = root_entry_->ResolvePath(path);
   if (resolved) {
+#if defined(REX_TRACE_EXPORTS)
+    // PC comparison build (tools/pc-eu-base): one line per distinct path the
+    // game resolves, to list the files the Switch SD card must hold.
+    static std::mutex seen_mutex;
+    static std::set<std::string> seen;
+    std::lock_guard<std::mutex> lock(seen_mutex);
+    if (seen.emplace(mount_path() + "|" + std::string(path)).second) {
+      REXFS_DEBUG("host path resolved: {} {}", mount_path(), path);
+    }
+#endif
     return resolved;
   }
 
