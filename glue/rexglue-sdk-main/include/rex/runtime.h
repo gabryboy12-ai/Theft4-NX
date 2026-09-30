@@ -179,6 +179,13 @@ class Runtime {
   // Load XEX image into guest memory
   X_STATUS LoadXexImage(const std::string_view module_path);
 
+  // Mounts the 360's utility-drive devices cache: and cache1: on two host
+  // folders (created if missing), after Setup. Not done by default: SetupVfs
+  // leaves cache: unresolved on purpose (see the note there); switch-game and
+  // pc-eu-base opt in. false if a device could not be registered.
+  bool MountCacheDevices(const std::filesystem::path& cache0,
+                         const std::filesystem::path& cache1);
+
   // Launch XEX module and return main thread
   // Call after LoadXexImage to start execution
   system::object_ref<system::XThread> LaunchModule();

@@ -18,10 +18,24 @@ static_assert(REX_PLATFORM_POSIX, "This file is POSIX-only");
 #include <mach/mach_time.h>
 #endif
 
+#if REX_PLATFORM_NX
+extern "C" {
+#include <switch/arm/counter.h>
+}
+#endif
+
 namespace rex::chrono {
 
+// Switch: the ARM system counter (19.2 MHz), read directly. libnx's
+// clock_gettime/clock_getres accept only CLOCK_REALTIME and CLOCK_MONOTONIC:
+// with CLOCK_MONOTONIC_RAW they fail with EINVAL and leave the timespec
+// untouched, the asserts below are off in Release, and the host tick count
+// never moved. The guest time base stayed at 0 and run 12 spun forever in the
+// game's `while (mftb == 0)` (sub_829E9CC8, docs/switch-port/06 section 15).
 uint64_t Clock::host_tick_frequency_platform() {
-#ifdef __APPLE__
+#if REX_PLATFORM_NX
+  return armGetSystemTickFreq();
+#elif defined(__APPLE__)
   mach_timebase_info_data_t info;
   mach_timebase_info(&info);
   return (uint64_t)((1000000000ull * (uint64_t)info.denom) / (uint64_t)info.numer);
@@ -37,7 +51,9 @@ uint64_t Clock::host_tick_frequency_platform() {
 }
 
 uint64_t Clock::host_tick_count_platform() {
-#ifdef __APPLE__
+#if REX_PLATFORM_NX
+  return armGetSystemTick();
+#elif defined(__APPLE__)
   // mach_absolute_time() returns raw hardware ticks; host_tick_frequency_platform()
   // expresses the rate of these same ticks via mach_timebase_info.
   // clock_gettime(CLOCK_MONOTONIC_RAW) returns nanoseconds, which would be

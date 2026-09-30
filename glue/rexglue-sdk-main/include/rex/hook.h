@@ -81,7 +81,8 @@
   extern "C" REX_FUNC(name) {                                                  \
     static ::rex::diagnostics::ExportCallSite _export_site{#name};             \
     ::rex::diagnostics::ExportCallScope _export_scope(_export_site,            \
-                                                      uint32_t(ctx.lr));       \
+                                                      uint32_t(ctx.lr),        \
+                                                      &ctx.r3.u64);            \
     rex::ppc::HostToGuestFunction<function>(ctx, base);                        \
   }                                                                            \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);

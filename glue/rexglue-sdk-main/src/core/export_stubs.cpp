@@ -129,9 +129,10 @@ void BumpOwn(std::atomic<T>& value) {
 
 }  // namespace
 
-const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr) {
+const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr, bool* first) {
   ExportThreadTrace* trace = ThisThreadTrace();
   if (site.calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+    *first = true;
     {
       std::lock_guard<std::mutex> lock(g_export_list_mutex);
       site.next = g_export_list;
@@ -149,10 +150,14 @@ const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr) {
   return previous;
 }
 
-void ExportLeave(const char* previous) {
+void ExportLeave(const char* previous, ExportCallSite* first_site, uint64_t r3) {
   ExportThreadTrace* trace = t_export_trace;
   if (trace) {
     trace->current.store(previous, std::memory_order_release);
+  }
+  if (first_site) {
+    REXKRNL_DEBUG("export first result: {} -> {:08X} (thread {:x})", ExportName(first_site->name),
+                  uint32_t(r3), trace ? trace->nx_thread_id : 0);
   }
 }
 

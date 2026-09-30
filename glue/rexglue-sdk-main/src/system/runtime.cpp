@@ -363,6 +363,30 @@ bool Runtime::SetupVfs() {
   return true;
 }
 
+bool Runtime::MountCacheDevices(const std::filesystem::path& cache0,
+                                const std::filesystem::path& cache1) {
+  if (!file_system_) {
+    return false;
+  }
+  const std::pair<const char*, const std::filesystem::path*> devices[] = {
+      {"cache:", &cache0}, {"cache1:", &cache1}};
+  bool ok = true;
+  for (const auto& [link, root] : devices) {
+    const auto host = rex::filesystem::MakeAbsolute(*root);
+    const std::string mount =
+        std::string("\\Device\\UtilityCache") + (link[5] == '1' ? "1" : "0");
+    auto device = std::make_unique<rex::filesystem::HostPathDevice>(mount, host, false);
+    if (!device->Initialize() || !file_system_->RegisterDevice(std::move(device))) {
+      REXSYS_ERROR("Runtime::MountCacheDevices: cannot mount {} on {}", link, host.string());
+      ok = false;
+      continue;
+    }
+    file_system_->RegisterSymbolicLink(link, mount);
+    REXSYS_INFO("  Mounted {} at {} ({})", host.string(), link, mount);
+  }
+  return ok;
+}
+
 X_STATUS Runtime::LoadXexImage(const std::string_view module_path) {
   REXSYS_INFO("Loading XEX image: {}", std::string(module_path));
 

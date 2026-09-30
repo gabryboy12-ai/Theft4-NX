@@ -67,18 +67,24 @@ struct ExportThreadTrace {
 
 // Entry and exit of an export; Enter returns what Leave needs to restore
 // (exports may nest through guest callbacks).
-const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr);
-void ExportLeave(const char* previous);
+// On the first call of an export, *first is set and Leave logs the value r3
+// holds after it ("export first result"), so two platforms' traces can be
+// compared on results too (tools/compare_export_traces.py).
+const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr, bool* first);
+void ExportLeave(const char* previous, ExportCallSite* first_site, uint64_t r3);
 
 class ExportCallScope {
  public:
-  ExportCallScope(ExportCallSite& site, uint32_t guest_lr)
-      : previous_(ExportEnter(site, guest_lr)) {}
-  ~ExportCallScope() { ExportLeave(previous_); }
+  ExportCallScope(ExportCallSite& site, uint32_t guest_lr, const uint64_t* r3)
+      : site_(site), r3_(r3), previous_(ExportEnter(site, guest_lr, &first_)) {}
+  ~ExportCallScope() { ExportLeave(previous_, first_ ? &site_ : nullptr, *r3_); }
   ExportCallScope(const ExportCallScope&) = delete;
   ExportCallScope& operator=(const ExportCallScope&) = delete;
 
  private:
+  ExportCallSite& site_;
+  const uint64_t* r3_;
+  bool first_ = false;
   const char* previous_;
 };
 

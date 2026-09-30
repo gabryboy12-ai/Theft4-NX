@@ -901,6 +901,30 @@ void StepGuestCpuMapping(uint64_t core_mask) {
   }
 }
 
+// Run 12: libnx's clock_gettime rejects CLOCK_MONOTONIC_RAW, the host tick
+// count never moved, and the game spun in `while (mftb == 0)`. Host ticks and
+// the guest time base (at the runtime's 50 MHz) must both advance over 20 ms.
+void StepClock() {
+  using rex::chrono::Clock;
+  Clock::set_guest_tick_frequency(50000000);
+  const uint64_t freq = Clock::QueryHostTickFrequency();
+  const uint64_t host0 = Clock::QueryHostTickCount();
+  const uint64_t guest0 = Clock::QueryGuestTickCount();
+  svcSleepThread(20'000'000);
+  const uint64_t host1 = Clock::QueryHostTickCount();
+  const uint64_t guest1 = Clock::QueryGuestTickCount();
+  const double host_ms = freq ? double(host1 - host0) * 1000.0 / double(freq) : 0.0;
+  const double guest_ms = double(guest1 - guest0) / 50000.0;
+  const bool ok = freq == armGetSystemTickFreq() && host1 > host0 && guest1 > guest0 &&
+                  host_ms > 15.0 && host_ms < 100.0 && guest_ms > 15.0 && guest_ms < 100.0;
+  SMOKE_INFO("step 5 clock: host tick frequency %" PRIu64 " Hz, over a 20 ms sleep host %.2f ms "
+             "(%" PRIu64 " ticks), guest time base %.2f ms (%" PRIu64 " ticks at 50 MHz) -> %s",
+             freq, host_ms, host1 - host0, guest_ms, guest1 - guest0, ok ? "ok" : "WRONG");
+  if (!ok) {
+    Fail("clock", "host ticks or the guest time base do not advance");
+  }
+}
+
 void StepThreads() {
   u64 core_mask = 0;
   svcGetInfo(&core_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
@@ -994,6 +1018,7 @@ int main(int argc, char** argv) {
   StepAddressSpace();
   StepGuestMemory();
   StepThreads();
+  StepClock();
 
   if (g_first_failure.empty()) {
     Report(false, "SMOKE OK");

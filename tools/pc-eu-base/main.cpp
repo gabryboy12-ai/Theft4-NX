@@ -76,6 +76,10 @@ class EuBaseApp final : public rex::ReXApp {
     REXLOG_INFO("pc-eu-base: generated code {:08X}+{:X}, image {:08X}+{:X}; exports traced",
                 uint32_t(PPCImageConfig.code_base), uint32_t(PPCImageConfig.code_size),
                 uint32_t(PPCImageConfig.image_base), uint32_t(PPCImageConfig.image_size));
+    // cache: and cache1: on working folders, as switch-game does (the game
+    // opens cache:\valid.txt at start-up; the runtime leaves them unmounted).
+    // Not <user>/cache: that is the runtime's own cache_root.
+    runtime()->MountCacheDevices(user_data_root() / "xbox-cache", user_data_root() / "xbox-cache1");
     heartbeat_ = std::thread([this] { HeartbeatMain(); });
   }
 

@@ -770,7 +770,7 @@ int GameMain(int argc, char** argv) {
   const std::filesystem::path root(kRootDir);
   auto runtime = std::make_unique<rex::Runtime>(
       std::filesystem::path(kGameDir), root / "user", std::filesystem::path(kGameDir) / "update",
-      root / "cache", std::filesystem::path{}, root / "marketplace", root / "saves");
+      root / "runtime-cache", std::filesystem::path{}, root / "marketplace", root / "saves");
 
   rex::RuntimeConfig config;
   config.tool_mode = false;  // no graphics object: "Runtime initialized without graphics system"
@@ -790,6 +790,13 @@ int GameMain(int argc, char** argv) {
     WaitForPlusAndExit(&g_pad);
   }
   LogArena("after Setup");
+  // The 360's utility-drive caches, which the PC run showed the game opening
+  // (cache:/valid.txt, cache1:/valid.txt). To be verified on the console: the
+  // runtime left cache: unresolved on purpose (Runtime::SetupVfs).
+  GAME_INFO("about to mount cache: and cache1: on %s/cache and %s/cache1", kRootDir, kRootDir);
+  if (!runtime->MountCacheDevices(root / "cache", root / "cache1")) {
+    GAME_ERROR("cache: or cache1: not mounted (see the [sdk] lines above)");
+  }
 
   GAME_INFO("about to LoadXexImage(game:/default.xex)");
   status = runtime->LoadXexImage("game:/default.xex");
@@ -833,6 +840,12 @@ int GameMain(int argc, char** argv) {
     svcSleepThread(16'000'000);
   }
   GAME_INFO("exit requested (+)%s", g_stopped.load() ? " after the stop" : "");
+  // The runtime is never destroyed: guest threads are still running, and
+  // ~Runtime unmaps guest memory and tears the kernel down under them. In
+  // run 12 that happened between + and svcExitProcess ("guest memory at
+  // exit: 0 blocks mapped", no thread snapshot at exit) and the process still
+  // ended in a crash report. svcExitProcess, in main, ends everything at once.
+  (void)runtime.release();
   return 0;
 }
 

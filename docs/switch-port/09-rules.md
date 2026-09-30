@@ -143,3 +143,10 @@ generati** (circa 2 MB di C++ l'uno, 1–2 GB di RAM per processo GCC): il
 2026-09-29 due Ninja nella stessa cartella, 6 GCC insieme, hanno esaurito i
 16 GB. Se un Ninja viene interrotto a metà, `ninja -t recompact` ripara
 `.ninja_deps`.
+
+## 8. Una correzione non provata sulla console è "da verificare"
+
+Nei documenti, nei commit e nei riepiloghi una correzione è "corretta" solo
+dopo un run sulla console che la mostra funzionare; prima è "da verificare".
+Il run 12 ha smentito la correzione dell uscita del run 11, dichiarata
+corretta senza prova.
