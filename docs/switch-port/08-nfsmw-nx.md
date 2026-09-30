@@ -7,7 +7,8 @@ shader precompilati con XenosRecomp, LTO/PGO. Gira a 30–35 FPS alle frequenze
 standard. Clone in `/c/dev/refs/nfsmw-nx`, commit `493d47fc`
 (2026-09-27), letto per intero `docs/` più i sorgenti del livello Horizon
 (`sdk/src/core/*_switch*`, `sdk/src/system/xthread.cpp`,
-`sdk/resources/templates/codegen/pch_h.inja`) e `mesa/`.
+`sdk/resources/templates/codegen/pch_h.inja`) e `mesa/`. Aggiornato a
+`66611e3` (2026-09-29) in §9.
 
 **Licenze.** App GPL-3.0 (come noi), modifiche all'SDK BSD-3 (come il nostro
 SDK), XenosRecomp e Mesa MIT. Si può prendere codice con attribuzione e
@@ -315,3 +316,56 @@ l'ambiente e il primo build, poi incrementale.
   Switch conviene portare le priorità 0x3B e rigenerare con i registri come
   locali (patch `share_registers`): cambiano il codice generato, e rigenerare
   costa meno di un minuto.
+
+## 9. Aggiornamento: nfsmw-nx fino a `66611e3` (2026-09-29)
+
+`git pull` del 2026-09-30: 9 commit dopo `493d47fc`, quello su cui è scritto
+questo documento.
+
+### Documenti
+
+Quasi tutti riscritti in un inglese più semplice ("family-friendly"), con
+rimandi al glossario. Nuovi o cambiati nel contenuto:
+
+| Documento | Cosa c'è di nuovo |
+|---|---|
+| `glossary.md` (**nuovo**, 274 righe) | definizioni di guest/host, XEX, EDRAM, tiling, resolve, ring PM4, ricompilazione statica, hook, sostituzione nativa, guardia, Horizon, libnx, title takeover, forwarder, NVK/NAK, pipeline cache, ZCULL, ring thread, LTO, PGO, ordinamento delle funzioni. Nessun fatto nuovo: serve come vocabolario comune |
+| `porting-another-game.md` | l'ordine che ha funzionato: **1. il gioco sul PC con ReXGlue** (per separare gli errori della traduzione da quelli della piattaforma), 2. Switch, 3. primi fotogrammi con la grafica di ReXGlue poi renderer nativo, 4. shader prima di giocare, 5. misure, 6. ottimizzazioni. Strumenti: `tools/huecos.py` + `app/huecos.toml` per dichiarare i pezzi di codice che la traduzione non ha raggiunto; `share_registers`. Cosa riusare del renderer, cosa non ha funzionato (risoluzione più bassa, FP16, dynamic state esteso, overclock) |
+| `audio-and-video.md` | tutto l'audio (driver `audout` con pompa a 187,5 Hz e coda di 10 frame, i tre fix dell'audio "robotico", la decodifica XMA fuori dal thread del gioco), e due cose nuove: **il blocco intermittente del server audio** (3 run su 7 muti: il thread aspettava il suo evento senza timeout e, sveglio con lo slot occupato, tornava ad aspettare senza riprovare; correzione: timeout di 250 ms **e** nuovo tentativo di consegna; "un timeout da solo non basta: il ciclo deve anche riprovare") e i **video WMV3 decodificati da FFmpeg** invece che dal decoder ricompilato del gioco (98 % di un core, ~22 FPS su 720p30), comprese le varianti con B-frame delle traduzioni amatoriali; FFmpeg LGPL 2.1, non una build GPL |
+| `platform-notes.md` | **la memoria libera si misura dentro l'heap**: sotto hbloader libnx prende tutto l'heap già preparato e **ignora `__nx_heap_size`**, quindi `InfoType_UsedMemorySize` legge 3185 di 3189 MB da subito; tutto (memoria guest ~506 MB, stack da 16 MB, Mesa **compresa la memoria GPU**) viene da lì; in gara la GPU usa **480–515 MB su 1,4–1,5 GB** di budget Vulkan. Il commit della memoria fisica guest è ora a **blocchi da 4 MB** (prima 1 MB: 128 blocchi × 5 viste ≈ 640 mappature invece di ~2.500). Ogni attesa nuova ha timeout e log. Nome nuovo della variabile di Mesa: `NVK_SWITCH_CPU_WRITE_MEM_UNCACHED` (sostituisce `NVK_SWITCH_CMD_MEM_CPU_UNCACHED` e `NVK_SWITCH_MEM_STREAM_CPU_UNCACHED`) |
+| `mesa.md`, `native-renderer.md`, `measuring.md`, `toolchain.md`, `shaders.md`, `building.md`, `performance-history.md`, `editions.md` | riscritti; i fatti sono quelli già riportati in §§1–7 (in `native-renderer.md` le regole "contatori a thread singolo non atomici" e "copiare in locali nei cicli caldi", ora in 09) |
+
+### Livello Horizon (sorgenti)
+
+| File | Cambio |
+|---|---|
+| `sdk/src/core/exception_handler_switch.cpp` | commit su fault della memoria fisica guest a blocchi da **4 MB** invece di 1 MB (solo la costante e il commento) |
+| `sdk/src/ui/runtime_switch.cpp` | solo il commento su `__nx_heap_size` (1024 MB): sotto hbloader è ignorato; resta per l'avvio senza heap già pronto |
+| `app/src/nfsmw_entorno_mesa.cpp` | commento: nuova variabile `NVK_SWITCH_CPU_WRITE_MEM_UNCACHED` |
+| `app/src/nfsmw_video_*`, `nfsmw_nativo_dibujos.cpp`, `nfsmw_ajustes_graficos.*` | video con B-frame, filtro colore: specifici del gioco |
+| `pgo/pal_fr`, `pgo/pal_pl`, `tools/editions/pal_fr`, `pal_pl` | profili PGO e coppie di indirizzi di due edizioni nuove (francese, polacca): conferma che gli strumenti delle edizioni reggono (§5) |
+
+### Cosa cambia nelle raccomandazioni
+
+- **Memoria guest (§1): nessun cambio.** Il loro passaggio a 4 MB riguarda i
+  fault per mappare, che il modello A non ha.
+- **Pool guest: ridotto.** Il dato "GPU ~500 MB su 1,4–1,5 GB, tutto dallo
+  stesso heap" è il motivo per cui il default di `nx_guest_pool_mib` scende da
+  1536 a 768 MiB (commit `memory_switch: guest pool 768 MiB by default`).
+- **Audio (§3): una lezione in più.** Il server audio di GTA IV sarà un thread
+  guest che aspetta un evento: se l'audio si ferma a intermittenza, cercare
+  un'attesa senza timeout **e** senza nuovo tentativo, e correggere con
+  entrambi. Il nostro driver aveva un'attesa senza limite, corretta in questo
+  giro (10 §10).
+- **Video: da aggiungere al piano.** GTA IV Xbox 360 usa **Bink**
+  (`xbox360/movies/*.bik`: TV, schermi, `weazel.bik`), non WMV3. Il decoder Bink
+  è linkato nel gioco e sarà ricompilato come il WMV3 di NFS: se è troppo lento,
+  la stessa soluzione (dare i byte a FFmpeg, che ha i decoder `bink` e
+  `binkaudio`, attraverso le callback di lettura del gioco) vale. Il codice
+  WMV3 non si riusa.
+- **Ordine del lavoro (nuovo, `porting-another-game.md`):** il gioco sul PC
+  prima della Switch. È la parte C di questo giro (06 §14).
+- **Mesa (§7):** usare il nome nuovo della variabile quando si costruisce il
+  driver.
+- **Thread (§3):** `detach()` era già fra le lezioni; ora è verificato nel
+  nostro codice (09 §3) e l'unico `pthread_detach` è stato tolto.
