@@ -15,6 +15,7 @@
 #include <rex/cvar.h>
 #include <rex/diagnostics/missing_function.h>
 #include <rex/logging.h>
+#include <rex/thread.h>
 
 #if REX_PLATFORM_NX
 extern "C" {
@@ -109,6 +110,8 @@ ExportThreadTrace* ThisThreadTrace() {
 #if REX_PLATFORM_NX
     trace->nx_handle = threadGetCurHandle();
     svcGetThreadId(&trace->nx_thread_id, CUR_THREAD_HANDLE);
+#else
+    trace->nx_thread_id = rex::thread::current_thread_id();
 #endif
     std::lock_guard<std::mutex> lock(g_export_list_mutex);
     trace->next = g_export_threads;

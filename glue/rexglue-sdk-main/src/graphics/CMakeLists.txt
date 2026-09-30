@@ -148,7 +148,10 @@ add_library(rexgpu-xenos SHARED
 add_library(rex::gpu-xenos ALIAS rexgpu-xenos)
 rexgpu_configure_plugin(rexgpu-xenos gpu-xenos)
 
-if(REXGLUE_USE_VULKAN)
+# The gta4-native plugin needs LibertyRecompLib's shader cache, left out of
+# this repository; tools/pc-eu-base turns it off and uses xenos only.
+option(REXGLUE_BUILD_GTA4_NATIVE "Build the gta4-native GPU plugin (Vulkan)" ON)
+if(REXGLUE_USE_VULKAN AND REXGLUE_BUILD_GTA4_NATIVE)
     set(GTA4_NATIVE_SHADER_CACHE_ROOT
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/LibertyRecompLib")
     set(GTA4_NATIVE_SMOLV_ROOT

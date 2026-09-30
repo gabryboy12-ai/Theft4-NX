@@ -32,7 +32,7 @@ void RecordExportStubHit(ExportStubSite& site, uint32_t guest_lr);
 // most called first. `when` says at which point ("at the stop", "at exit").
 void LogExportStubSummary(const char* when);
 
-// ── Implemented exports (REX_EXPORT), Switch only ──────────────────────────
+// ── Implemented exports (REX_EXPORT): Switch, or REX_TRACE_EXPORTS ──────────
 //
 // Run 11 resumed the game's main thread and then logged nothing: implemented
 // exports leave no trace, so the log could not say how far the game got nor
@@ -60,7 +60,8 @@ struct ExportThreadTrace {
   std::atomic<uint32_t> guest_lr{0};          // guest LR of the call to `current`/`last`
   std::atomic<uint64_t> calls{0};             // export calls made by this thread
   uint32_t nx_handle = 0;                     // Horizon thread handle (0 elsewhere)
-  uint64_t nx_thread_id = 0;                  // Horizon thread id (0 elsewhere)
+  uint64_t nx_thread_id = 0;                  // Horizon thread id; elsewhere the runtime's
+                                              // thread id (the XThread handle)
   ExportThreadTrace* next = nullptr;
 };
 

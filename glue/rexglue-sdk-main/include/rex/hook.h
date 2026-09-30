@@ -75,7 +75,8 @@
 // Export: hook + register in global registry for kernel ordinal lookup.
 // On Switch every call is traced (rex/diagnostics/export_stubs.h): first call
 // logged, calls counted, and the export each thread is inside recorded.
-#if REX_PLATFORM_NX
+// Elsewhere only with REX_TRACE_EXPORTS (tools/pc-eu-base, for comparison).
+#if REX_PLATFORM_NX || defined(REX_TRACE_EXPORTS)
 #define REX_EXPORT(name, function)                                             \
   extern "C" REX_FUNC(name) {                                                  \
     static ::rex::diagnostics::ExportCallSite _export_site{#name};             \

@@ -172,4 +172,8 @@ if(REXGLUE_USE_D3D12)
         dxguid
         dxc-headers
     )
+elseif(WIN32)
+    # presenter.cpp creates a DXGI factory on Windows for the UI tick (monitor
+    # refresh) whatever the backend: a Vulkan-only build needs it too.
+    target_link_libraries(rexui PUBLIC dxgi dxguid)
 endif()
