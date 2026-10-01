@@ -19,9 +19,10 @@ endif()
 get_filename_component(THEFT4_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 add_subdirectory("${THEFT4_ROOT}/glue/rexglue-sdk-main" rexglue-sdk)
 
-add_executable(switch-smoke main.cpp probes.cpp)
+add_executable(switch-smoke main.cpp probes.cpp "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp")
 target_compile_features(switch-smoke PRIVATE cxx_std_23)
-target_include_directories(switch-smoke PRIVATE "${THEFT4_ROOT}/glue/rexglue-sdk-main/include")
+target_include_directories(switch-smoke PRIVATE "${THEFT4_ROOT}/glue/rexglue-sdk-main/include"
+    "${THEFT4_ROOT}/tools/switch-common")
 
 # Every SDK library in the headless Switch runtime (rexruntime already embeds
 # the rexfilesystem, rexaudio and kernel objects). The archives are grouped so

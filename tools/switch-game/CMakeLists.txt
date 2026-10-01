@@ -50,10 +50,12 @@ add_custom_command(
     VERBATIM
 )
 
-add_executable(switch-game main.cpp "${MISSING_IMPORTS_CPP}" ${GENERATED_SOURCES})
+add_executable(switch-game main.cpp "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
+    "${MISSING_IMPORTS_CPP}" ${GENERATED_SOURCES})
 target_compile_features(switch-game PRIVATE cxx_std_23)
 target_include_directories(switch-game PRIVATE
     "${THEFT4_GENERATED_DIR}"
+    "${THEFT4_ROOT}/tools/switch-common"
     "${THEFT4_ROOT}/glue/rexglue-sdk-main/include"
 )
 # The SDK's own global options (glue/rexglue-sdk-main/CMakeLists.txt), which do

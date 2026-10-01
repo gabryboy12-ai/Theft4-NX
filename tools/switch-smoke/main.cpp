@@ -17,9 +17,15 @@
 //      workers), and with core 3 (mask 0xF) one host worker placed on it;
 //      then the Horizon priority bands (guest 0x3B, host 0x2B-0x2D) and a
 //      measurement that only 0x3B is time-sliced
-// Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those four steps,
-// followed by the exploratory probes T1-T10 in probes.cpp (alias primitives,
-// heap size, cost of the guest-memory design A). Press + to exit.
+//   5. host ticks and the guest time base advance
+//   6. switch-game's exit sequence on threads working in the background:
+//      pause (each result checked), counters frozen, a blocked summary job
+//      abandoned at its deadline, resume
+// Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those steps,
+// followed by the exploratory probes T1-T11 in probes.cpp (alias primitives,
+// heap size, cost of the guest-memory design A). + leaves through the exit
+// sequence of switch-game, with five threads working: pause, summary,
+// svcExitProcess.
 //
 // Every smoke line is made durable before the next operation: it is appended
 // to smoke.log through its own fd, fsync'd and closed. A crash therefore
@@ -37,6 +43,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -61,6 +68,7 @@
 
 #include <spdlog/sinks/base_sink.h>
 
+#include "nx_exit.h"
 #include "probes.h"
 
 namespace {
@@ -84,6 +92,11 @@ int main(int argc, char** argv);
 
 REXCVAR_DECLARE(bool, nx_memory_trace);
 REXCVAR_DECLARE(int32_t, nx_guest_pool_mib);
+REXCVAR_DEFINE_BOOL(nx_exit_close_services, true, "Switch",
+                    "At exit, after pausing the working threads and writing the summary, close "
+                    "libnx's services (__appExit) before svcExitProcess, as switch-game does");
+
+extern "C" void __appExit(void);
 
 namespace {
 
@@ -1001,6 +1014,283 @@ void StepThreads() {
   StepThreadPriorities(core_mask);
 }
 
+// ── 6. Exit sequence ───────────────────────────────────────────────────────
+//
+// switch-game's exit (tools/switch-common/nx_exit.h): pause every game
+// thread with svcSetThreadActivity, write the summary from a worker with a
+// deadline, svcExitProcess. Step 6 runs it on five threads that keep working
+// at the guest band (0x3B): a spinner, a mutex user, a malloc/free loop, a
+// reader of an SD file, and one that holds a mutex for good. It checks that
+// every pause succeeds, that the counters stop, that a job blocked on the
+// held mutex is abandoned at its deadline, and that the threads run again
+// once resumed. The workers are then stopped (the probes measure timings),
+// started again after the probes, and + leaves through the whole sequence
+// with them working.
+
+constexpr int kExitWorkers = 5;
+constexpr const char* kExitWorkerNames[kExitWorkers] = {"spin", "mutex", "malloc", "SD read",
+                                                        "mutex holder"};
+constexpr const char* kExitScratchPath = "sdmc:/switch/theft4/smoke-exit-scratch.bin";
+
+struct ExitWorkers {
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> counts[kExitWorkers] = {};
+  std::atomic<bool> held_taken{false};
+  std::vector<std::unique_ptr<rex::thread::Thread>> threads;
+};
+ExitWorkers g_exit_workers;
+std::timed_mutex g_exit_held_mutex;  // taken for good by "mutex holder"
+std::mutex g_exit_work_mutex;        // taken and released by "mutex"
+
+void ExitWorkerBody(int i) {
+  ExitWorkers& w = g_exit_workers;
+  switch (i) {
+    case 0:
+      while (!w.stop.load(std::memory_order_relaxed)) {
+        w.counts[0].fetch_add(1, std::memory_order_relaxed);
+      }
+      break;
+    case 1:
+      while (!w.stop.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(g_exit_work_mutex);
+        w.counts[1].fetch_add(1, std::memory_order_relaxed);
+      }
+      break;
+    case 2:
+      for (uint64_t n = 0; !w.stop.load(std::memory_order_relaxed); ++n) {
+        const size_t size = 64 + (n * 977) % 8192;
+        auto* p = static_cast<uint8_t*>(std::malloc(size));
+        if (p) {
+          std::memset(p, int(n), size);
+          std::free(p);
+        }
+        w.counts[2].fetch_add(1, std::memory_order_relaxed);
+      }
+      break;
+    case 3: {
+      uint8_t buffer[4096];
+      while (!w.stop.load(std::memory_order_relaxed)) {
+        int fd = open(kExitScratchPath, O_RDONLY);
+        if (fd >= 0) {
+          (void)read(fd, buffer, sizeof(buffer));
+          close(fd);
+        }
+        w.counts[3].fetch_add(1, std::memory_order_relaxed);
+        svcSleepThread(2'000'000);
+      }
+      break;
+    }
+    case 4:
+      g_exit_held_mutex.lock();
+      w.held_taken.store(true);
+      while (!w.stop.load(std::memory_order_relaxed)) {
+        w.counts[4].fetch_add(1, std::memory_order_relaxed);
+        svcSleepThread(1'000'000);
+      }
+      g_exit_held_mutex.unlock();
+      break;
+  }
+}
+
+bool StartExitWorkers() {
+  ExitWorkers& w = g_exit_workers;
+  w.stop.store(false);
+  w.held_taken.store(false);
+  for (auto& c : w.counts) c.store(0);
+  w.threads.clear();
+  for (int i = 0; i < kExitWorkers; ++i) {
+    rex::thread::Thread::CreationParameters params;
+    params.stack_size = 64 * 1024;
+    auto thread = rex::thread::Thread::Create(params, [i] { ExitWorkerBody(i); });
+    if (!thread) {
+      return false;
+    }
+    thread->set_name(std::string("smoke-exit-") + kExitWorkerNames[i]);
+    thread->set_nx_priority(0x3B);  // the guest band
+    w.threads.push_back(std::move(thread));
+  }
+  return true;
+}
+
+void StopExitWorkers() {
+  g_exit_workers.stop.store(true);
+  for (auto& t : g_exit_workers.threads) {
+    rex::thread::Wait(t.get(), false, std::chrono::milliseconds(2000));
+  }
+  g_exit_workers.threads.clear();
+}
+
+size_t ExitWorkerHandles(Handle* out) {
+  size_t n = 0;
+  for (auto& t : g_exit_workers.threads) {
+    out[n++] = t->nx_kernel_handle();
+  }
+  return n;
+}
+
+void ExitWorkerCounts(uint64_t* out) {
+  for (int i = 0; i < kExitWorkers; ++i) {
+    out[i] = g_exit_workers.counts[i].load();
+  }
+}
+
+// Blocks on the mutex the paused "mutex holder" owns; gives up after 2 s so
+// the exit worker is free again once the holder runs.
+void HeldMutexJob(void*) {
+  if (g_exit_held_mutex.try_lock_for(std::chrono::seconds(2))) {
+    g_exit_held_mutex.unlock();
+  }
+}
+
+void NoopJob(void*) {}
+
+// The exit worker is free again (a job that outlived its deadline ended).
+bool WaitExitWorkerIdle(u64 timeout_ms) {
+  const u64 start = armGetSystemTick();
+  while (armTicksToNs(armGetSystemTick() - start) / 1'000'000 < timeout_ms) {
+    if (theft4::nx_exit::RunOnExitWorker(NoopJob, nullptr, 100)) {
+      return true;
+    }
+    svcSleepThread(20'000'000);
+  }
+  return false;
+}
+
+void StepExitSequence() {
+  SMOKE_INFO("step 6 exit sequence (switch-game's ExitGame): %d threads working at 0x3B",
+             kExitWorkers);
+  if (!theft4::nx_exit::StartExitWorker()) {
+    Fail("exit", "exit worker not created");
+    return;
+  }
+  {
+    std::vector<uint8_t> scratch(64 * 1024, 0x5A);
+    FILE* f = std::fopen(kExitScratchPath, "wb");
+    if (f) {
+      std::fwrite(scratch.data(), 1, scratch.size(), f);
+      std::fclose(f);
+    }
+  }
+  if (!StartExitWorkers()) {
+    Fail("exit", "background threads not created");
+    StopExitWorkers();
+    return;
+  }
+  svcSleepThread(300'000'000);
+  uint64_t before[kExitWorkers];
+  ExitWorkerCounts(before);
+  for (int i = 0; i < kExitWorkers; ++i) {
+    if (before[i] == 0) {
+      Fail("exit", std::string("background thread '") + kExitWorkerNames[i] + "' did no work");
+    }
+  }
+  if (!g_exit_workers.held_taken.load()) {
+    Fail("exit", "the mutex holder did not take its mutex");
+  }
+
+  // 1. Pause, as ExitGame does, and check each result.
+  Handle handles[kExitWorkers];
+  const size_t n = ExitWorkerHandles(handles);
+  theft4::nx_exit::PausedThread paused[kExitWorkers];
+  const u64 t0 = armGetSystemTick();
+  const size_t n_paused = theft4::nx_exit::PauseThreads(handles, n, paused, kExitWorkers);
+  const u64 pause_us = armTicksToNs(armGetSystemTick() - t0) / 1000;
+  size_t stopped = 0;
+  for (size_t i = 0; i < n_paused; ++i) {
+    stopped += paused[i].stopped() ? 1 : 0;
+    SMOKE_INFO("  pause '%s': svcSetThreadActivity rc 0x%X, svcGetThreadContext3 rc 0x%X -> %s",
+               kExitWorkerNames[i], paused[i].pause_rc, paused[i].context_rc,
+               paused[i].stopped() && R_SUCCEEDED(paused[i].pause_rc) ? "ok" : "FAILED");
+    if (R_FAILED(paused[i].pause_rc) || !paused[i].stopped()) {
+      Fail("exit", std::string("pause of '") + kExitWorkerNames[i] + "' failed");
+    }
+  }
+  SMOKE_INFO("  %zu of %zu threads paused in %" PRIu64 " us", stopped, n, pause_us);
+
+  // 2. Nothing runs while paused.
+  uint64_t frozen0[kExitWorkers], frozen1[kExitWorkers];
+  ExitWorkerCounts(frozen0);
+  svcSleepThread(100'000'000);
+  ExitWorkerCounts(frozen1);
+  bool frozen = true;
+  for (int i = 0; i < kExitWorkers; ++i) {
+    frozen &= frozen0[i] == frozen1[i];
+  }
+  SMOKE_INFO("  counters over 100 ms while paused: %s", frozen ? "unchanged -> ok" : "MOVED");
+  if (!frozen) {
+    Fail("exit", "a paused thread kept running");
+  }
+
+  // 3. A job that needs a lock a paused thread holds is abandoned at its
+  // deadline (the summary must never keep the process alive).
+  const u64 t1 = armGetSystemTick();
+  const bool finished = theft4::nx_exit::RunOnExitWorker(HeldMutexJob, nullptr, 300);
+  const u64 waited_ms = armTicksToNs(armGetSystemTick() - t1) / 1'000'000;
+  const bool deadline_ok = !finished && waited_ms >= 300 && waited_ms < 450;
+  SMOKE_INFO("  job blocked on the held mutex: %s after %" PRIu64 " ms (deadline 300) -> %s",
+             finished ? "FINISHED" : "abandoned", waited_ms, deadline_ok ? "ok" : "WRONG");
+  if (!deadline_ok) {
+    Fail("exit", "the deadline did not end the wait on a blocked job");
+  }
+
+  // 4. Resumed, they run again (the game never resumes; this is the smoke).
+  theft4::nx_exit::ResumeThreads(paused, n_paused);
+  svcSleepThread(100'000'000);
+  uint64_t after[kExitWorkers];
+  ExitWorkerCounts(after);
+  bool moving = true;
+  for (int i = 0; i < kExitWorkers; ++i) {
+    moving &= after[i] > frozen1[i];
+  }
+  const bool idle = WaitExitWorkerIdle(3000);
+  SMOKE_INFO("  after resume: counters %s, exit worker %s -> %s", moving ? "moving" : "STILL",
+             idle ? "free again" : "STILL BUSY", moving && idle ? "ok" : "WRONG");
+  if (!moving || !idle) {
+    Fail("exit", "threads not running after resume, or the exit worker stayed busy");
+  }
+  StopExitWorkers();
+}
+
+// + : the whole sequence of switch-game's ExitGame, with the workers busy.
+theft4::nx_exit::PausedThread g_final_paused[kExitWorkers];
+size_t g_final_paused_count = 0;
+u64 g_final_pause_us = 0;
+
+void FinalExitSummaryJob(void*) {
+  SMOKE_INFO("exit (+): threads paused, summary job started");
+  size_t stopped = 0;
+  for (size_t i = 0; i < g_final_paused_count; ++i) {
+    stopped += g_final_paused[i].stopped() ? 1 : 0;
+    SMOKE_INFO("  exit pause '%s': svcSetThreadActivity rc 0x%X, svcGetThreadContext3 rc 0x%X",
+               kExitWorkerNames[i], g_final_paused[i].pause_rc, g_final_paused[i].context_rc);
+  }
+  uint64_t counts[kExitWorkers];
+  ExitWorkerCounts(counts);
+  SMOKE_INFO("exit (+): %zu of %zu working threads stopped in %" PRIu64 " us (work done: spin "
+             "%" PRIu64 ", mutex %" PRIu64 ", malloc %" PRIu64 ", SD %" PRIu64 ", holder %" PRIu64
+             "); next %ssvcExitProcess",
+             stopped, g_final_paused_count, g_final_pause_us, counts[0], counts[1], counts[2],
+             counts[3], counts[4],
+             REXCVAR_GET(nx_exit_close_services) ? "__appExit, then " : "");
+  rex::FlushLogging();
+  if (REXCVAR_GET(nx_exit_close_services)) {
+    __appExit();
+  }
+}
+
+[[noreturn]] void ExitLikeTheGame() {
+  Handle handles[kExitWorkers];
+  const size_t n = ExitWorkerHandles(handles);
+  const u64 t0 = armGetSystemTick();
+  g_final_paused_count =
+      theft4::nx_exit::PauseThreads(handles, n, g_final_paused, kExitWorkers);
+  g_final_pause_us = armTicksToNs(armGetSystemTick() - t0) / 1000;
+  // Past the deadline nothing is written: opening smoke.log allocates, and a
+  // paused thread may hold malloc's lock. The job's first line says it began.
+  theft4::nx_exit::RunOnExitWorker(FinalExitSummaryJob, nullptr, 5000);
+  svcExitProcess();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1019,6 +1309,7 @@ int main(int argc, char** argv) {
   StepGuestMemory();
   StepThreads();
   StepClock();
+  StepExitSequence();
 
   if (g_first_failure.empty()) {
     Report(false, "SMOKE OK");
@@ -1033,6 +1324,10 @@ int main(int argc, char** argv) {
     // The verdict above came before the arena was released.
     Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
   }
+  // + leaves as switch-game does, with threads working in the background.
+  const bool workers = StartExitWorkers();
+  SMOKE_INFO("exit test: %s; + pauses them, writes the summary and calls svcExitProcess",
+             workers ? "5 threads working in the background" : "background threads NOT started");
   std::printf("\nPress + to exit.\n");
   consoleUpdate(nullptr);
 
@@ -1042,9 +1337,7 @@ int main(int argc, char** argv) {
       break;
     }
     consoleUpdate(nullptr);
+    svcSleepThread(16'000'000);
   }
-
-  rex::ShutdownLogging();
-  consoleExit(nullptr);
-  return 0;
+  ExitLikeTheGame();
 }

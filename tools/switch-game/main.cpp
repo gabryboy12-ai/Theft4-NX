@@ -36,11 +36,15 @@
 //
 // Exit is svcExitProcess: guest threads are still running, and returning to
 // the loader would unload code they execute (04-threads-exit.md section 5).
-// svcExitProcess ends every thread of the process at once; the only thing
-// to avoid before it is drawing on the console after consoleExit (run 11:
-// the termination line's printf faulted in ConsoleSwRenderer_drawChar and
-// produced a crash report on every +). Console output goes through
-// ConsolePrint under g_console_mutex, and CloseConsole shuts it once.
+// ExitGame first pauses every XThread (svcSetThreadActivity, result checked
+// per thread), then writes the summary from a worker with a deadline, then
+// leaves (see "Exit" below). Never draw on the console after consoleExit (run
+// 11: the termination line's printf faulted in ConsoleSwRenderer_drawChar):
+// console output goes through ConsolePrint under g_console_mutex, and
+// CloseConsole shuts it once.
+//
+// Graphics: the null GPU (cvar nx_null_gpu, rex/system/null_graphics_system.h)
+// lets the game past the Vd* exports without drawing.
 //
 // Where the game is (run 11 resumed the main thread and then logged nothing):
 // every implemented export is traced on Switch (export_stubs.h). A heartbeat
@@ -72,6 +76,7 @@
 
 #include <switch.h>
 
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/diagnostics/export_stubs.h>
 #include <rex/diagnostics/missing_function.h>
@@ -83,6 +88,7 @@
 #include <rex/runtime.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/null_graphics_system.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xthread.h>
@@ -91,6 +97,18 @@
 #include <spdlog/sinks/base_sink.h>
 
 #include "gta4_init.h"
+#include "nx_exit.h"
+
+REXCVAR_DEFINE_BOOL(nx_null_gpu, true, "Switch",
+                    "Give the runtime the null GPU (rex/system/null_graphics_system.h): the "
+                    "Vd* exports work and the ring is consumed without drawing. false: the "
+                    "run stops at the first graphics export, as up to run 13");
+REXCVAR_DEFINE_BOOL(nx_exit_close_services, true, "Switch",
+                    "At exit, after pausing the game's threads and writing the summary, close "
+                    "libnx's services (__appExit, as a normal NRO exit does) before "
+                    "svcExitProcess");
+
+extern "C" void __appExit(void);
 
 namespace {
 
@@ -174,11 +192,6 @@ void DurableWriteLocked(const char* data, size_t size) {
   close(fd);
 }
 
-void DurableWrite(const char* data, size_t size) {
-  std::lock_guard<std::timed_mutex> lock(g_log_file_mutex);
-  DurableWriteLocked(data, size);
-}
-
 // For stderr, which the fault path of exception_handler_switch.cpp also
 // writes: never wait more than 200 ms for the log (a thread that faulted
 // while writing it must not deadlock the report). false = not written.
@@ -189,6 +202,19 @@ bool DurableWriteBounded(const char* data, size_t size) {
   DurableWriteLocked(data, size);
   g_log_file_mutex.unlock();
   return true;
+}
+
+// Set once the exit has paused the game's threads: one of them may hold the
+// log mutex for good, so from then on every write waits at most 200 ms.
+std::atomic<bool> g_exiting{false};
+
+void DurableWrite(const char* data, size_t size) {
+  if (g_exiting.load(std::memory_order_relaxed)) {
+    DurableWriteBounded(data, size);
+    return;
+  }
+  std::lock_guard<std::timed_mutex> lock(g_log_file_mutex);
+  DurableWriteLocked(data, size);
 }
 
 class DurableSink final : public spdlog::sinks::base_sink<std::mutex> {
@@ -527,6 +553,10 @@ struct ThreadRow {
   u32 guest_r1 = 0;
 };
 
+// Set by the exit once every XThread it found is paused: the snapshot then
+// reads them as they are and resumes none.
+std::atomic<bool> g_threads_paused_for_exit{false};
+
 // One line per XThread. Each thread is paused (svcSetThreadActivity) only
 // long enough to read its registers and scan its stack; a thread the game
 // had already suspended is read but not resumed by us.
@@ -579,6 +609,7 @@ void LogThreadSnapshot(const char* when) {
 
   u64 self_id = 0;
   svcGetThreadId(&self_id, CUR_THREAD_HANDLE);
+  const bool exit_paused = g_threads_paused_for_exit.load();
   for (ThreadRow& row : rows) {
     if (!row.nx_handle) {
       continue;
@@ -587,7 +618,7 @@ void LogThreadSnapshot(const char* when) {
     if (R_SUCCEEDED(svcGetThreadId(&id, row.nx_handle)) && id == self_id) {
       continue;
     }
-    row.pause_rc = svcSetThreadActivity(row.nx_handle, ThreadActivity_Paused);
+    row.pause_rc = exit_paused ? 0 : svcSetThreadActivity(row.nx_handle, ThreadActivity_Paused);
     ThreadContext ctx{};
     row.context_rc = svcGetThreadContext3(&ctx, row.nx_handle);
     if (R_SUCCEEDED(row.context_rc)) {
@@ -610,7 +641,7 @@ void LogThreadSnapshot(const char* when) {
       row.guest_lr = u32(row.guest_ctx->lr);
       row.guest_r1 = row.guest_ctx->r1.u32;
     }
-    if (R_SUCCEEDED(row.pause_rc)) {
+    if (!exit_paused && R_SUCCEEDED(row.pause_rc)) {
       svcSetThreadActivity(row.nx_handle, ThreadActivity_Runnable);
     }
   }
@@ -650,7 +681,9 @@ void LogThreadSnapshot(const char* when) {
                 row.handle, row.thread_id, row.name.c_str(), row.guest ? "guest" : "host",
                 row.running ? ", running" : ", not running", exports, row.guest_lr,
                 row.guest_r1, row.pc - g_module_base, row.lr - g_module_base, stack.c_str(),
-                R_SUCCEEDED(row.pause_rc) ? "" : " (already paused by the game)");
+                exit_paused                   ? " (paused for the exit)"
+                : R_SUCCEEDED(row.pause_rc) ? ""
+                                              : " (already paused by the game)");
     } else {
       GAME_INFO("  thread %08X id %u '%s' %s%s: %s; guest lr %08X r1 %08X; host context not "
                 "read (handle %08X, pause rc 0x%X, context rc 0x%X)",
@@ -659,6 +692,29 @@ void LogThreadSnapshot(const char* when) {
                 row.guest_r1, row.nx_handle, row.pause_rc, row.context_rc);
     }
   }
+}
+
+// Run 12 spun in `while (mftb == 0)`: both clocks, so the log shows them
+// moving from one heartbeat to the next.
+void LogClock() {
+  using rex::chrono::Clock;
+  GAME_INFO("clock: host tick %" PRIu64 " (%" PRIu64 " Hz), guest time base %" PRIu64
+            " (%" PRIu64 " Hz)",
+            Clock::QueryHostTickCount(), Clock::QueryHostTickFrequency(),
+            Clock::QueryGuestTickCount(), Clock::guest_tick_frequency());
+}
+
+void LogNullGpu() {
+  if (!REXCVAR_GET(nx_null_gpu)) {
+    return;
+  }
+  const auto g = rex::system::GetNullGpuStats();
+  GAME_INFO("null GPU: %" PRIu64 " WPTR writes, ring read %08X / write %08X, %" PRIu64
+            " packets (%" PRIu64 " draws skipped, %" PRIu64 " unknown), %" PRIu64
+            " swaps, %" PRIu64 " vblanks, %" PRIu64 " PM4 interrupts%s",
+            g.wptr_writes, g.read_index, g.write_index, g.packets, g.draws, g.unknown_opcodes,
+            g.swaps, g.vblanks, g.interrupts,
+            g.waiting_opcode ? "; IN WAIT_REG_MEM for more than 1 s" : "");
 }
 
 // Every 10 s: one line; at 5, 20, 60 s and then every 120 s: the snapshot.
@@ -678,6 +734,8 @@ struct Heartbeat {
       GAME_INFO("heartbeat %" PRIu64 " s: exports %zu distinct, %" PRIu64
                 " calls; guest memory %zu blocks (peak %zu of %zu)",
                 seconds, distinct, calls, a.mapped_blocks, a.peak_mapped_blocks, a.pool_blocks);
+      LogClock();
+      LogNullGpu();
     }
     if (seconds >= next_snapshot_s) {
       next_snapshot_s = next_snapshot_s < 20 ? 20 : next_snapshot_s < 60 ? 60 : seconds + 120;
@@ -702,6 +760,99 @@ void LogExitSummary() {
   rex::FlushLogging();
 }
 
+// ── Exit ───────────────────────────────────────────────────────────────────
+//
+// 1. Every XThread is paused (svcSetThreadActivity) before anything else: no
+//    game thread runs during the exit. The result of each pause is kept.
+// 2. The summary is written by the exit worker (nx_exit.h), created at
+//    start-up, with a 5 s deadline: a paused thread may hold a lock the
+//    summary needs (malloc, the log, spdlog, the console).
+// 3. With nx_exit_close_services the worker then closes libnx's services as
+//    a normal NRO exit does (__appExit). Run 13: + still ended in an error
+//    with no crash report, after the TERMINATION line of svcExitProcess.
+// 4. svcExitProcess, whatever happened in 2 and 3.
+
+constexpr size_t kMaxExitThreads = 256;
+constexpr u64 kExitSummaryTimeoutMs = 5000;
+std::vector<rex::system::object_ref<rex::system::XThread>> g_exit_xthreads;  // reserved at start
+Handle g_exit_handles[kMaxExitThreads];
+theft4::nx_exit::PausedThread g_exit_paused[kMaxExitThreads];
+size_t g_exit_paused_count = 0;
+size_t g_exit_xthread_count = 0;
+bool g_exit_have_xthreads = false;
+const char* g_exit_reason = "";
+u64 g_exit_pause_us = 0;
+
+// The XThreads (kernel object table, waited for at most 200 ms) and the
+// threads of the export traces (each with its Horizon handle).
+size_t CollectExitThreadHandles() {
+  size_t n = 0;
+  if (auto* kernel = rex::system::kernel_state()) {
+    g_exit_have_xthreads = kernel->object_table()->TryGetObjectsByType<rex::system::XThread>(
+        &g_exit_xthreads, std::chrono::milliseconds(200));
+    g_exit_xthread_count = g_exit_xthreads.size();
+    for (auto& t : g_exit_xthreads) {
+      if (auto* host = t->thread(); host && n < kMaxExitThreads) {
+        g_exit_handles[n++] = host->nx_kernel_handle();
+      }
+    }
+  }
+  rex::diagnostics::ExportThreadSnapshot traces[64];
+  const size_t n_traces = rex::diagnostics::SnapshotExportThreads(traces, 64);
+  for (size_t k = 0; k < n_traces && n < kMaxExitThreads; ++k) {
+    g_exit_handles[n++] = traces[k].nx_handle;
+  }
+  return n;
+}
+
+void ExitSummaryJob(void*) {
+  size_t stopped = 0;
+  for (size_t i = 0; i < g_exit_paused_count; ++i) {
+    stopped += g_exit_paused[i].stopped() ? 1 : 0;
+  }
+  GAME_INFO("exit requested (%s): %zu threads paused in %" PRIu64 " us, %zu stopped, %zu NOT "
+            "stopped; XThreads %s (%zu)",
+            g_exit_reason, g_exit_paused_count, g_exit_pause_us, stopped,
+            g_exit_paused_count - stopped, g_exit_have_xthreads ? "listed" : "NOT listed",
+            g_exit_xthread_count);
+  for (size_t i = 0; i < g_exit_paused_count; ++i) {
+    const auto& t = g_exit_paused[i];
+    GAME_INFO("  exit pause: handle %08X thread id %" PRIu64 ": svcSetThreadActivity rc 0x%X, "
+              "svcGetThreadContext3 rc 0x%X, pc +0x%" PRIx64 " -> %s",
+              t.handle, t.thread_id, t.pause_rc, t.context_rc,
+              t.pc ? t.pc - g_module_base : 0, t.stopped() ? "stopped" : "NOT STOPPED");
+  }
+  LogExitSummary();
+  LogClock();
+  LogNullGpu();
+  const bool close_services = REXCVAR_GET(nx_exit_close_services);
+  GAME_INFO("exit: summary written; next %ssvcExitProcess",
+            close_services ? "__appExit (libnx services), then " : "");
+  rex::FlushLogging();
+  CloseConsole();
+  if (close_services) {
+    __appExit();  // the SD card is unmounted: nothing more reaches game.log
+  }
+}
+
+[[noreturn]] void ExitGame(const char* reason) {
+  const u64 t0 = armGetSystemTick();
+  const size_t n = CollectExitThreadHandles();
+  g_exit_paused_count =
+      theft4::nx_exit::PauseThreads(g_exit_handles, n, g_exit_paused, kMaxExitThreads);
+  g_exit_pause_us = armTicksToNs(armGetSystemTick() - t0) / 1000;
+  g_threads_paused_for_exit.store(true);
+  g_exiting.store(true);
+  g_exit_reason = reason;
+  if (!theft4::nx_exit::RunOnExitWorker(ExitSummaryJob, nullptr, kExitSummaryTimeoutMs)) {
+    // Not to game.log: opening it allocates, and the lock malloc needs may be
+    // held by a paused thread. The crash log's descriptor is already open.
+    CrashWrite("=== exit: the summary did not finish within 5 s (a paused thread holds a lock "
+               "it needs?) or the exit worker is missing; svcExitProcess anyway ===\n");
+  }
+  svcExitProcess();  // wrapped: logged if the SD card is still mounted
+}
+
 [[noreturn]] void WaitForPlusAndExit(PadState* pad) {
   ConsolePrint("\nPress + to exit.\n");
   while (appletMainLoop()) {
@@ -712,10 +863,7 @@ void LogExitSummary() {
     ConsoleRefresh();
     svcSleepThread(16'000'000);
   }
-  GAME_INFO("exit requested (+)%s", g_stopped.load() ? " after the stop" : "");
-  LogExitSummary();
-  CloseConsole();
-  svcExitProcess();  // wrapped: logged (game.log only: the console is closed)
+  ExitGame(g_stopped.load() ? "+ after the stop" : "+");
 }
 
 PadState g_pad;
@@ -750,7 +898,7 @@ namespace rex::diagnostics {
 
 namespace {
 
-int GameMain(int argc, char** argv) {
+[[noreturn]] void GameMain(int argc, char** argv) {
   rex::cvar::Init(argc, argv);
   consoleInit(nullptr);
   g_console_open = true;  // still single-threaded
@@ -762,6 +910,11 @@ int GameMain(int argc, char** argv) {
   StartLogging();
   CaptureTerminations();
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
+  // What the exit needs, made now while allocating is safe (ExitGame).
+  g_exit_xthreads.reserve(kMaxExitThreads);
+  if (!theft4::nx_exit::StartExitWorker()) {
+    GAME_ERROR("exit worker not created: at + the summary is skipped, svcExitProcess still runs");
+  }
   if (!CheckGameFiles()) {
     WaitForPlusAndExit(&g_pad);
   }
@@ -773,7 +926,17 @@ int GameMain(int argc, char** argv) {
       root / "runtime-cache", std::filesystem::path{}, root / "marketplace", root / "saves");
 
   rex::RuntimeConfig config;
-  config.tool_mode = false;  // no graphics object: "Runtime initialized without graphics system"
+  config.tool_mode = false;
+  // Run 13 stopped at VdSetGraphicsInterruptCallback: without a graphics
+  // object every Vd* export that needs one stops the run. The null GPU
+  // consumes the ring and raises the interrupts without drawing.
+  if (REXCVAR_GET(nx_null_gpu)) {
+    config.graphics = rex::system::CreateNullGraphicsSystem();
+    GAME_INFO("graphics: null GPU (cvar nx_null_gpu)");
+  } else {
+    GAME_INFO("graphics: none (nx_null_gpu = false): the run stops at the first Vd* export "
+              "that needs a GPU");
+  }
   // InitializeKernel with a line on each side: run 9 ended between the
   // kernel host-task worker and SetupVfs, i.e. around here.
   config.kernel_init = [](rex::Runtime* runtime, rex::system::KernelState* kernel_state) {
@@ -817,6 +980,7 @@ int GameMain(int argc, char** argv) {
   }
   GAME_INFO("about to resume the main guest thread '%s' at %08X", thread->name().c_str(),
             module->entry_point());
+  LogClock();
   thread->Resume();
   GAME_INFO("main guest thread resumed; waiting (the log records the first stop)");
 
@@ -825,9 +989,11 @@ int GameMain(int argc, char** argv) {
   bool seen_running = false;
   Heartbeat heartbeat;
   heartbeat.start = armGetSystemTick();
+  bool plus = false;
   while (appletMainLoop()) {
     padUpdate(&g_pad);
     if (padGetButtonsDown(&g_pad) & HidNpadButton_Plus) {
+      plus = true;
       break;
     }
     seen_running |= thread->is_running();
@@ -839,23 +1005,17 @@ int GameMain(int argc, char** argv) {
     ConsoleRefresh();
     svcSleepThread(16'000'000);
   }
-  GAME_INFO("exit requested (+)%s", g_stopped.load() ? " after the stop" : "");
-  // The runtime is never destroyed: guest threads are still running, and
-  // ~Runtime unmaps guest memory and tears the kernel down under them. In
-  // run 12 that happened between + and svcExitProcess ("guest memory at
-  // exit: 0 blocks mapped", no thread snapshot at exit) and the process still
-  // ended in a crash report. svcExitProcess, in main, ends everything at once.
+  // The runtime is never destroyed: ~Runtime unmaps guest memory and tears
+  // the kernel down under the guest threads (run 12). ExitGame pauses them
+  // and leaves with svcExitProcess.
   (void)runtime.release();
-  return 0;
+  ExitGame(!plus                ? "the system asked the applet to exit"
+           : g_stopped.load() ? "+ after the stop"
+                              : "+");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  const int rc = GameMain(argc, argv);
-  GAME_INFO("main returned %d; leaving with svcExitProcess, which ends the guest threads too",
-            rc);
-  LogExitSummary();
-  CloseConsole();
-  svcExitProcess();  // wrapped: logged (game.log only: the console is closed)
+  GameMain(argc, argv);  // leaves through ExitGame
 }
