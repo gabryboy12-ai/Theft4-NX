@@ -1047,3 +1047,94 @@ bloccato sul mutex tenuto abbandonato alla scadenza (300 ms), ripresa. Al + lo
 smoke esce come il gioco, con i cinque thread al lavoro: pausa, riepilogo,
 `__appExit`, `svcExitProcess`. Se anche lo smoke mostra l'errore all'uscita, la
 causa è il modo di uscire, non i thread del gioco.
+
+## 18. Run 14: il gioco gira a 60 fotogrammi con la GPU nulla; uscita in quattro modi (2026-10-01)
+
+`out/console-runs/run14/`, NRO del commit `60212c5`.
+
+### Il gioco con la GPU nulla
+
+- **58 export nuove** dopo `VdSetGraphicsInterruptCallback`, nello stesso ordine
+  del PC: le `Vd*` (ring a `1FCA2000`, 32 KiB, writeback a `1FCA103C`, callback
+  `829D7318`), `VdSwap`, il profilo (`XamUserGet*`), audio
+  (`XAudioRegisterRenderDriverClient` → `C0000002`, come sul PC), input, file
+  (`NtWriteFile`, `IoDismountVolumeByFileHandle`, …), `RtlRaiseException`.
+  Totale 95 export distinte, 25 XThread (il PC: 97 e 25).
+- **Prima divergenza** (`compare_export_traces.py` contro `pc-runs/run13c`):
+  `XamInputGetState` dà `0x48F` (`ERROR_DEVICE_NOT_CONNECTED`, nessun sistema di
+  input) dove il PC dà `0`; il PC chiama poi `XamInputGetCapabilities` e
+  `XamInputSetState`, la Switch no. Nessun'altra differenza.
+- **Non è fermo**: da 30 s in poi il battito mostra un ciclo stabile, 95 export,
+  ~7.500 chiamate al secondo, **60 `VdSwap` al secondo** (600 ogni 10 s), il
+  ring consumato fino al WPTR a ogni battito (lettura = scrittura), 1 interrupt
+  PM4 per fotogramma, ~510.000 draw saltati ogni 10 s, nessun `WAIT_REG_MEM`
+  bloccato, nessun opcode sconosciuto. In 910 s: 54.274 fotogrammi, 55.188
+  vblank. Il "battito fermo a 95" era il numero di export distinte.
+- **Istantanee** (`where.py`, ELF di `run14-build`), uguali a 60 e a 900 s:
+  thread principale `F8000020` in `xstart → sub_8218BEB0 → … → sub_829A20B8 →
+  KeDelayExecutionThread` (il ciclo principale che dorme tra un fotogramma e
+  l'altro); `F8000CA4` (rendering) in `sub_82852960 → sub_829CFCE8 →
+  sub_829D5338` (presentazione); gli altri in attesa di lavoro.
+- **Clock**: 91 intervalli tra battiti, rapporto time base guest / tick host
+  0,99997–0,99999; il tempo guest avanza regolare (le differenze tra battiti,
+  9,98–11,1 s, sono il ritardo del battito, non del clock).
+- **Ipotesi (da verificare)**: il gioco è su una schermata che aspetta un
+  controller o START. **Correzione per il run 15**: il controller della Switch
+  diventa il pad 360 dell'utente 0 (`tools/switch-game/nx_input.{h,cpp}`, cvar
+  `nx_input`, vera per default). Pulsanti per posizione (Switch B = A, A = B,
+  Y = X, X = Y), + = START, − = BACK, ZL/ZR = grilletti, levette. Il battito
+  scrive `input: … pad states published, … XamInputGetState reads`.
+
+### Chiusura
+
+Run 14, modo dell'epoca (= B): nel gioco la sequenza arriva a `exit: summary
+written; next __appExit` (25 thread fermati in 246 µs; il 26°, dalle tracce, ha
+un handle non più valido, `0xE401`); poi la console mostra "The software was
+closed because an error occurred", senza report. Lo smoke, che prima usciva
+pulito tornando da `main`, fa lo stesso con la nuova sequenza: la causa è la
+sequenza d'uscita, non i thread del gioco.
+
+**libnx 4.12 (dal disassemblato di `libnx.a`):**
+
+- `__libnx_exit(rc)`: `__appExit()`, poi `__nx_exit(0, envGetExitFuncPtr())`
+  (il codice d'uscita passato è sempre 0). `__nx_exit` (`switch_crt0`)
+  ripristina lo stack iniziale e salta alla funzione d'uscita del loader: sotto
+  hbloader si torna a hbloader, che ricarica hbmenu. Non chiama
+  `svcExitProcess` se c'è un loader.
+- `__appExit()`: `userAppExit` (se c'è), `__nx_win_exit` (se c'è),
+  `fsdevUnmountAll`, `fsExit`, `timeExit`, `hidExit`, `appletExit`, `smExit`.
+  Non chiude la console (`consoleExit` è a carico del programma).
+- `crt0` entra in `main` con LR = `exit`: tornare da `main` = `exit(rc)` →
+  handler `atexit` → `_exit` → `__libnx_exit`.
+- `svcExitProcess` è chiamata da libnx in `env.o` (come funzione d'uscita
+  predefinita senza loader, via GOT), in `applet.o` (`_appletExitProcess`, dopo
+  `appletExit`, per la richiesta d'uscita del sistema) e in `fatal.o`. Il
+  nostro `--wrap=svcExitProcess` intercetta **anche queste** (sono riferimenti
+  non definiti nei loro oggetti), non quelle interne a `svc.o` (non ce ne sono).
+  Il wrapper chiama `__real_svcExitProcess` una volta sola e la chiamata non
+  ritorna: niente ciclo né doppia uscita. Unico rischio trovato: il wrapper
+  scriveva nel log (malloc, spdlog) con i thread in pausa e poteva bloccarsi;
+  ora con i thread in pausa scrive solo la riga del passo.
+- Differenza con un'uscita normale di un NRO: noi non torniamo mai al loader
+  (svcExitProcess chiude il processo di hbloader stesso).
+
+**Run 15: bisezione sul campo**, stesso NRO, scelta al momento dell'uscita
+(`tools/switch-common/nx_exit.{h,cpp}`):
+
+| Tasto | Modo | Cosa fa |
+|---|---|---|
+| + | A | `exit(0)`, cioè il ritorno da `main` (uscita standard di libnx), con i thread ancora vivi |
+| − | B | pausa di tutti i thread, riepilogo, `__appExit`, `svcExitProcess` (il run 14) |
+| X | C | come B senza `__appExit` |
+| Y | D | i thread guest escono da soli alla prossima export (`svcExitThread` dall'aggancio `SetExportEntryHook`), la GPU nulla si ferma, join per 2 s, poi come A |
+
+Nel gioco il menu si apre tenendo premuto + per 1 s (+ breve è START); la cvar
+`nx_exit_mode` (A–D) salta il menu; B annulla. Nello smoke il menu si apre con
++, con i cinque thread al lavoro (D: flag di stop e join). Ogni passo va in
+`game-exit.log` / `smoke-exit.log` ("exit mode X: step N: …", write + fsync su
+un descrittore aperto all'avvio) e, finché nessun thread è in pausa, anche nel
+log principale. Lo smoke cancella `smoke-exit-scratch.bin` all'avvio e alla fine
+del passo 6.
+
+**Regola**: se nessuno dei quattro modi esce pulito, la chiusura non è più una
+priorità: si esce con HOME.
