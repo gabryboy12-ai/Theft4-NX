@@ -557,7 +557,7 @@ Due aggiunte venute dalla fase PC (§14), già nella NRO del run 12:
 - il codice generato include le 659 funzioni che l'analisi non aveva raggiunto
   (`gta4_eu_base_gaps*.toml`): il PC si fermava sulla prima dopo 12 export.
 
-### Prossimo passo se l'arresto è su una funzione grafica (proposta, non implementata)
+### Prossimo passo se l'arresto è su una funzione grafica (proposta; implementata nel run 14, §17)
 
 Se il run 12 si ferma su `VdInitializeRingBuffer` (o `VdSetGraphicsInterruptCallback`,
 `VdEnableRingBufferRPtrWriteBack`), il minimo per andare avanti senza grafica
@@ -934,3 +934,116 @@ fault, 81 µs per fault.
 - **Filmati Bink** (`xbox360/movies/*.bik`): se il decoder ricompilato è troppo
   lento, dare i byte a FFmpeg (decoder `bink` e `binkaudio`) attraverso le
   callback di lettura del gioco, come nfsmw-nx fa per WMV3 (08 §9).
+
+## 17. Run 13: il gioco si ferma alla prima export grafica; GPU nulla e uscita (2026-10-01)
+
+`out/console-runs/run13/`, NRO del commit `e8f2d07` (ELF in
+`out/console-runs/run13-build/`). Sulla SD: `default.xex`, `audio.rpf`,
+`common.rpf`, `xbox360.rpf`.
+
+### Dove si ferma
+
+- 37 export distinte, 2702 chiamate; poi
+  `STOP at the first function missing on Switch: VdSetGraphicsInterruptCallback
+  (Xbox export needs a graphics backend)`. È il nostro arresto voluto (§10,
+  ultima parte): senza oggetto grafico le `Vd*` che ne hanno bisogno fermano il
+  run.
+- Istantanee (`where.py` sull'ELF di `run13-build`):
+  - `F8000018` (thread principale): `xstart → sub_827D8968 → … → sub_82851EE0 →
+    sub_829D0218 → sub_829DF3F0 → sub_829DF308 → VdSetGraphicsInterruptCallback
+    → StopAtMissingFunction` (parcheggiato in `svcSleepThread`);
+  - `F8000C6C`, `F8000C70` (creati con `ExCreateThread`): in
+    `NtWaitForSingleObjectEx` da `sub_827DAC88 → sub_829A2330`, in attesa di
+    lavoro, come il T1 del PC;
+  - `F8000004` (Kernel Host Tasks): in attesa sulla sua coda.
+- Il clock gira: il thread principale ha superato `sub_829E9CC8` (`while (mftb
+  == 0)`, run 12) ed è arrivato 25 export più avanti. Il `game.log` non aveva una
+  riga del clock; il run 14 la scrive a ogni battito (`clock: host tick …, guest
+  time base …`). Smoke: `step 5 clock: … host 20.00 ms (384096 ticks), guest time
+  base 20.00 ms (1000250 ticks at 50 MHz) -> ok`.
+
+### Confronto con il PC (`compare_export_traces.py`, PC `out/pc-runs/run13c`)
+
+- Stesso ordine per le prime 29 export, stessi LR guest per tutte quelle comuni.
+- **Prima divergenza**: il PC chiama `NtQueryDirectoryFile` (#30, LR
+  `829A9484`) dopo `NtOpenFile`, la Switch no. L'ultima export comune,
+  `NtOpenFile` di `game:\`, dà `00000000` sul PC e `C000000F` sulla Switch
+  (`[NtCreateFile] FAILED: path='game:\'`). Causa: `HostPathEntry::Open` apre
+  con `open()`, e quello di libnx passa da `fsFsOpenFile`, che rifiuta le
+  cartelle; Linux e Windows aprono le cartelle. Il gioco va avanti lo stesso
+  (legge `common.rpf` e il resto), ma senza l'elenco della radice.
+  **Correzione (da verificare):** su NX una cartella dà un handle senza
+  descrittore (`NxDirectoryHandle`, `filesystem_posix.cpp`), le cui letture e
+  scritture falliscono come su PC; l'elenco passa dall'entry del VFS.
+- **Esiti diversi**: `KeSetBasePriorityThread` dà `0x3B` sulla Switch e `0` sul
+  PC: `XThread::QueryPriority` restituiva la priorità Horizon del thread host
+  (fissa a 0x3B per i thread guest). **Correzione (da verificare):** su NX
+  restituisce il livello che il PC riporta per l'ultimo incremento chiesto
+  (scala Win32, −2…2). Gli altri esiti diversi sono indirizzi e handle.
+- Dopo la divergenza il PC prosegue con le `Vd*` (`VdSetGraphicsInterruptCallback`,
+  `VdInitializeRingBuffer`, `VdEnableRingBufferRPtrWriteBack`, …, `VdSwap`) e poi
+  input, audio, file: la Switch si ferma sulla prima.
+
+### GPU nulla (run 14, da verificare)
+
+La proposta del §10, implementata: `rex/system/null_graphics_system.h`
+(`src/system/null_graphics_system.cpp`, in `rexruntime`, solo header di
+`rex/graphics`). switch-game la passa al runtime (`RuntimeConfig.graphics`) con
+la cvar `nx_null_gpu` (vera per default; falsa = arresto come nel run 13).
+
+- Registri GPU in MMIO a `0x7FC80000` come `GraphicsSystem` (letture fisse di
+  `RB_EDRAM_TIMING`, `D1MODE_V_COUNTER`, stato interrupt = vblank,
+  `D1MODE_VIEWPORT_SIZE`; `CP_RB_RPTR` = puntatore di lettura).
+- `CP_RB_WPTR` sveglia il thread `GPU Commands (null)` (XHostThread): consuma i
+  pacchetti PM4 fino al WPTR e scrive l'RPTR nel writeback.
+- Eseguiti: registri (con writeback di `SCRATCH_REG*` verso `SCRATCH_ADDR` e
+  `COHER_STATUS_HOST`), `MEM_WRITE`, `COND_WRITE`, `REG_TO_MEM`, `REG_RMW`,
+  `EVENT_WRITE`/`_SHD`/`_EXT`/`_ZPD` (occlusione: 1000 campioni come la cvar del
+  command processor), `WAIT_REG_MEM` (dopo 1 s una riga WARN e il battito lo
+  segnala), `INDIRECT_BUFFER`, `INTERRUPT`, costanti e bin. Saltati: draw,
+  `IM_LOAD`, stati, viz query. `XE_SWAP` conta i fotogrammi.
+- `GPU VSync (null)`: interrupt di vblank alla frequenza del modo video (attende
+  che la frequenza del time base sia nota; niente raffiche se resta indietro).
+- Il battito scrive `null GPU: … WPTR writes, ring read / write, packets, draws
+  skipped, swaps, vblanks, PM4 interrupts`.
+
+### Crash alla chiusura
+
+- **Nessun report di Atmosphère** e `game-crash.log` vuoto: il gestore dei
+  fault non è scattato, quindi non c'è un fault nel nostro processo da
+  decodificare. Nel `game.log` le ultime righe sono l'istantanea all'uscita, i
+  conteggi, la memoria e `TERMINATION: svcExitProcess(0) called from LR …+0x66cc`,
+  scritta dal wrapper subito prima di `__real_svcExitProcess`: il processo
+  arriva a `svcExitProcess`. Quello che si vede dopo il + avviene quindi dentro
+  o dopo `svcExitProcess` e non è un'eccezione del processo (che produrrebbe il
+  report).
+- Ipotesi (non verificata): la chiusura di un'applicazione con
+  `svcExitProcess` senza la chiusura dei servizi di libnx (`__appExit`: applet,
+  hid, fs, sm) viene trattata dal sistema come anomala. Un'uscita normale di un
+  NRO chiude i servizi e torna a hbloader; noi non torniamo al loader (§10).
+  Serve il codice d'errore mostrato dalla console per confermarlo.
+- **Uscita del run 14 (da verificare)**, `ExitGame` in `main.cpp` e
+  `tools/switch-common/nx_exit.{h,cpp}`:
+  1. al + (o alla richiesta di uscita del sistema), prima di tutto: elenco degli
+     XThread (tabella degli oggetti, attesa massima 200 ms) e dei thread delle
+     tracce, e **pausa di ciascuno** con `svcSetThreadActivity(Paused)`; per
+     ognuno si tiene il result code e si rilegge il contesto
+     (`svcGetThreadContext3`) come prova che è fermo;
+  2. il riepilogo (righe `exit pause: … rc …`, istantanea, export, memoria,
+     clock, GPU nulla) lo scrive un thread creato all'avvio, con scadenza di
+     5 s: un thread in pausa può tenere un lock che serve (malloc, log, spdlog,
+     console). Da qui il log aspetta il proprio mutex al massimo 200 ms;
+  3. con `nx_exit_close_services` (vero per default) lo stesso thread chiude la
+     console e i servizi (`__appExit`), come un'uscita normale;
+  4. `svcExitProcess` comunque; se il riepilogo non finisce in 5 s una riga va
+     in `game-crash.log` (descrittore già aperto, niente allocazioni).
+
+### Smoke (run 14)
+
+Passo 6, la stessa sequenza (stesso `nx_exit.cpp`) su cinque thread che
+lavorano a 0x3B: calcolo, mutex, malloc/free, letture dalla SD, uno che tiene un
+mutex. Controlla: ogni pausa riuscita, contatori fermi per 100 ms, un lavoro
+bloccato sul mutex tenuto abbandonato alla scadenza (300 ms), ripresa. Al + lo
+smoke esce come il gioco, con i cinque thread al lavoro: pausa, riepilogo,
+`__appExit`, `svcExitProcess`. Se anche lo smoke mostra l'errore all'uscita, la
+causa è il modo di uscire, non i thread del gioco.
