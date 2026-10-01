@@ -1,6 +1,10 @@
 #include "nx_exit.h"
 
 #include <atomic>
+#include <cstring>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace theft4::nx_exit {
 
@@ -97,6 +101,100 @@ bool RunOnExitWorker(void (*job)(void*), void* arg, u64 timeout_ms) {
     svcSleepThread(5'000'000);
   }
   return true;
+}
+
+namespace {
+int g_step_fd = -1;
+char g_step_line[256];
+
+void Append(char*& w, const char* end, const char* text) {
+  while (*text && w < end) *w++ = *text++;
+}
+}  // namespace
+
+bool OpenStepLog(const char* path) {
+  g_step_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  return g_step_fd >= 0;
+}
+
+const char* Step(char mode, int n, const char* what) {
+  char* w = g_step_line;
+  const char* end = g_step_line + sizeof(g_step_line) - 2;
+  const char mode_text[2] = {mode, 0};
+  char number[12];
+  int k = 0;
+  char digits[12];
+  unsigned v = unsigned(n);
+  do {
+    digits[k++] = char('0' + v % 10);
+    v /= 10;
+  } while (v && k < 11);
+  for (int i = 0; i < k; ++i) number[i] = digits[k - 1 - i];
+  number[k] = 0;
+  Append(w, end, "exit mode ");
+  Append(w, end, mode_text);
+  Append(w, end, ": step ");
+  Append(w, end, number);
+  Append(w, end, ": ");
+  Append(w, end, what);
+  *w++ = '\n';
+  *w = 0;
+  if (g_step_fd >= 0) {
+    (void)write(g_step_fd, g_step_line, size_t(w - g_step_line));
+    fsync(g_step_fd);
+  }
+  return g_step_line;
+}
+
+char ParseExitMode(const char* value) {
+  if (!value || !value[0] || value[1]) return 0;
+  const char c = char(value[0] & ~0x20);  // upper case
+  return c >= 'A' && c <= 'D' ? c : 0;
+}
+
+const char* ExitModeDescription(char mode) {
+  switch (mode) {
+    case 'A':
+      return "libnx standard exit: return from main, threads still alive";
+    case 'B':
+      return "pause every thread, summary, __appExit, svcExitProcess";
+    case 'C':
+      return "pause every thread, summary, svcExitProcess (no __appExit)";
+    case 'D':
+      return "tell every thread to end, join (2 s), return from main";
+    default:
+      return "?";
+  }
+}
+
+char ChooseExitMode(PadState* pad, void (*print)(const char*), void (*refresh)(), char fallback) {
+  print("\nExit mode:  +  A  return from main (libnx standard exit)\n"
+        "            -  B  pause threads, summary, __appExit, svcExitProcess\n"
+        "            X  C  pause threads, summary, svcExitProcess\n"
+        "            Y  D  stop threads cooperatively, join 2 s, return from main\n"
+        "            B  cancel\n");
+  bool released = false;
+  while (appletMainLoop()) {
+    padUpdate(pad);
+    const u64 held = padGetButtons(pad);
+    if (!released) {
+      released = (held & (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_X |
+                          HidNpadButton_Y | HidNpadButton_B)) == 0;
+    } else {
+      const u64 down = padGetButtonsDown(pad);
+      if (down & HidNpadButton_Plus) return 'A';
+      if (down & HidNpadButton_Minus) return 'B';
+      if (down & HidNpadButton_X) return 'C';
+      if (down & HidNpadButton_Y) return 'D';
+      if (down & HidNpadButton_B) {
+        print("exit cancelled\n");
+        return 0;
+      }
+    }
+    refresh();
+    svcSleepThread(16'000'000);
+  }
+  return fallback;
 }
 
 }  // namespace theft4::nx_exit

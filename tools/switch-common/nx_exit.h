@@ -51,4 +51,30 @@ bool StartExitWorker();
 // earlier call makes this return false at once.
 bool RunOnExitWorker(void (*job)(void*), void* arg, u64 timeout_ms);
 
+// ── Exit modes (run 15: bisection of the error at exit) ───────────────────
+//
+//   A  (+)  libnx's standard exit: main returns, working threads still alive
+//   B  (-)  pause every thread, summary, __appExit, svcExitProcess
+//   C  (X)  as B without __appExit
+//   D  (Y)  cooperative: tell every thread to end, join (2 s), return as A
+
+// Steps go to a file of their own, opened at start-up: each line is written
+// and fsync'd on that descriptor (no allocation, no lock), so its last line
+// says how far the exit got whatever the other threads hold.
+bool OpenStepLog(const char* path);
+// "exit mode <mode>: step <n>: <what>". Returns the line (static buffer,
+// valid until the next call) for a copy in the main log.
+const char* Step(char mode, int n, const char* what);
+
+// The exit menu on the console: + A, - B, X C, Y D, B cancels (returns 0).
+// It first waits for every button to be released. print writes a line on
+// screen; refresh redraws. If the system asks the applet to exit, returns
+// fallback.
+char ChooseExitMode(PadState* pad, void (*print)(const char*), void (*refresh)(), char fallback);
+
+// "A".."D" from a cvar value ("" or anything else: 0, the menu decides).
+char ParseExitMode(const char* value);
+
+const char* ExitModeDescription(char mode);
+
 }  // namespace theft4::nx_exit

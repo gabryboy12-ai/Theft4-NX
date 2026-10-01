@@ -50,7 +50,7 @@ add_custom_command(
     VERBATIM
 )
 
-add_executable(switch-game main.cpp "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
+add_executable(switch-game main.cpp nx_input.cpp "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
     "${MISSING_IMPORTS_CPP}" ${GENERATED_SOURCES})
 target_compile_features(switch-game PRIVATE cxx_std_23)
 target_include_directories(switch-game PRIVATE

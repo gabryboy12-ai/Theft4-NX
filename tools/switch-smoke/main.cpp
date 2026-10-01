@@ -23,9 +23,9 @@
 //      abandoned at its deadline, resume
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those steps,
 // followed by the exploratory probes T1-T11 in probes.cpp (alias primitives,
-// heap size, cost of the guest-memory design A). + leaves through the exit
-// sequence of switch-game, with five threads working: pause, summary,
-// svcExitProcess.
+// heap size, cost of the guest-memory design A). + opens the menu of
+// switch-game's four exit modes (nx_exit.h), with five threads working; the
+// steps go to smoke-exit.log.
 //
 // Every smoke line is made durable before the next operation: it is appended
 // to smoke.log through its own fd, fsync'd and closed. A crash therefore
@@ -92,10 +92,6 @@ int main(int argc, char** argv);
 
 REXCVAR_DECLARE(bool, nx_memory_trace);
 REXCVAR_DECLARE(int32_t, nx_guest_pool_mib);
-REXCVAR_DEFINE_BOOL(nx_exit_close_services, true, "Switch",
-                    "At exit, after pausing the working threads and writing the summary, close "
-                    "libnx's services (__appExit) before svcExitProcess, as switch-game does");
-
 extern "C" void __appExit(void);
 
 namespace {
@@ -1249,15 +1245,40 @@ void StepExitSequence() {
     Fail("exit", "threads not running after resume, or the exit worker stayed busy");
   }
   StopExitWorkers();
+  // Run 14 left it on the SD card. From here the "SD read" worker opens a
+  // missing file: still a round trip through fsdev for each attempt.
+  std::remove(kExitScratchPath);
 }
 
-// + : the whole sequence of switch-game's ExitGame, with the workers busy.
+// + : the menu of switch-game's exit modes (nx_exit.h), with the five
+// workers busy. Steps in smoke-exit.log (write + fsync on its own
+// descriptor) and, while no thread is paused, in smoke.log.
+constexpr const char* kSmokeExitStepPath = "sdmc:/switch/theft4/smoke-exit.log";
+char g_smoke_exit_mode = 0;
+int g_smoke_exit_step = 0;
+bool g_smoke_threads_paused = false;
+
+void SmokeExitStep(const char* what) {
+  const char* line = theft4::nx_exit::Step(g_smoke_exit_mode, ++g_smoke_exit_step, what);
+  if (!g_smoke_threads_paused) {
+    char text[300];
+    std::snprintf(text, sizeof(text), "[smoke] %s", line);
+    DurableWrite(text, std::strlen(text));
+  }
+}
+
+void SmokeOnExit() {
+  if (g_smoke_exit_mode) {
+    SmokeExitStep("atexit handler (exit(): then _exit, __libnx_exit: __appExit, back to the "
+                  "loader)");
+  }
+}
+
 theft4::nx_exit::PausedThread g_final_paused[kExitWorkers];
 size_t g_final_paused_count = 0;
 u64 g_final_pause_us = 0;
 
 void FinalExitSummaryJob(void*) {
-  SMOKE_INFO("exit (+): threads paused, summary job started");
   size_t stopped = 0;
   for (size_t i = 0; i < g_final_paused_count; ++i) {
     stopped += g_final_paused[i].stopped() ? 1 : 0;
@@ -1266,29 +1287,68 @@ void FinalExitSummaryJob(void*) {
   }
   uint64_t counts[kExitWorkers];
   ExitWorkerCounts(counts);
-  SMOKE_INFO("exit (+): %zu of %zu working threads stopped in %" PRIu64 " us (work done: spin "
-             "%" PRIu64 ", mutex %" PRIu64 ", malloc %" PRIu64 ", SD %" PRIu64 ", holder %" PRIu64
-             "); next %ssvcExitProcess",
-             stopped, g_final_paused_count, g_final_pause_us, counts[0], counts[1], counts[2],
-             counts[3], counts[4],
-             REXCVAR_GET(nx_exit_close_services) ? "__appExit, then " : "");
+  SMOKE_INFO("exit (mode %c): %zu of %zu working threads stopped in %" PRIu64 " us (work done: "
+             "spin %" PRIu64 ", mutex %" PRIu64 ", malloc %" PRIu64 ", SD %" PRIu64
+             ", holder %" PRIu64 ")",
+             g_smoke_exit_mode, stopped, g_final_paused_count, g_final_pause_us, counts[0],
+             counts[1], counts[2], counts[3], counts[4]);
   rex::FlushLogging();
-  if (REXCVAR_GET(nx_exit_close_services)) {
-    __appExit();
-  }
 }
 
-[[noreturn]] void ExitLikeTheGame() {
+void SmokeAppExitJob(void*) {
+  __appExit();
+}
+
+// Modes B and C.
+[[noreturn]] void SmokeExitPaused(bool app_exit) {
+  SmokeExitStep("pausing the 5 working threads (svcSetThreadActivity)");
   Handle handles[kExitWorkers];
   const size_t n = ExitWorkerHandles(handles);
   const u64 t0 = armGetSystemTick();
-  g_final_paused_count =
-      theft4::nx_exit::PauseThreads(handles, n, g_final_paused, kExitWorkers);
+  g_final_paused_count = theft4::nx_exit::PauseThreads(handles, n, g_final_paused, kExitWorkers);
   g_final_pause_us = armTicksToNs(armGetSystemTick() - t0) / 1000;
-  // Past the deadline nothing is written: opening smoke.log allocates, and a
-  // paused thread may hold malloc's lock. The job's first line says it began.
-  theft4::nx_exit::RunOnExitWorker(FinalExitSummaryJob, nullptr, 5000);
+  g_smoke_threads_paused = true;
+  SmokeExitStep("threads paused; summary on the exit worker (deadline 5 s)");
+  const bool summary = theft4::nx_exit::RunOnExitWorker(FinalExitSummaryJob, nullptr, 5000);
+  SmokeExitStep(summary ? "summary finished" : "summary NOT finished within 5 s");
+  if (app_exit) {
+    SmokeExitStep("__appExit on the exit worker (deadline 3 s); the SD card is unmounted, so "
+                  "this is the last step that can be written");
+    theft4::nx_exit::RunOnExitWorker(SmokeAppExitJob, nullptr, 3000);
+  } else {
+    SmokeExitStep("no __appExit; next svcExitProcess");
+  }
   svcExitProcess();
+}
+
+// Mode D: stop flag, join for at most 2 s in all.
+void SmokeExitCooperative() {
+  SmokeExitStep("telling the 5 working threads to end (stop flag)");
+  g_exit_workers.stop.store(true);
+  SmokeExitStep("joining them for at most 2 s");
+  const u64 start = armGetSystemTick();
+  int joined = 0;
+  for (auto& t : g_exit_workers.threads) {
+    const u64 spent_ms = armTicksToNs(armGetSystemTick() - start) / 1'000'000;
+    const u64 left_ms = spent_ms < 2000 ? 2000 - spent_ms : 0;
+    if (rex::thread::Wait(t.get(), false, std::chrono::milliseconds(left_ms)) ==
+        rex::thread::WaitResult::kSuccess) {
+      ++joined;
+    }
+  }
+  char text[96];
+  std::snprintf(text, sizeof(text), "%d of %d joined; next return from main", joined,
+                kExitWorkers);
+  SmokeExitStep(text);
+}
+
+void SmokePrint(const char* text) {
+  std::printf("%s", text);
+  consoleUpdate(nullptr);
+}
+
+void SmokeRefresh() {
+  consoleUpdate(nullptr);
 }
 
 }  // namespace
@@ -1304,6 +1364,9 @@ int main(int argc, char** argv) {
   consoleUpdate(nullptr);
 
   StepLogging();
+  std::remove(kExitScratchPath);  // left by an earlier run
+  theft4::nx_exit::OpenStepLog(kSmokeExitStepPath);
+  std::atexit(SmokeOnExit);
   StepModuleBase();
   StepAddressSpace();
   StepGuestMemory();
@@ -1324,20 +1387,43 @@ int main(int argc, char** argv) {
     // The verdict above came before the arena was released.
     Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
   }
-  // + leaves as switch-game does, with threads working in the background.
+  // + opens the exit menu, with threads working in the background.
   const bool workers = StartExitWorkers();
-  SMOKE_INFO("exit test: %s; + pauses them, writes the summary and calls svcExitProcess",
-             workers ? "5 threads working in the background" : "background threads NOT started");
+  SMOKE_INFO("exit test: %s; + opens the menu of the exit modes, steps in %s",
+             workers ? "5 threads working in the background" : "background threads NOT started",
+             kSmokeExitStepPath);
   std::printf("\nPress + to exit.\n");
   consoleUpdate(nullptr);
 
-  while (appletMainLoop()) {
-    padUpdate(&pad);
-    if (padGetButtonsDown(&pad) & HidNpadButton_Plus) {
-      break;
+  char mode = 0;
+  while (!mode) {
+    bool plus = false;
+    while (appletMainLoop()) {
+      padUpdate(&pad);
+      if (padGetButtonsDown(&pad) & HidNpadButton_Plus) {
+        plus = true;
+        break;
+      }
+      consoleUpdate(nullptr);
+      svcSleepThread(16'000'000);
     }
-    consoleUpdate(nullptr);
-    svcSleepThread(16'000'000);
+    mode = plus ? theft4::nx_exit::ChooseExitMode(&pad, SmokePrint, SmokeRefresh, 'A') : 'A';
   }
-  ExitLikeTheGame();
+  g_smoke_exit_mode = mode;
+  char text[160];
+  std::snprintf(text, sizeof(text), "chosen: %s", theft4::nx_exit::ExitModeDescription(mode));
+  SmokeExitStep(text);
+  switch (mode) {
+    case 'B':
+      SmokeExitPaused(true);
+    case 'C':
+      SmokeExitPaused(false);
+    case 'D':
+      SmokeExitCooperative();
+      break;
+    default:
+      SmokeExitStep("return from main; the 5 working threads still run");
+      break;
+  }
+  return 0;
 }
