@@ -38,4 +38,8 @@ struct NullGpuStats {
 };
 NullGpuStats GetNullGpuStats();
 
+// Asks the threads of the null GPU created last to end, without waiting
+// (switch-game's cooperative exit joins them itself).
+void RequestNullGpuStop();
+
 }  // namespace rex::system

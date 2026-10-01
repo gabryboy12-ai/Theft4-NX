@@ -56,13 +56,25 @@ struct Counters {
   std::atomic<uint32_t> waiting_opcode{0};
 };
 Counters g_counters;
+class NullGraphicsSystem;
+std::atomic<NullGraphicsSystem*> g_last_null_gpu{nullptr};
 
 class NullGraphicsSystem final : public IGraphicsSystem {
  public:
   NullGraphicsSystem() : wptr_event_(rex::thread::Event::CreateAutoResetEvent(false)) {
     std::memset(regs_, 0, sizeof(regs_));
+    g_last_null_gpu.store(this);
   }
-  ~NullGraphicsSystem() override { Shutdown(); }
+  ~NullGraphicsSystem() override {
+    NullGraphicsSystem* self = this;
+    g_last_null_gpu.compare_exchange_strong(self, nullptr);
+    Shutdown();
+  }
+
+  void RequestStop() {
+    running_.store(false);
+    wptr_event_->Set();
+  }
 
   X_STATUS SetupPresentation(ui::WindowedAppContext*) override { return X_STATUS_SUCCESS; }
   bool has_presentation() const override { return false; }
@@ -94,7 +106,8 @@ class NullGraphicsSystem final : public IGraphicsSystem {
   }
 
   void Shutdown() override {
-    if (!running_.exchange(false)) {
+    running_.store(false);
+    if (shut_down_.exchange(true)) {
       return;
     }
     wptr_event_->Set();
@@ -645,6 +658,7 @@ class NullGraphicsSystem final : public IGraphicsSystem {
   memory::Memory* memory_ = nullptr;
 
   std::atomic<bool> running_{false};
+  std::atomic<bool> shut_down_{false};
   std::unique_ptr<rex::thread::Event> wptr_event_;
   object_ref<XHostThread> cp_thread_;
   object_ref<XHostThread> vsync_thread_;
@@ -668,6 +682,12 @@ class NullGraphicsSystem final : public IGraphicsSystem {
 
 std::unique_ptr<IGraphicsSystem> CreateNullGraphicsSystem() {
   return std::make_unique<NullGraphicsSystem>();
+}
+
+void RequestNullGpuStop() {
+  if (NullGraphicsSystem* gpu = g_last_null_gpu.load()) {
+    gpu->RequestStop();
+  }
 }
 
 NullGpuStats GetNullGpuStats() {

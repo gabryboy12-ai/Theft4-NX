@@ -129,7 +129,16 @@ void BumpOwn(std::atomic<T>& value) {
 
 }  // namespace
 
+static std::atomic<ExportEntryHook> g_export_entry_hook{nullptr};
+
+void SetExportEntryHook(ExportEntryHook hook) {
+  g_export_entry_hook.store(hook, std::memory_order_release);
+}
+
 const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr, bool* first) {
+  if (ExportEntryHook hook = g_export_entry_hook.load(std::memory_order_acquire)) {
+    hook();
+  }
   ExportThreadTrace* trace = ThisThreadTrace();
   if (site.calls.fetch_add(1, std::memory_order_relaxed) == 0) {
     *first = true;

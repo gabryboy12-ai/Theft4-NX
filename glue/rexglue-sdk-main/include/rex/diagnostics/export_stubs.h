@@ -70,6 +70,12 @@ struct ExportThreadTrace {
 // On the first call of an export, *first is set and Leave logs the value r3
 // holds after it ("export first result"), so two platforms' traces can be
 // compared on results too (tools/compare_export_traces.py).
+// Called at the entry of every traced export while set (null by default).
+// switch-game's cooperative exit uses it to end guest threads at their next
+// export call.
+using ExportEntryHook = void (*)();
+void SetExportEntryHook(ExportEntryHook hook);
+
 const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr, bool* first);
 void ExportLeave(const char* previous, ExportCallSite* first_site, uint64_t r3);
 
