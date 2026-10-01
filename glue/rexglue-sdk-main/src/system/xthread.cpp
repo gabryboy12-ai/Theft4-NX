@@ -865,7 +865,19 @@ void XThread::RundownAPCs() {
 }
 
 int32_t XThread::QueryPriority() {
+#if REX_PLATFORM_NX
+  // The host thread stays at its Horizon band (SetPriority), so its priority
+  // (0x3B) is not what the guest asked for. Return the level the PC reports
+  // for the last increment, on its scale (Win32, -2..2): run 13 got 0x3B from
+  // KeSetBasePriorityThread where the PC got 0.
+  if (priority_ > 0x22) return 2;
+  if (priority_ > 0x11) return 1;
+  if (priority_ < -0x22) return -2;
+  if (priority_ < -0x11) return -1;
+  return 0;
+#else
   return thread_->priority();
+#endif
 }
 
 void XThread::SetPriority(int32_t increment) {

@@ -230,6 +230,25 @@ class PosixFileHandle : public FileHandle {
   int handle_ = -1;
 };
 
+#if REX_PLATFORM_NX
+// An open folder (see OpenExisting): listing goes through the VFS entry, not
+// through this handle.
+class NxDirectoryHandle : public FileHandle {
+ public:
+  explicit NxDirectoryHandle(std::filesystem::path path) : FileHandle(std::move(path)) {}
+  bool Read(size_t, void*, size_t, size_t* out_bytes_read) override {
+    *out_bytes_read = 0;
+    return false;
+  }
+  bool Write(size_t, const void*, size_t, size_t* out_bytes_written) override {
+    *out_bytes_written = 0;
+    return false;
+  }
+  bool SetLength(size_t) override { return false; }
+  void Flush() override {}
+};
+#endif  // REX_PLATFORM_NX
+
 std::unique_ptr<FileHandle> FileHandle::OpenExisting(const std::filesystem::path& path,
                                                      uint32_t desired_access,
                                                      bool /*allow_share_delete*/) {
@@ -259,6 +278,16 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(const std::filesystem::path
   }
   int handle = open(path.c_str(), open_access);
   if (handle == -1) {
+#if REX_PLATFORM_NX
+    // libnx's open() goes through fsFsOpenFile, which refuses directories, so
+    // a guest NtOpenFile of a folder ("game:\" before NtQueryDirectoryFile,
+    // run 13) failed with NO_SUCH_FILE. Linux and Windows open folders; here
+    // the handle has no descriptor and its reads and writes fail, as on them.
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+      return std::make_unique<NxDirectoryHandle>(path);
+    }
+#endif
     // TODO(benvanik): pick correct response.
     return nullptr;
   }
