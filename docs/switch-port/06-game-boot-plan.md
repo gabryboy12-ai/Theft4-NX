@@ -1138,3 +1138,208 @@ del passo 6.
 
 **Regola**: se nessuno dei quattro modi esce pulito, la chiusura non è più una
 priorità: si esce con HOME.
+
+## 19. Run 15: uscita decisa, il gioco aspetta il suono del primo schermo (2026-10-02)
+
+`out/console-runs/run15/`, NRO del commit `1185ddb` (ELF in
+`out/console-runs/run15-build/`).
+
+### Chiusura
+
+Modo A (+) e modo D (Y) escono puliti nello smoke e nel gioco; B (−) e C (X)
+danno "The software was closed because an error occurred", senza report, in
+tutti e due. Nel `game-exit.log` dell'ultimo run del gioco: A, passi 1–5 fino a
+`_exit`; nello `smoke-exit.log`: D, 5 thread su 5 uniti, poi `atexit`. La
+causa più probabile è `svcExitProcess`, non isolata dalla pausa dei thread (B
+e C fanno tutti e due l'una e l'altra). Regola in 09 §9. **Run 16 (da
+verificare):** l'uscita è A per default, D con `nx_exit_mode = D`; niente
+menu, + tenuto premuto per 1 s esce; la pausa dei thread e `svcExitProcess`
+non sono più sul percorso d'uscita; il passo 6 dello smoke (pausa) resta
+dietro la cvar `nx_smoke_pause_test` (spenta). Da qui la chiusura non è più
+una priorità.
+
+### Il controller
+
+- **Due letture in tutto il run**: il battito dice `0 XamInputGetState reads`
+  a 10 s e `2` da 20 s fino all'uscita (270 s), con 14.482 stati del pad
+  pubblicati (~54 al secondo dal thread dell'interfaccia).
+- La prima `XamInputGetState` dà **`0`** (nel run 14 `0x48F`), e la Switch
+  chiama poi `XamInputGetCapabilities` (`0`) e `XamInputSetState` come il PC.
+  Unico esito diverso dal PC: `XamInputSetState` dà `0` sulla Switch e `0x48F`
+  sul PC (il pad del PC non ha vibrazione); innocuo.
+- Il messaggio del run non dice quali tasti sono stati premuti (il segnaposto
+  "[scrivi quali tasti…]" è rimasto vuoto) e il log non registra i tasti. Il
+  log dice però che **dopo i 20 s non c'è nessuna export nuova** (97 distinte
+  da 30 s a 270 s), nessun file nuovo, nessun thread nuovo (25 XThread a 60 e
+  a 180 s) e nessuna lettura del pad: qualunque pressione non ha avuto effetto,
+  perché il gioco non legge il pad.
+
+### Confronto lungo con il PC (`out/pc-runs/run16/pc-full.log`, 5 min 20 s)
+
+PC ricompilato (`tools/pc-eu-base`) con il conteggio di ogni export ogni 60 s.
+`compare_export_traces.py` contro il `game.log` del run 15: 97 export per
+tutti e due, la Switch chiama tutte quelle del PC, stessi LR guest, stesso
+ordine per le prime 37 (poi cambia solo l'intreccio dei thread), un solo esito
+diverso (`XamInputSetState`, sopra).
+
+**Il PC si ferma nello stesso ciclo**: 97 export distinte già al battito dei
+10 s e nessuna nuova fino a 320 s. Conteggi per minuto, uguali dal primo al
+quinto:
+
+| Export | Per minuto (PC) | Lettura |
+|---|---|---|
+| `VdSwap`, `VdGetSystemCommandBuffer`, `VdRetrainEDRAM`, `KeQueryPerformanceFrequency` | 3.600 | 60 fotogrammi al secondo |
+| `XGetVideoMode` | 10.800 | 3 per fotogramma |
+| `XNotifyGetNext` | ~3.650 | il gioco controlla le notifiche a ogni fotogramma |
+| `KeDelayExecutionThread` | ~45.400 | ~750 `Sleep` al secondo |
+| `RtlEnter/LeaveCriticalSection` | ~97.000 | |
+| `NtReadFile` | **0** (fermo a 615) | nessun file letto dopo l'avvio |
+| `ExCreateThread` | **0** (fermo a 22) | nessun thread nuovo |
+| `XamInputGetState` | **0** (fermo a 8) | il pad non viene più letto |
+
+### Cosa aspetta il gioco
+
+Istantanee della Switch (`where.py` sull'ELF del run 15) e, nuova, la **pila
+guest** di ogni thread fermo in un'export (catena dei frame PowerPC da `r1`:
+`0(r1)` è l'`r1` del chiamante, il prologo salva LR a −8 di quello),
+aggiunta al battito del PC (`out/pc-runs/run16b`):
+
+- thread principale `F8000020`: `KeDelayExecutionThread` ← `829A9624` ←
+  **`821200F4`** ← `main` (`sub_8218BEB0`) ← `xstart`. Il terzo indirizzo
+  letto è `8218BECC` ed è vecchio: `sub_821200D0` salva LR con `__savegprlr`
+  (`bl 0x8298eac8`), che il codice generato fa da sé senza scrivere lo slot
+  guest; il chiamante vero è `main` a `8218BEF8`. `sub_821200D0` (il "run" del
+  gioco, dopo `sub_82120000` = init) comincia con
+  **`while (sub_82124490()) Sleep(1);`**;
+- `sub_82124490` = "byte `83137BB7` e byte `83137BC9` entrambi a 1";
+  `sub_82124080` (chiamata dall'init con r3 = 1) li mette a 1;
+- li azzera il **sequenziatore degli schermi d'avvio** `sub_821238D0`
+  (chiamato in coda da `sub_821235B0`, che disegna lo schermo; gira sul thread
+  di rendering `F8000CA4`, quello che presenta): tabella a `83137D18`, 400
+  byte per voce, indice a `83137BC0`, tempo accumulato da `mftb` a
+  `83137BB8`;
+- riga aggiunta al battito del PC (`out/pc-runs/run16c`): **indice 0 per
+  sempre**, voce 0 = durata `0x1770` (6000 ms) e tipo **1**, tempo a 9,6 /
+  19,6 / 29,6 / 39,7 s: il tempo scade ma la voce non avanza;
+- per una voce di tipo 1, scaduto il tempo, si avanza solo se la parola a
+  `82B11188` non è 0, oppure se `sub_822FA498(82D09E00)` è vera, cioè se il
+  **suono** dell'oggetto `82D09E00` (creato e avviato da `sub_822FAD50`
+  attraverso il motore audio del gioco) ha **stato 2**. La parola a `82B11188`
+  è una variabile di stato del gioco (scritta da `sub_82121C10` e da altre
+  quattro funzioni), non un interruttore di debug.
+
+**Conclusione (probabile, non provata):** il primo schermo d'avvio (il logo di
+6 s) aspetta che il suo suono arrivi allo stato 2. Senza audio il suono non
+parte e il gioco resta lì per sempre, sul PC come sulla Switch: il PC gira
+senza sistema audio (`pc_audio` spenta) e `XAudioRegisterRenderDriverClient`
+dà `C0000002` su tutti e due. Prova sul PC con `--pc_audio=true`
+(`out/pc-runs/run16d`): il sistema audio SDL parte, ma il gioco **non trova
+`game:\xbox360\audio\config\*`** (`engineSettings.xml`, `curves.dat12`,
+`sounds.dat15`, `game.dat16`, `categories.dat15`, `speech.dat`,
+`driverSettings.xml`: già mancanti nel run 11 del PC, §14) e resta all'indice
+0 anche così. Nella copia del gioco usata (sul PC e sulla SD) la cartella
+`xbox360/audio` ha solo `sfx`.
+
+**Correzione: non nel codice.** Toccare `82B11188` o i byte del sequenziatore
+sarebbe un trucco su variabili di stato del gioco. Servono, in ordine:
+
+1. **i file di `xbox360/audio/config` dal disco** (cartella completa), sulla
+   copia del PC e in `sdmc:/switch/theft4/game/xbox360/audio/config/`;
+2. provare prima sul PC con `--pc_audio=true`: se l'indice del sequenziatore
+   passa a 1, la causa è confermata;
+3. sulla Switch un sistema audio: oggi switch-game non ne passa nessuno
+   (`config.audio_factory` vuota). L'SDK ha `SwitchAudioDriver` e
+   `SwitchAudioSystem` (`src/audio/switch/`, su audren) ma **non sono nel
+   `CMakeLists.txt` di `src/audio`**: aggiungerli (sotto `REX_PLATFORM_NX`) e
+   passarli da switch-game con una cvar. Da fare dopo il punto 2.
+
+### Strumenti per il run 16 (da verificare)
+
+- **Conteggio di ogni export ogni 60 s** nel battito (switch-game e
+  pc-eu-base): i due run si confrontano nel tempo, non solo sulle prime
+  chiamate.
+- **Pila guest** nelle righe dei thread fermi in un'export (`guest stack …;
+  host …`), con l'avvertenza di `__savegprlr` sopra.
+- **Riga `boot sequencer:`** nel battito: attivo, "main aspetta", pausa,
+  indice, tempo, durata e tipo della voce, parola `82B11188`, oggetto del
+  suono (id, puntatore, stato). Indirizzi dell'eseguibile europeo base.
+
+Cosa guardare nel `game.log` del run 16: la riga `boot sequencer` (indice
+fermo a 0, tipo 1, `sound 00000000` = suono mai creato; un puntatore con stato
+diverso da 2 = suono creato ma fermo), le righe `exports called at N s`, e la
+pila guest del thread principale (attesa: `829A9624 821200F4 …`). E il passo 7
+dello smoke (11-vulkan-probe.md).
+
+## 20. Piano: profiler dei picchi per fotogramma in switch-game (da fare con la GPU vera)
+
+Da UnleashedRecomp-NX 1.0.0 (`os/switch/cpu_profiler_switch.cpp`,
+`os/switch/stall_watch_switch.cpp`, `tools/switch-cpu-profile.py`; 10 §12).
+**Non ora**: con la GPU nulla non ci sono fotogrammi veri né picchi da
+misurare. Da implementare quando il gioco disegna (fase a o c di §11).
+
+### Come campionano loro
+
+- I thread si **registrano** con un nome (involucro di `threadCreate`); il
+  campionatore è un thread proprio che ogni **2 ms** (500 campioni al secondo
+  per thread) prende la lista sotto un mutex.
+- Per ogni thread legge prima `svcGetInfo(InfoType_ThreadTickCount)`: se il
+  contatore non è cambiato dall'ultimo campione il thread **non ha girato** e
+  il campione si scarta (conta come "idle"), perché la sua posizione dice solo
+  dove è bloccato.
+- Se ha girato: `svcSetThreadActivity(Paused)`, `svcGetThreadContext3`, e, se
+  il PC è in una SVC, gli **indirizzi di ritorno sullo stack** (LR + 7, da una
+  copia dello stack); poi `Runnable`. Tra pausa e ripresa niente allocazioni,
+  lock o log. È lo stesso meccanismo della nostra istantanea dei thread (§18).
+- Ogni 30 s un report su `stderr.log` **in una sola scrittura** (riga per riga
+  su SD costava secondi e teneva il lock di stdio): per thread le righe di
+  codice da 16 byte più calde (`+0x…`, offset dall'inizio dell'NRO) e le catene
+  delle attese ("wait"). Lo script le nomina con `nm` dell'ELF (`sub_82XXXXXX`
+  per le funzioni ricompilate).
+
+### Come isolano i fotogrammi lenti
+
+- `Video::Present` segna **`FrameWorkEnd`** all'inizio (fine del lavoro del
+  fotogramma) e **`FrameWorkStart`** alla fine, dal thread del gioco. Un
+  fotogramma il cui lavoro supera la soglia (`SwitchSlowFrameProfileMs`) è
+  "lento".
+- Con la soglia attiva il thread del gioco si campiona **sempre**, anche
+  quando aspetta, con la catena dei chiamanti; i campioni vanno in un **anello
+  degli ultimi 2 s**. Quando il fotogramma lento è finito (il campione più
+  recente è oltre la sua fine), i suoi campioni passano alla sezione "main in
+  slow frames" del report successivo: dove lavorava e **dove aspettava**.
+- Il round 12 ha scoperto così che i picchi (48–80 ms) erano attese: dati in
+  caricamento (cicli con `Sleep(5)`), il lock del mixer audio, eventi.
+- Il watchdog degli stalli: nessun fotogramma da N s → per ogni thread "ha
+  girato?", PC, LR, catena dei frame pointer, indirizzi di ritorno, SVC in cui
+  è (`[stall]`); una volta al secondo i fotogrammi oltre 100 ms (`[hitch]`).
+
+### Per switch-game
+
+1. **Registro dei thread**: abbiamo già gli XThread (tabella degli oggetti,
+   handle Horizon) e i thread delle tracce delle export; si aggiunge il tick di
+   CPU per thread (`InfoType_ThreadTickCount`) per scartare chi non ha girato.
+2. **Confini del fotogramma**: `VdSwap` (export) è il punto dove il gioco
+   consegna il fotogramma; il thread che la chiama è quello di rendering
+   (`F8000CA4` nei run 14 e 15), il thread principale aggiorna la logica.
+   Segnare `FrameWorkEnd`/`FrameWorkStart` attorno a `VdSwap` e misurare anche
+   il thread principale tra due giri del suo ciclo.
+3. **Anello dei campioni** del thread principale e del thread di rendering,
+   con pila host (già fatta) e **pila guest** (§19: la catena da `r1` dà
+   direttamente le funzioni `sub_82…` del gioco, anche quelle che GCC ha messo
+   inline nel codice host).
+4. **Report in una scrittura**, per thread, e uno script (estensione di
+   `where.py`) che somma per funzione.
+5. **Scene critiche di GTA IV**, una per una, ognuna in un punto fisso e da
+   un salvataggio fisso: **esplosioni** (auto che esplode, granate:
+   particelle, fisica, audio); **incidenti** (scontri fra più auto: fisica
+   Euphoria/ragdoll, danni ai modelli); **folla** (incroci di Algonquin di
+   giorno: pedoni, IA, animazioni); **streaming della città** (guida veloce in
+   autostrada o su un ponte: letture da SD, decompressione, caricamento di
+   texture e modelli, priorità dei thread di streaming); **cambio di isola** e
+   **caricamento di un salvataggio**.
+6. **Watchdog**: nessun `VdSwap` da 1 s → istantanea completa (§18) più la
+   riga del sequenziatore o dello stato del gioco; `[hitch]` per i
+   fotogrammi oltre 100 ms.
+
+Ogni ottimizzazione che ne esce va provata come fanno loro: un NRO, una cvar
+per modifica, confronto A/B nello stesso punto, ELF conservato.
