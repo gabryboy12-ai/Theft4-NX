@@ -794,6 +794,23 @@ void LogNullGpu() {
             g.waiting_opcode ? "; IN WAIT_REG_MEM for more than 1 s" : "");
 }
 
+// Every change of the buttons held (Switch HidNpadButton mask), with its time
+// since the start: the log says what was pressed and when (run 15 could not).
+u64 g_start_tick = 0;
+u64 g_buttons_now = 0;
+u64 g_button_changes = 0;
+
+void LogButtonChange(u64 buttons) {
+  if (buttons == g_buttons_now) {
+    return;
+  }
+  ++g_button_changes;
+  const double seconds = double(armTicksToNs(armGetSystemTick() - g_start_tick)) / 1e9;
+  GAME_INFO("buttons 0x%" PRIx64 " at %.3f s (was 0x%" PRIx64 ")", buttons, seconds,
+            g_buttons_now);
+  g_buttons_now = buttons;
+}
+
 // Every 10 s: one line; every 60 s: the call count of each export; at 5, 20,
 // 60 s and then every 120 s: the snapshot.
 struct Heartbeat {
@@ -967,6 +984,7 @@ void ExitCooperative() {
     bool plus = false;
     while (appletMainLoop()) {
       padUpdate(pad);
+      LogButtonChange(padGetButtons(pad));
       if (padGetButtonsDown(pad) & HidNpadButton_Plus) {
         plus = true;
         break;
@@ -1018,6 +1036,7 @@ namespace {
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
   padInitializeDefault(&g_pad);
   svcGetThreadId(&g_host_main_thread_id, CUR_THREAD_HANDLE);
+  g_start_tick = armGetSystemTick();
   ConsolePrint("Theft4 switch-game (no graphics)\n\n");
 
   StartLogging();
@@ -1123,6 +1142,7 @@ namespace {
   u64 plus_since = 0;
   while (appletMainLoop()) {
     padUpdate(&g_pad);
+    LogButtonChange(padGetButtons(&g_pad));
     if (input) {
       theft4::nx_input::Publish(&g_pad, false);
     }
