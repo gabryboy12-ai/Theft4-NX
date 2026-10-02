@@ -11,3 +11,6 @@
 "0x829F6F70" = {}   # indirect call after KeTlsGetValue (PC run 4)
 "0x829F6FD0" = {}   # indirect call after KeTlsGetValue (PC run 5)
 "0x829F7090" = {}   # indirect call after KeTlsGetValue (PC run 6)
+"0x82177920" = {}   # +0x10 inside sub_82177910: vtable target of the adjustor thunk at 82177910 (b 0x82177920); indirect call from the audio thread after XMACreateContext (PC run 17, null audio)
+"0x827D5200" = {}   # gap 827D5200-827D5220 after 827D51E0: indirect call from the main thread after the boot screens (PC run 17c, null audio)
+"0x82586A60" = {}   # gap 82586A60-82586AD0 after 82586A08: indirect call from the main thread while loading the city (PC run 17d, at 275 s)
