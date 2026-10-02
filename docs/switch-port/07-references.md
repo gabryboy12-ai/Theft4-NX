@@ -1,7 +1,7 @@
 # 07 – Riferimenti esterni: rexglue-nx e UnleashedRecomp
 
 Solo analisi: nessun codice di questi progetti è stato copiato qui. I cloni
-stanno fuori dal repository, in `/c/dev/refs/` (clone superficiale, letti il
+stanno fuori dal repository, in `<refs>/` (una cartella fuori dal repository) (clone superficiale, letti il
 2026-09-27):
 
 | Progetto | Commit | Licenza |
@@ -9,8 +9,8 @@ stanno fuori dal repository, in `/c/dev/refs/` (clone superficiale, letti il
 | [KawaiiBunga/rexglue-nx](https://github.com/KawaiiBunga/rexglue-nx) | `135a2ad2` "Switch runtime foundation", 2026-09-26 | BSD 3 clausole (Tom Clay; porzioni Xenia, Ben Vanik e contributori), come l'SDK ReXGlue che usiamo |
 | [hedge-dev/UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) | `cf829a9e`, 2026-06-29 | GPL-3.0 |
 | [hedge-dev/XenosRecomp](https://github.com/hedge-dev/XenosRecomp) (submodule di UnleashedRecomp) | `990d03b2`, 2025-08-03 | MIT |
-| [NaGaa95/UnleashedRecomp-NX](https://github.com/NaGaa95/UnleashedRecomp-NX) (`/c/dev/refs/unleashed-naga`) | `84932ed` "0.0.3" | GPL-3.0 |
-| [ChanseyIsTheBest/UnleashedRecomp-NX](https://github.com/ChanseyIsTheBest/UnleashedRecomp-NX) (`/c/dev/refs/unleashed-chansey`) | `b346e37`, 2026-09-30 (contiene `d264d2a`, 0.0.4) | GPL-3.0; il confronto è in 10-unleashed-nx.md |
+| [NaGaa95/UnleashedRecomp-NX](https://github.com/NaGaa95/UnleashedRecomp-NX) (`<refs>/unleashed-naga`) | `84932ed` "0.0.3" | GPL-3.0 |
+| [ChanseyIsTheBest/UnleashedRecomp-NX](https://github.com/ChanseyIsTheBest/UnleashedRecomp-NX) (`<refs>/unleashed-chansey`) | `b346e37`, 2026-09-30 (contiene `d264d2a`, 0.0.4) | GPL-3.0; il confronto è in 10-unleashed-nx.md |
 
 Il clone di rexglue-nx ha profondità 1: la storia precedente non è stata
 letta, quindi "cosa c'è" vale per quel commit.

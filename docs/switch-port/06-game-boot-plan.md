@@ -65,13 +65,13 @@ Strade possibili, da scegliere prima di rigenerare:
   però attraversa tutti i sottoprogetti (grafica D3D12, SDL3, UI), quindi
   servono i submodule e Windows SDK anche se non vengono compilati.
 - **Compilatore disponibile su questa macchina.**
-  - `D:/Microsoft Visual Studio/VC/Tools/Llvm/x64/bin/clang++.exe`: **clang
+  - `<Visual Studio>/VC/Tools/Llvm/x64/bin/clang++.exe`: **clang
     22.1.3**, target `x86_64-pc-windows-msvc`. Soddisfa "Clang 18+" ed è la
     combinazione che il preset Windows si aspetta (headers e librerie MSVC).
     Va usato da un "x64 Native Tools Command Prompt" / `vcvars64.bat`, con
     quella cartella `Llvm/x64/bin` in testa al `PATH`, e CMake/Ninja di
     Visual Studio (non quelli di MSYS, che scrivono percorsi POSIX).
-  - `D:/MSYS2/clang64` **esiste ma è vuoto**: pacman c'è, clang no. Si può
+  - un `MSYS2/clang64` separato **esiste ma è vuoto**: pacman c'è, clang no. Si può
     installare (`pacman -S mingw-w64-clang-x86_64-{clang,lld,cmake,ninja}`),
     ma è un target MinGW che il preset non prevede: sconsigliato, a meno che
     la strada MSVC non si blocchi.
@@ -756,7 +756,7 @@ su Windows con la grafica di ReXGlue.
 - **Build:** `tools/pc-eu-base/build.bat` (vcvars64, CMake e Ninja di Visual
   Studio, `-j3`). Il `.bat` ripulisce il `PATH`: ereditato da MSYS, il
   `python3` di MSYS (che non legge i percorsi `C:/`) veniva trovato dal
-  configure di glslang; si usa `D:/Python/python.exe`. 939 passi; i file
+  configure di glslang; si usa un Python di Windows indicato da `THEFT4_PYTHON` (vedi `build.bat`). 939 passi; i file
   generati compilano in circa 5 minuti con clang (con GCC per Switch ~25).
 - **Due correzioni dell'SDK per costruirlo:** opzione
   `REXGLUE_BUILD_GTA4_NATIVE` (il plugin `gta4-native` richiede la cache degli
@@ -769,7 +769,7 @@ su Windows con la grafica di ReXGlue.
   ```
   theft4-eu-base.exe --diagnostics=true --diagnostics_categories=logging
       --log_flush_interval=1 --log_level=debug --log_file=<log>
-      "--game_data_root=D:/Mod Switch/gta4/Grand Theft Auto IV (Europe) (En,Fr,De,Es,It)"
+      "--game_data_root=<cartella del gioco europeo, con default.xex>"
   ```
 
   Senza `--diagnostics=true` il main dell'SDK sopprime ogni riga di log; senza

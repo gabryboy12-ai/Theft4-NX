@@ -4,7 +4,7 @@
 completo di Need for Speed: Most Wanted (Xbox 360) sullo stesso stack:
 ReXGlue con un livello Horizon nell'SDK, renderer nativo PM4 → Vulkan su NVK,
 shader precompilati con XenosRecomp, LTO/PGO. Gira a 30–35 FPS alle frequenze
-standard. Clone in `/c/dev/refs/nfsmw-nx`, commit `493d47fc`
+standard. Clone in `<refs>/nfsmw-nx`, commit `493d47fc`
 (2026-09-27), letto per intero `docs/` più i sorgenti del livello Horizon
 (`sdk/src/core/*_switch*`, `sdk/src/system/xthread.cpp`,
 `sdk/resources/templates/codegen/pch_h.inja`) e `mesa/`. Aggiornato a

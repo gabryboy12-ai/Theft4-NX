@@ -6,7 +6,7 @@ in portatile e 1536x864 in dock (scala 0,9 e 0,8 della finestra). Letto il
 
 **Da dove viene cosa.**
 
-| Clone in `/c/dev/refs/` | Repository | Stato |
+| Clone in `<refs>/` | Repository | Stato |
 |---|---|---|
 | `unleashed-naga` | github.com/NaGaa95/UnleashedRecomp-NX | `84932ed` "0.0.3" (port di NaGa del 2026-07-04 su un lavoro del 19/05) |
 | `unleashed-chansey` | github.com/ChanseyIsTheBest/UnleashedRecomp-NX | `b346e37` (tag `1.0.0`): sopra 0.0.3, il ramo `switch-perf-final-0.0.4` fuso con tre PR; dal 2026-10-02 il clone è su `origin/switch-1.0.0` = `1f4803d`, il codice della 1.0.0 (§12) |
@@ -410,7 +410,7 @@ cui `gpu/video.cpp` (+1390), `patches/XenonRecomp.patch` (+2589),
 (698, nuovo), `patches/message_dispatch.cpp` (600, nuovo),
 `os/switch/cpu_profiler_switch.cpp` (+409), `docs/SWITCH-PERFORMANCE.md`
 (+450), `docs/SWITCH-DARK-EYES.md` (293, nuovo) e il profilo PGO del round 16.
-Clone aggiornato in `/c/dev/refs/unleashed-chansey`, ora su
+Clone aggiornato in `<refs>/unleashed-chansey`, ora su
 `origin/switch-1.0.0`. Le modifiche sotto vengono dai round 11–16 di
 `docs/SWITCH-PERFORMANCE.md`, tutte con una chiave `[Switch]` propria e
 "image-identical".
