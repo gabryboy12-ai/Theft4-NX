@@ -29,7 +29,10 @@
 #include <rex/system/xtypes.h>
 #include <rex/thread/mutex.h>
 
+#include <mutex>
 #include <new>
+#include <string>
+#include <unordered_set>
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
@@ -173,6 +176,29 @@ static void StoreImmediateIoStatus(const object_ref<XFile>& file, uint32_t io_st
   iosb->information = information;
 }
 
+// Every open, for comparing platforms (run 16): the first 200 opens and then
+// each path not seen before, with the export, disposition, options, result
+// and the action taken. NtOpenFile goes through NtCreateFile_entry and says so.
+thread_local const char* t_open_export = "NtCreateFile";
+
+static void TraceFileOpen(const std::string& path, uint32_t disposition, uint32_t options,
+                          X_STATUS result, uint32_t action) {
+  static std::mutex mutex;
+  static std::unordered_set<std::string> seen;
+  static uint64_t count = 0;
+  bool log;
+  uint64_t n;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    n = ++count;
+    log = seen.insert(path).second || n <= 200;
+  }
+  if (log) {
+    REXKRNL_INFO("file open #{}: {} '{}' disposition {} options {:#x} -> {:08X} (action {})", n,
+                 t_open_export, path, disposition, options, uint32_t(result), action);
+  }
+}
+
 u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
                        ppc_ptr_t<X_OBJECT_ATTRIBUTES> object_attrs,
                        ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block, mapped_u64 allocation_size_ptr,
@@ -241,6 +267,8 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
   }
 
   *handle_out = handle;
+  TraceFileOpen(target_path, uint32_t(creation_disposition), uint32_t(create_options), result,
+                uint32_t(file_action));
   if (XFAILED(result)) {
     REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
   } else {
@@ -252,9 +280,13 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
 u32 NtOpenFile_entry(mapped_u32 handle_out, u32 desired_access,
                      ppc_ptr_t<X_OBJECT_ATTRIBUTES> object_attributes,
                      ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block, u32 open_options) {
-  return NtCreateFile_entry(handle_out, desired_access, object_attributes, io_status_block, nullptr,
-                            0, 0, static_cast<uint32_t>(rex::filesystem::FileDisposition::kOpen),
-                            open_options);
+  t_open_export = "NtOpenFile";
+  const u32 result =
+      NtCreateFile_entry(handle_out, desired_access, object_attributes, io_status_block, nullptr,
+                         0, 0, static_cast<uint32_t>(rex::filesystem::FileDisposition::kOpen),
+                         open_options);
+  t_open_export = "NtCreateFile";
+  return result;
 }
 
 u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_ptr,
