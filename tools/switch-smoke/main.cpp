@@ -23,7 +23,9 @@
 //      frozen, a blocked job abandoned at its deadline, resume
 // Then "SMOKE OK" or "SMOKE FAIL at <step>: <reason>" for those steps,
 // followed by the exploratory probes T1-T11 in probes.cpp (alias primitives,
-// heap size, cost of the guest-memory design A). + exits as switch-game does
+// heap size, cost of the guest-memory design A) and step 7, the Vulkan probe
+// (vulkan_probe.cpp, cvar nx_smoke_vulkan): "VULKAN OK" or "VULKAN FAIL at
+// <operation>", apart from the SMOKE verdict. + exits as switch-game does
 // (nx_exit.h: exit(0), or mode D with the cvar nx_exit_mode), with five
 // threads working; the steps go to smoke-exit.log.
 //
@@ -70,6 +72,7 @@
 
 #include "nx_exit.h"
 #include "probes.h"
+#include "vulkan_probe.h"
 
 namespace {
 
@@ -80,6 +83,8 @@ constexpr const char* kConfigPath = "sdmc:/switch/theft4/smoke.toml";
 
 std::string g_first_failure;
 bool g_logging_ready = false;
+// False while the Vulkan probe owns the default NWindow: no console output.
+bool g_console_open = false;
 
 }  // namespace
 
@@ -96,6 +101,9 @@ REXCVAR_DECLARE(int32_t, nx_guest_pool_mib);
 REXCVAR_DEFINE_STRING(nx_exit_mode, "A", "Switch",
                       "Exit at +: A = exit(0) with the threads alive, D = stop flag and join "
                       "for 2 s, then exit(0) (nx_exit.h)");
+REXCVAR_DEFINE_BOOL(nx_smoke_vulkan, true, "Switch",
+                    "Step 7: the Vulkan probe (NVK: features, surface, 5 s of frames, pipeline "
+                    "and submit timings), after the memory probes");
 REXCVAR_DEFINE_BOOL(nx_smoke_pause_test, false, "Switch",
                     "Step 6: pause five working threads with svcSetThreadActivity, check "
                     "they stop, resume them (the pause of run 14, no longer used to exit)");
@@ -152,8 +160,10 @@ void Report(bool error, const char* fmt, ...) {
   va_start(args, fmt);
   std::vsnprintf(line + prefix_len, sizeof(line) - prefix_len, fmt, args);
   va_end(args);
-  std::printf("%s\n", line + std::strlen("[smoke] "));
-  consoleUpdate(nullptr);
+  if (g_console_open) {
+    std::printf("%s\n", line + std::strlen("[smoke] "));
+    consoleUpdate(nullptr);
+  }
   if (g_logging_ready) {
     DurableAppend(line);
   }
@@ -1259,6 +1269,22 @@ void StepExitSequence() {
   std::remove(kExitScratchPath);
 }
 
+// The Vulkan probe takes the default NWindow, which the console's
+// framebuffer holds: the console closes before and reopens after.
+void CloseConsoleForVulkan() {
+  if (g_console_open) {
+    g_console_open = false;
+    consoleExit(nullptr);
+  }
+}
+
+void ReopenConsoleAfterVulkan() {
+  if (!g_console_open) {
+    consoleInit(nullptr);
+    g_console_open = true;
+  }
+}
+
 // + : switch-game's exit (nx_exit.h), with the five workers busy. Steps in
 // smoke-exit.log (write + fsync on its own descriptor) and in smoke.log.
 constexpr const char* kSmokeExitStepPath = "sdmc:/switch/theft4/smoke-exit.log";
@@ -1305,6 +1331,7 @@ void SmokeExitCooperative() {
 int main(int argc, char** argv) {
   rex::cvar::Init(argc, argv);
   consoleInit(nullptr);
+  g_console_open = true;
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
   PadState pad;
   padInitializeDefault(&pad);
@@ -1336,6 +1363,12 @@ int main(int argc, char** argv) {
     // The verdict above came before the arena was released.
     Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
   }
+  if (REXCVAR_GET(nx_smoke_vulkan)) {
+    RunVulkanProbe(CloseConsoleForVulkan, ReopenConsoleAfterVulkan);
+  } else {
+    SMOKE_INFO("step 7 Vulkan: skipped (cvar nx_smoke_vulkan)");
+  }
+
   // + exits as switch-game does, with threads working in the background.
   const char mode = theft4::nx_exit::ParseExitMode(REXCVAR_GET(nx_exit_mode).c_str());
   const bool workers = StartExitWorkers();

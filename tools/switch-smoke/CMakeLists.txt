@@ -19,7 +19,8 @@ endif()
 get_filename_component(THEFT4_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 add_subdirectory("${THEFT4_ROOT}/glue/rexglue-sdk-main" rexglue-sdk)
 
-add_executable(switch-smoke main.cpp probes.cpp "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp")
+add_executable(switch-smoke main.cpp probes.cpp vulkan_probe.cpp nx_elf_stubs.c
+    "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp")
 target_compile_features(switch-smoke PRIVATE cxx_std_23)
 target_include_directories(switch-smoke PRIVATE "${THEFT4_ROOT}/glue/rexglue-sdk-main/include"
     "${THEFT4_ROOT}/tools/switch-common")
@@ -42,6 +43,14 @@ target_link_libraries(switch-smoke PRIVATE
     spdlog::spdlog
     -Wl,--end-group
 )
+# Step 7: Mesa NVK, the static libvulkan.a of mesa-switch in portlibs/switch
+# (headers in portlibs/switch/include). Not find_package(Vulkan): its config
+# asks for libelf, which devkitPro lacks; nx_elf_stubs.c stands in for it.
+# Its other dependencies (vulkan.pc): expat, zlib, zstd, libnx.
+target_include_directories(switch-smoke PRIVATE "${DEVKITPRO}/portlibs/switch/include")
+target_link_directories(switch-smoke PRIVATE "${DEVKITPRO}/portlibs/switch/lib")
+target_link_libraries(switch-smoke PRIVATE
+    -Wl,--start-group vulkan expat zstd z nx -Wl,--end-group)
 target_link_options(switch-smoke PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/switch-smoke.map")
 
 nx_generate_nacp(switch-smoke.nacp
