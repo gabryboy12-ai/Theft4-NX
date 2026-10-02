@@ -36,7 +36,19 @@
 #define VK_USE_PLATFORM_VI_NN
 #include <vulkan/vulkan.h>
 
+#include <rex/cvar.h>
+
 #include "probes.h"
+
+// Run 16 crashed after "VULKAN OK", before +: variants to bisect it (11 §run 16).
+REXCVAR_DEFINE_BOOL(nx_vk_reopen_console, true, "Switch",
+                    "Vulkan probe: reopen the console on the default NWindow after the "
+                    "teardown (false: the screen stays as Vulkan left it, lines go to the log)");
+REXCVAR_DEFINE_BOOL(nx_vk_wait_idle, true, "Switch",
+                    "Vulkan probe: vkQueueWaitIdle and vkDeviceWaitIdle before destroying "
+                    "anything (false: destroy at once)");
+REXCVAR_DEFINE_BOOL(nx_vk_destroy_instance, true, "Switch",
+                    "Vulkan probe: destroy the surface and the instance (false: leave them)");
 
 // The SDK's fullscreen triangle vertex shader (glslang output, no inputs, no
 // descriptors): the vertex side of the test pipeline.
@@ -937,20 +949,34 @@ bool Probe::StepFrames() {
 
 // ── e) teardown ────────────────────────────────────────────────────────────
 
+// Every step numbered and durable before it runs ("teardown step N"), so a
+// crash names the step. The cvars above select the variants.
 void Probe::Destroy() {
+  int step = 0;
+  auto Step = [&step](const char* what) { SMOKE_INFO("  teardown step %d: %s", ++step, what); };
   if (device_) {
-    SMOKE_INFO("  about to vkDeviceWaitIdle and destroy the device objects");
-    vkDeviceWaitIdle(device_);
+    if (REXCVAR_GET(nx_vk_wait_idle)) {
+      Step("vkQueueWaitIdle (frames and presents in flight)");
+      if (queue_) vkQueueWaitIdle(queue_);
+      Step("vkDeviceWaitIdle");
+      vkDeviceWaitIdle(device_);
+    } else {
+      Step("no wait for idle (cvar nx_vk_wait_idle = false)");
+    }
+    Step("fences and acquire semaphores");
     for (int i = 0; i < kFrames; ++i) {
       if (fence_[i]) vkDestroyFence(device_, fence_[i], nullptr);
       if (acquired_[i]) vkDestroySemaphore(device_, acquired_[i], nullptr);
       fence_[i] = VK_NULL_HANDLE;
       acquired_[i] = VK_NULL_HANDLE;
     }
-    for (VkSemaphore s : rendered_) vkDestroySemaphore(device_, s, nullptr);
+    Step("render-finished semaphores");
+    for (VkSemaphore sem : rendered_) vkDestroySemaphore(device_, sem, nullptr);
     rendered_.clear();
+    Step("command pool");
     if (pool_) vkDestroyCommandPool(device_, pool_, nullptr);
     pool_ = VK_NULL_HANDLE;
+    Step("pipelines, pipeline caches, layout, shader modules");
     for (VkPipeline p : extra_pipelines_) vkDestroyPipeline(device_, p, nullptr);
     extra_pipelines_.clear();
     if (pipeline_) vkDestroyPipeline(device_, pipeline_, nullptr);
@@ -962,6 +988,7 @@ void Probe::Destroy() {
     if (fs_) vkDestroyShaderModule(device_, fs_, nullptr);
     layout_ = VK_NULL_HANDLE;
     vs_ = fs_ = VK_NULL_HANDLE;
+    Step("framebuffers, image views, render pass");
     for (VkFramebuffer fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     framebuffers_.clear();
     for (VkImageView v : views_) vkDestroyImageView(device_, v, nullptr);
@@ -969,30 +996,50 @@ void Probe::Destroy() {
     if (render_pass_) vkDestroyRenderPass(device_, render_pass_, nullptr);
     render_pass_ = VK_NULL_HANDLE;
     if (swapchain_) {
-      SMOKE_INFO("  about to vkDestroySwapchainKHR");
+      Step("vkDestroySwapchainKHR");
       vkDestroySwapchainKHR(device_, swapchain_, nullptr);
       swapchain_ = VK_NULL_HANDLE;
     }
-    SMOKE_INFO("  about to vkDestroyDevice");
+    Step("vkDestroyDevice");
     vkDestroyDevice(device_, nullptr);
     device_ = VK_NULL_HANDLE;
   }
   if (instance_) {
-    if (surface_) {
-      SMOKE_INFO("  about to vkDestroySurfaceKHR");
-      vkDestroySurfaceKHR(instance_, surface_, nullptr);
-      surface_ = VK_NULL_HANDLE;
+    if (!REXCVAR_GET(nx_vk_destroy_instance)) {
+      Step("surface and instance left alive (cvar nx_vk_destroy_instance = false)");
+    } else {
+      if (surface_) {
+        Step("vkDestroySurfaceKHR");
+        vkDestroySurfaceKHR(instance_, surface_, nullptr);
+        surface_ = VK_NULL_HANDLE;
+      }
+      Step("vkDestroyInstance");
+      vkDestroyInstance(instance_, nullptr);
+      instance_ = VK_NULL_HANDLE;
     }
-    SMOKE_INFO("  about to vkDestroyInstance");
-    vkDestroyInstance(instance_, nullptr);
-    instance_ = VK_NULL_HANDLE;
   }
   if (console_closed_) {
-    SMOKE_INFO("  about to reopen the console on the default NWindow");
-    reopen_console_();
-    console_closed_ = false;
-    SMOKE_INFO("  console reopened");
+    if (REXCVAR_GET(nx_vk_reopen_console)) {
+      Step("reopen the console on the default NWindow (consoleInit)");
+      reopen_console_();
+      console_closed_ = false;
+      SMOKE_INFO("  console reopened");
+    } else {
+      Step("console left closed (cvar nx_vk_reopen_console = false): lines go to smoke.log only");
+    }
   }
+  Step("done");
+}
+
+// Threads of this process (svcGetThreadList): the probe logs the count before
+// and after, so threads the driver leaves behind show up.
+int ProcessThreadCount() {
+  s32 n = 0;
+  u64 ids[128];
+  if (R_FAILED(svcGetThreadList(&n, ids, 128, CUR_PROCESS_HANDLE))) {
+    return -1;
+  }
+  return int(n);
 }
 
 }  // namespace
@@ -1000,6 +1047,11 @@ void Probe::Destroy() {
 bool RunVulkanProbe(void (*close_console)(), void (*reopen_console)()) {
   SMOKE_INFO("step 7 Vulkan (mesa-switch NVK, static libvulkan.a): instance, device, features, "
              "surface, swapchain, 5 s of frames, pipeline and submit timings");
+  SMOKE_INFO("  variants: reopen console %s, wait idle %s, destroy instance %s; process threads "
+             "before: %d",
+             REXCVAR_GET(nx_vk_reopen_console) ? "yes" : "NO",
+             REXCVAR_GET(nx_vk_wait_idle) ? "yes" : "NO",
+             REXCVAR_GET(nx_vk_destroy_instance) ? "yes" : "NO", ProcessThreadCount());
   std::string failure;
   bool ok = false;
   {
@@ -1007,6 +1059,7 @@ bool RunVulkanProbe(void (*close_console)(), void (*reopen_console)()) {
     ok = probe.Run();
     failure = probe.failure();
   }  // destroyed here, in order, success or not
+  SMOKE_INFO("  process threads after the teardown: %d", ProcessThreadCount());
   if (ok) {
     Report(false, "VULKAN OK");
   } else {

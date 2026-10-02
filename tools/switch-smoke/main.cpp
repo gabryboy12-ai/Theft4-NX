@@ -1375,17 +1375,39 @@ int main(int argc, char** argv) {
   SMOKE_INFO("exit test: %s; + exits with mode %c (%s, cvar nx_exit_mode), steps in %s",
              workers ? "5 threads working in the background" : "background threads NOT started",
              mode, theft4::nx_exit::ExitModeDescription(mode), kSmokeExitStepPath);
-  std::printf("\nPress + to exit.\n");
-  consoleUpdate(nullptr);
+  if (g_console_open) {
+    std::printf("\nPress + to exit.\n");
+    consoleUpdate(nullptr);
+  }
 
+  // Run 16 crashed in this wait, after the Vulkan probe and before +: a
+  // durable line at 1, 2, 3, 5, 10 s and then every 10 s says when, and every
+  // change of the buttons is logged with its time.
   bool plus = false;
+  const u64 wait_start = armGetSystemTick();
+  u64 next_line_s = 1, buttons_now = 0, updates = 0;
   while (appletMainLoop()) {
     padUpdate(&pad);
+    const u64 buttons = padGetButtons(&pad);
+    const u64 seconds = armTicksToNs(armGetSystemTick() - wait_start) / 1'000'000'000ull;
+    if (buttons != buttons_now) {
+      SMOKE_INFO("buttons 0x%" PRIx64 " at %.3f s of the wait (was 0x%" PRIx64 ")", buttons,
+                 double(armTicksToNs(armGetSystemTick() - wait_start)) / 1e9, buttons_now);
+      buttons_now = buttons;
+    }
+    if (seconds >= next_line_s) {
+      SMOKE_INFO("waiting for +: %" PRIu64 " s, %" PRIu64 " console updates", seconds, updates);
+      next_line_s = next_line_s < 3 ? next_line_s + 1 : next_line_s < 5 ? 5
+                    : next_line_s < 10 ? 10 : next_line_s + 10;
+    }
     if (padGetButtonsDown(&pad) & HidNpadButton_Plus) {
       plus = true;
       break;
     }
-    consoleUpdate(nullptr);
+    if (g_console_open) {
+      consoleUpdate(nullptr);
+      ++updates;
+    }
     svcSleepThread(16'000'000);
   }
   g_smoke_exit_mode = mode;
