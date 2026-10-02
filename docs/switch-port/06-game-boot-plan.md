@@ -1343,3 +1343,234 @@ misurare. Da implementare quando il gioco disegna (fase a o c di §11).
 
 Ogni ottimizzazione che ne esce va provata come fanno loro: un NRO, una cvar
 per modifica, confronto A/B nello stesso punto, ELF conservato.
+
+## 21. Run 16: il sequenziatore aspettava il driver audio; audio nullo (2026-10-02)
+
+`out/console-runs/run16/`, NRO del commit `3c50605`.
+
+- **Console:** la sonda Vulkan funziona (`VULKAN OK`, immagine visibile); dopo,
+  durante l'attesa del +, un crash senza crash report nella cartella del run
+  (11-vulkan-probe.md, "Il crash dopo la sonda"). Il gioco: stesso ciclo a 60
+  Hz; la chiusura con + (modo A) **non dà errori** (`game-exit.log` fino a
+  `_exit`): la regola di 09 §9 è confermata sul gioco.
+- **Disco:** la cartella `xbox360/audio/config` **non esiste** sul disco.
+
+### A.1 I file che il gioco apre
+
+Il run 16 registrava solo i fallimenti di `NtCreateFile` (`[NtCreateFile]
+FAILED`). Sono **gli stessi sette sul PC e sulla Switch**, tutti in
+`game:\xbox360\audio\config\` (`categories.dat15`, `curves.dat12`,
+`driverSettings.xml`, `engineSettings.xml`, `game.dat16`, `sounds.dat15`,
+`speech.dat`), cercati **come file dell'host** con `NtCreateFile` sul
+percorso `game:\`, **non dentro un RPF** (le voci di un RPF si leggono con
+`NtReadFile` sull'handle dell'archivio, senza aprire un percorso). Visto che
+la cartella non c'è nemmeno sul disco, sono file sciolti facoltativi che il
+gioco prova e non trova anche su una 360: **l'ipotesi "mancano i file di
+config" era falsa.** Con l'audio nullo il gioco prova anche
+`waveslots.xml` ed `effects.dat11` nella stessa cartella (stesso esito) e va
+avanti lo stesso.
+
+**Nuovo (da verificare sulla Switch):** `NtCreateFile`/`NtOpenFile`
+(`xboxkrnl_io.cpp`) scrivono `file open #N: <export> '<percorso>' disposition
+… options … -> <stato> (action …)` per le prime 200 aperture e poi per ogni
+percorso nuovo, su PC e Switch.
+
+### A.2 Perché `XAudioRegisterRenderDriverClient` dava `C0000002`
+
+`xboxkrnl_audio.cpp`: se `REX_KERNEL_STATE()->emulator()->audio_system()` è
+nullo l'export ritorna `X_STATUS_NOT_IMPLEMENTED` = `C0000002`. Sul PC
+`pc_audio` spenta metteva `config.audio_factory = nullptr`; switch-game non
+passava nessuna `audio_factory`. **Audio spento, nient'altro.** Sulla Switch
+la classe `AudioSystem` del desktop non è nemmeno compilata
+(`REXGLUE_CORE_ONLY` costruisce di `src/audio` solo XMA e handoff).
+
+### A.3 Il sistema audio nullo (da verificare sulla Switch)
+
+`include/rex/audio/null_audio_system.h`, `src/audio/null_audio_system.cpp`
+(in `rexaudio`, quindi anche nel build Switch), modellato sulla GPU nulla.
+Implementa `system::IAudioSystem` direttamente:
+
+- `RegisterClient` accetta fino a 8 client, avvolge l'argomento del callback
+  in memoria guest (come `AudioSystem`) e dà **8 crediti**;
+- un `XHostThread` "Audio Worker (null)" ogni **256/48000 s (5,333 ms)**
+  "suona" un fotogramma in coda per client, che restituisce un credito; ogni
+  credito è una chiamata del callback guest (`FunctionDispatcher::Execute`),
+  che sottomette il fotogramma successivo: lo stesso contratto dei semafori di
+  `AudioSystem` con un driver che rilascia un'unità per fotogramma suonato;
+- `SubmitFrame` conta e scarta;
+- possiede un `XmaDecoder`, come `AudioSystem`: le export XMA ci arrivano
+  attraverso `audio_system()->xma_decoder()`;
+- il lock dei client non è mai tenuto mentre gira codice guest (il callback
+  sottomette fotogrammi, e un altro thread guest con un lock guest potrebbe
+  farlo nello stesso momento); un secondo lock, tenuto solo intorno al
+  callback, fa sì che `UnregisterClient` aspetti un callback in corso.
+
+Cvar `nx_null_audio` (vera per default), definita nel file dell'SDK; la usano
+switch-game (`config.audio_factory`) e pc-eu-base quando `pc_audio` è spenta.
+Il battito scrive `null audio: N clients, … callbacks, … frames submitted, …
+played`. Nessun trucco sulle variabili del gioco.
+
+### A.4 Prova sul PC
+
+| Run (PC) | Cosa cambia | Esito |
+|---|---|---|
+| `run17` | audio nullo | il client si registra (callback `82172BE8`), file di `audio\sfx\*.rpf`, `XMACreateContext`, poi `[FATAL] Call to invalid or unregistered function at guest address 0x82177920` |
+| `run17b` | `0x82177920` dichiarata (dentro `sub_82177910`: il thunk `addi r3,r3,-4; b 0x82177920` salta a +0x10, dove comincia la funzione vera chiamata da una vtable) | **il sequenziatore avanza**: indice 1 a 10 s, indice 5 a 20 s con "main waits on **0**" (il thread principale è libero), indice 6 e "active 0" a 30 s; poi il log si ferma a 30 s |
+| `run17c` | pila guest limitata allo stack del thread (dal PCR) | stesso avanzamento, poi `FATAL` a `0x827D5200` (lacuna di 32 byte dopo `827D51E0`, chiamata dal thread principale) a ~27 s: era quasi certamente anche lo stop di `run17b` (riga non scritta in tempo) |
+| `run17d` | `0x827D5200` dichiarata | **275 s**: 117 export distinte, 200 milioni di chiamate; il gioco legge il pad a ogni fotogramma, carica la città, poi `FATAL` a `0x82586A60` (lacuna dopo `82586A08`) |
+| `run17e` | `0x82586A60` dichiarata | **330 s senza arresti** (ucciso a mano): 117 export, 280 milioni di chiamate, `NtReadFile` da 73.596 a 84.335 negli ultimi tre minuti (continua a caricare la città, lentamente: ~6 fotogrammi al secondo con la GPU emulata del PC); thread principale nel ciclo del gioco (`… 82122A54 82120188 …`, pila guest) |
+
+Il sistema audio nullo va al ritmo giusto: 1.768 callback nei primi ~9,4 s,
+~187,5 al secondo = 48000/256; poi un callback e un fotogramma per volta
+(`frames submitted` = `callbacks`, `played` 7–8 sotto: gli 8 crediti).
+
+**Cosa ha sbloccato il sequenziatore.** Con l'audio nullo la voce 0 è passata:
+nel battito dei 10 s l'indice è già 1, il suono del logo non è più visibile
+(`sound 00000000`), quindi la condizione del tipo 1 (suono allo stato 2, 06
+§19) è stata soddisfatta mentre il motore audio del gioco girava. Il resto
+della sequenza è avanzato: voce 1 = 4000 ms tipo 2, voce 5 = 8000 ms tipo 4
+(a 20 s, con il thread principale già libero), voce 6 tipo 0 con il
+sequenziatore spento (a 30 s).
+
+**Cosa fa il gioco dopo (run17d, conteggi per minuto):**
+
+- 20 export nuove rispetto al run 16: `XAudioGetSpeakerConfig`,
+  `XAudioGetVoiceCategoryVolumeChangeMask`, `XAudioSubmitRenderDriverFrame`,
+  `XMACreateContext`, `XMAReleaseContext`, `XamUserReadProfileSettings`,
+  `XamUserCreateAchievementEnumerator`, `XamContentCreateEnumerator`,
+  `XamCreateEnumeratorHandle`, `XamEnumerate`, `XMsgStartIORequest`,
+  `XMsgStartIORequestEx`, `XMsgInProcessCall`, `KeWaitForMultipleObjects`,
+  `NtWaitForMultipleObjectsEx`, `NtSetEvent`, `KeResetEvent`,
+  `RtlTryEnterCriticalSection`, `ExTerminateThread`, `NtSetInformationFile`;
+- `XamInputGetState`: 1.516 a 60 s, poi ~23 al secondo: **ora il gioco legge
+  il pad** (prima 8 volte in tutto);
+- `NtReadFile` da 615 a 80.010; 325 percorsi diversi aperti; alla fine
+  `game:\xbox360\data\maps\east\bronx_*.img` (la città) e, per ognuno, il
+  tentativo su `cache:\` (la copia sull'HDD della 360) che fallisce prima
+  della lettura dal disco, come previsto;
+- `ExCreateThread` 25 (prima 22); `VdSwap` 2.292 nel primo minuto, poi
+  ~6 al secondo: sul PC la GPU emulata di ReXGlue rallenta molto ora che il
+  gioco disegna davvero.
+
+**Per la Switch:** lo stesso codice (audio nullo, cvar `nx_null_audio`) e il
+codice generato con le tre funzioni nuove sono nel run 17 (`run17-build`). Da
+verificare sulla console.
+
+### A.5 Piano: audio reale sulla Switch (non implementato)
+
+- **Cosa c'è:** `src/audio/switch/switch_audio_system.cpp` e
+  `switch_audio_driver.cpp` (audren di libnx: driver ad alto livello, voci,
+  wave buffer doppi, `kChannelSamples` 256, 48 kHz, 6 canali convertiti in
+  stereo int16), con `include/rex/audio/switch/*.h`, protetti da
+  `REX_PLATFORM_NX`. `SwitchAudioSystem` **deriva da `AudioSystem`** (il
+  sistema del desktop con il worker, i semafori dei client e la cvar
+  `audio_maxqframes`).
+- **Cosa manca nel build:** in `src/audio/CMakeLists.txt` il ramo
+  `REXGLUE_CORE_ONLY` compila solo `handoff_trace`, `null_audio_system`,
+  `xma_*`. Aggiungere, sotto `LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL
+  "switch"`: `audio_driver.cpp`, `audio_system.cpp`, `switch/switch_audio_system.cpp`,
+  `switch/switch_audio_driver.cpp`, senza SDL (`rexaudio` linka SDL3 solo
+  fuori da CORE_ONLY: va bene così). Controllare che `audio_system.cpp` non
+  tiri dentro altro del desktop (`rex/diagnostics/gta4_transition.h`, gli
+  handoff sono già nel build).
+- **switch-game:** una cvar `nx_audio` (spenta all'inizio):
+  `config.audio_factory = REX_AUDIO_BACKEND(rex::audio::nx::SwitchAudioSystem)`,
+  altrimenti l'audio nullo.
+- **Rischi noti:** priorità dei thread audio (il driver non cambia più la
+  priorità del chiamante, commit `7758e6e`; attesa limitata dei wave buffer);
+  il callback guest gira sul worker di `AudioSystem` (un `XHostThread`), come
+  sul desktop; la memoria audren (mempool allineato) dentro l'heap.
+- **Verifica:** prima l'audio nullo sulla console (il gioco deve arrivare dove
+  arriva il PC); poi `nx_audio = true`: il battito con i conteggi dei
+  callback deve dare ~187 al secondo, e il suono del logo deve sentirsi.
+
+### C. Log dei tasti (da verificare)
+
+- switch-game: ogni cambio dei tasti tenuti (maschera `HidNpadButton` di
+  libnx) scrive `buttons 0x… at N.NNN s (was 0x…)`, dal thread
+  dell'interfaccia (anche nell'attesa del + dopo un arresto); il battito
+  aggiunge `buttons: N changes, now 0x…`.
+- switch-smoke: nell'attesa del + finale, `buttons 0x… at N.NNN s of the wait
+  (was 0x…)`.
+- Maschera (libnx): A `0x1`, B `0x2`, X `0x4`, Y `0x8`, levetta sinistra
+  premuta `0x10`, destra `0x20`, L `0x40`, R `0x80`, ZL `0x100`, ZR `0x200`,
+  + `0x400`, − `0x800`, croce sinistra/su/destra/giù `0x1000`/`0x2000`/
+  `0x4000`/`0x8000`; i bit alti sono le direzioni delle levette.
+
+### Run 17: cosa guardare (`out/console-runs/run17-build/`)
+
+- **Gioco:** `audio: the null audio system …`; poi `null audio: client 0
+  registered` e nel battito `null audio: … callbacks` (~187 al secondo); la
+  riga `boot sequencer` con l'indice che passa da 0 a 6 e "main waits on 0";
+  le righe `file open #N` (ora tutte le aperture, non solo i fallimenti);
+  `XamInputGetState` nei conteggi per minuto (`exports called at N s`), che
+  sul PC sale a ~23 al secondo dopo gli schermi d'avvio; i tasti premuti
+  (`buttons …`). Le tre funzioni nuove (`0x82177920`, `0x827D5200`,
+  `0x82586A60`) sono nel codice generato: se ne manca un'altra, la riga è
+  `STOP at the first function missing on Switch` o un fault nel crash log.
+  Con la GPU nulla non si vede niente sullo schermo: quello che conta è dove
+  arriva il log.
+- **Smoke:** le righe `teardown step N`, il numero di thread prima e dopo,
+  e `waiting for +: …` fino al crash; poi gli stessi run con le varianti
+  (11-vulkan-probe.md). Se il crash si ripete, servono il crash report di
+  `sdmc:/atmosphere/crash_reports/` e il testo esatto sullo schermo.
+
+## 22. Da UnleashedRecomp-NX 1.0.0: cosa portare quando il gioco ha la GPU vera
+
+Solo piano (10 §12). In ordine: prima ciò che dà di più con meno rischio. Per
+ognuna: dove si innesta da noi, rischio per la correttezza, verifica. La
+verifica è sempre la stessa base: **lo stesso codice generato gira sul PC**
+(`tools/pc-eu-base`), quindi ogni modifica al generatore o al kernel si prova
+prima sul PC confrontando la traccia delle export
+(`compare_export_traces.py`), i conteggi per minuto e, quando ci sarà
+l'immagine, i fotogrammi, con la modifica accesa e spenta.
+
+### 1. Generatore di codice (`rexglue codegen`, `src/codegen/` dell'SDK, template `resources/templates/codegen/`)
+
+| Modifica | Dove da noi | Rischio | Verifica |
+|---|---|---|---|
+| **Confronti FP inline** (`fcmpu`/`fcmpo` come codice senza salti al posto della chiamata) | `src/codegen/builders/` (emissione di `fcmp*`) e l'helper in `include/rex/ppc/`; opzione nel `gta4_eu_base_config.toml` | basso: un confronto non arrotonda; attenzione ai NaN (ordinato/non ordinato) e a `FPSCR[FPCC]`, se il codice lo legge | test unitario dell'helper su tutte le coppie speciali (±0, ±inf, NaN, denormali); traccia delle export identica sul PC; `read_before_write.py` invariato |
+| **`memcpy`/`memset` guest di dimensione costante inline** (`li r5,N` subito prima della chiamata) | passo sul codice generato, come `direct_calls.py` (`tools/switch-codegen/`), o nel builder delle chiamate; serve l'indirizzo delle `memcpy`/`memset` del CRT europeo (da trovare) | medio: cambia il flusso di controllo di centinaia di funzioni (e il profilo PGO); un `li r5` che non è la dimensione darebbe una copia sbagliata | elenco dei siti con il registro letto dall'istruzione precedente, controllo a mano di un campione; PC con e senza: stessi file letti, stesse export, stessi conteggi |
+| **Meno cambi di modo FPCR** (tenere il modo vettoriale per mosse, load/store float e confronti) | emissione delle istruzioni FP nel builder (`ppc_context` e helper di arrotondamento); riguarda il nostro modo di gestire flush-to-zero di VMX contro FPU | **alto**: risultati diversi sui denormali se un'istruzione dipende dal modo; loro hanno provato 105 milioni di casi | test dei loro helper "esatti" contro la conversione hardware su PC (stesso test, tutti i modi di arrotondamento); confronto dei conteggi export sul PC; poi la scena |
+| **Multiply-add espliciti** (`-ffp-contract=off` + `fma` solo dove il guest ha `fmadd`/`vmaddfp`) | flag di compilazione dei file generati (`tools/switch-game/CMakeLists.txt`, `tools/pc-eu-base/CMakeLists.txt`) e builder di `fmadd*`/`fmsub*`/`vmaddfp` | basso per la correttezza (anzi la migliora: arrotondamenti come la 360), medio per le prestazioni (meno fusioni di GCC) | ricompilazione due volte: il numero di `fmla`/`fmadd` nell'ELF deve dipendere solo dal codice guest; PC e Switch con gli stessi risultati di calcolo nelle tracce |
+
+Tutte vanno con un profilo PGO nuovo (06 §13): cambiano il flusso di
+controllo di molte funzioni.
+
+### 2. Kernel HLE (`src/kernel/xboxkrnl/`, `src/system/` dell'SDK)
+
+| Modifica | Dove da noi | Rischio | Verifica |
+|---|---|---|---|
+| **Risvegli mirati**: un set di evento o un rilascio di semaforo sveglia i `KeWaitForMultipleObjects` solo se quell'oggetto è nella loro lista | `xboxkrnl_threading.cpp` (`KeSetEvent`, `KeReleaseSemaphore`, `KeWaitForMultipleObjects`, `NtWaitForMultipleObjectsEx`) e gli oggetti in `src/system/` (`xevent`, `xsemaphore`, il dispatcher) | **alto**: un risveglio perso blocca un thread per sempre; da loro il primo tentativo di cambiare il kernel guest ha fermato l'audio a una cutscene | test di stress sul PC (tanti thread, attese multiple); run lunghi sul PC con l'audio nullo (§21) e poi reale; contatori di attese per oggetto nel battito |
+| **Semafori che svegliano uno solo** per un rilascio di una unità | `KeReleaseSemaphore`/`NtReleaseSemaphore` e la classe del semaforo | medio: va rispettata la semantica Windows (il conteggio, non i thread, decide); un rilascio di N unità deve poter svegliare N thread | come sopra; i worker del gioco condividono semafori: confronto dei conteggi per minuto di `NtWaitForSingleObjectEx`/`NtReleaseSemaphore` con e senza |
+
+Prima di entrambe serve l'audio vero o nullo stabile: è il sottosistema che
+loro hanno rotto.
+
+### 3. Clock GPU 460 MHz in portatile
+
+- **Dove**: un file nuovo `tools/switch-common/nx_apm.{h,cpp}` (dal codice di
+  nfsmw-nx `sdk/src/ui/switch_apm.cpp` / `perf_switch.cpp` di Unleashed, 10
+  §12), chiamato da `GameMain` dopo `StartLogging()` su un thread libnx
+  proprio (non blocca l'avvio); più un `appletHook` su
+  `AppletHookType_OnPerformanceMode` che, entrando in `ApmPerformanceMode_Normal`
+  (portatile), lo applica se non è già stato applicato (avvio in dock, poi
+  sganciata). Cvar `nx_handheld_gpu_boost`.
+- **Rischio**: nessuno per la correttezza del gioco; per la console solo se si
+  sbaglia configurazione: chiedere **solo** `0x92220008` (GPU 460,8, RAM
+  1331,2), controllare con `clkrst` per 1,5 s che la RAM non si muova e
+  tornare alla configurazione di prima altrimenti (0x92220007 alzerebbe la RAM
+  a 1600).
+- **Verifica**: righe `[apm]` nel log con i clock prima e dopo; in dock non
+  deve chiedere niente; fps della stessa scena in portatile con e senza.
+
+### 4. Profiler centrato sui picchi
+
+Piano completo in §20. Dove: `tools/switch-game/` (un `nx_profiler.{h,cpp}`
+che riusa l'istantanea dei thread e la pila guest), confini del fotogramma
+attorno a `VdSwap`. Rischio: nessuno per la correttezza (pausa e ripresa dei
+thread, già usate dalle istantanee); per le prestazioni un campionamento ogni
+2 ms costa, quindi dietro una cvar spenta. Verifica: sul PC non c'è (usa
+`svcSetThreadActivity`); sulla Switch un run con il profiler acceso e uno
+spento, stessa scena, la differenza di fps deve essere piccola, e lo script
+deve nominare le funzioni (`sub_82…` e host) dall'ELF del run.
