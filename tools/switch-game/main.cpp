@@ -87,6 +87,7 @@
 #include <rex/runtime.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+#include <rex/audio/null_audio_system.h>
 #include <rex/system/null_graphics_system.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
@@ -833,6 +834,14 @@ struct Heartbeat {
       LogClock();
       LogNullGpu();
       LogBootSequencer();
+      if (REXCVAR_GET(nx_null_audio)) {
+        const auto a = rex::audio::GetNullAudioStats();
+        GAME_INFO("null audio: %u clients, %" PRIu64 " callbacks, %" PRIu64
+                  " frames submitted, %" PRIu64 " played",
+                  a.clients, a.callbacks, a.frames_submitted, a.frames_played);
+      }
+      GAME_INFO("buttons: %" PRIu64 " changes, now 0x%" PRIx64, g_button_changes,
+                g_buttons_now);
       if (REXCVAR_GET(nx_input)) {
         uint64_t published = 0, reads = 0;
         theft4::nx_input::GetCounters(&published, &reads);
@@ -1082,6 +1091,16 @@ namespace {
     GAME_INFO("input: the Switch controller as the 360 pad of user 0 (cvar nx_input)");
   } else {
     GAME_INFO("input: none (nx_input = false)");
+  }
+  // Runs 13-16: XAudioRegisterRenderDriverClient failed with C0000002 (no
+  // audio system), and the first boot screen waits for its sound (06 §19).
+  if (REXCVAR_GET(nx_null_audio)) {
+    config.audio_factory = [](rex::runtime::FunctionDispatcher* dispatcher) {
+      return rex::audio::CreateNullAudioSystem(dispatcher);
+    };
+    GAME_INFO("audio: the null audio system, frames dropped at the real rate (cvar nx_null_audio)");
+  } else {
+    GAME_INFO("audio: none (nx_null_audio = false)");
   }
   // InitializeKernel with a line on each side: run 9 ended between the
   // kernel host-task worker and SetupVfs, i.e. around here.

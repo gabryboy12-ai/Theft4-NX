@@ -6,6 +6,8 @@ if(REXGLUE_CORE_ONLY)
     # and MMIO must remain identical to the desktop runtime.
     add_library(rexaudio OBJECT
         handoff_trace.cpp
+        # Null audio system: drives the guest audio engine without output
+        null_audio_system.cpp
         xma_context.cpp
         xma_decoder.cpp
         xma_register_file.cpp
@@ -19,6 +21,8 @@ else()
         xma_register_file.cpp
         # NOP backend (always available)
         nop/nop_audio_system.cpp
+        # Null audio system: drives the guest audio engine without output
+        null_audio_system.cpp
         # SDL backend
         sdl/sdl_audio_system.cpp
         sdl/sdl_audio_driver.cpp

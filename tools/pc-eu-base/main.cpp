@@ -25,6 +25,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <rex/audio/null_audio_system.h>
 #include <rex/cvar.h>
 #include <rex/diagnostics/export_stubs.h>
 #include <rex/logging.h>
@@ -39,8 +40,8 @@
 
 
 REXCVAR_DEFINE_BOOL(pc_audio, false, "pc-eu-base",
-                    "Host audio (SDL). Off by default, as in switch-game, which runs without an "
-                    "audio system: XAudioRegisterRenderDriverClient then fails the same way on both");
+                    "Host audio (SDL). Off by default, as in switch-game, which has no audio "
+                    "output: then the null audio system (cvar nx_null_audio) or none");
 
 namespace {
 
@@ -98,12 +99,22 @@ void LogBootSequencer() {
   };
   const uint32_t index = u32(0x83137BC0);
   const uint32_t entry = 0x83137D18 + (index < 64 ? index : 0) * 400;
+  // The boot sound object (82D09E00): id at +4 (16 bits), sound at +16, whose
+  // state sub_822FA498 reads at +6 (16 bits): the entry moves on at state 2.
+  const uint32_t sound = u32(0x82D09E00 + 16);
+  const int state =
+      sound >= 0x40000000u && sound < 0xA0000000u ? int(u32(sound + 4) & 0xFFFF) : -1;
   REXLOG_INFO("boot sequencer: active {} (83137BB7), main waits on {} (83137BC9), paused {} "
               "(83137BC8), index {}, time {:.3f} (delta {:.4f}), scale {:.4f}; entry {:08X}: "
-              "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+              "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X}; skip word 82B11188 = {:08X}; boot "
+              "sound object: id {:04X}, sound {:08X}, state {}",
               u8(0x83137BB7), u8(0x83137BC9), u8(0x83137BC8), index, f32(0x83137BB8),
               f32(0x83137BBC), f32(0x82041714), entry, u32(entry), u32(entry + 4),
-              u32(entry + 8), u32(entry + 12), u32(entry + 16), u32(entry + 20));
+              u32(entry + 8), u32(entry + 12), u32(entry + 16), u32(entry + 20),
+              u32(0x82B11188), u32(0x82D09E00 + 4) >> 16, sound, state);
+  const auto a = rex::audio::GetNullAudioStats();
+  REXLOG_INFO("null audio: {} clients, {} callbacks, {} frames submitted, {} played", a.clients,
+              a.callbacks, a.frames_submitted, a.frames_played);
 }
 
 class EuBaseApp final : public rex::ReXApp {
@@ -125,7 +136,15 @@ class EuBaseApp final : public rex::ReXApp {
       config.gpu_plugin = "xenos";
     }
     if (!REXCVAR_GET(pc_audio)) {
-      config.audio_factory = nullptr;
+      // As switch-game: the null audio system drives the guest audio engine
+      // without output; with nx_null_audio = false, no audio system at all.
+      if (REXCVAR_GET(nx_null_audio)) {
+        config.audio_factory = [](rex::runtime::FunctionDispatcher* dispatcher) {
+          return rex::audio::CreateNullAudioSystem(dispatcher);
+        };
+      } else {
+        config.audio_factory = nullptr;
+      }
       return;
     }
     // SDL's audio subsystem on the main thread, now: the audio driver is
