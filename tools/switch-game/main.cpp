@@ -547,6 +547,7 @@ struct ThreadRow {
   bool running = false;
   uint32_t nx_handle = 0;
   const PPCContext* guest_ctx = nullptr;
+  uint32_t stack_end = 0, stack_base = 0;  // guest stack from the PCR (GuestStack)
   rex::diagnostics::ExportThreadSnapshot exports{};
   bool has_exports = false;
   // Filled while the thread is paused: no locks, no allocation.
@@ -572,16 +573,20 @@ uint32_t GuestU32(uint32_t address) {
 // ("mflr r12; stw r12,-8(r1); stwu r1,-N(r1)"). Only for a thread inside an
 // export, whose guest registers do not move. A function that saves LR through
 // __savegprlr leaves that slot to the generated code, so the frame above it
-// can show a stale return address (run 16 analysis, 06 section 19).
-std::string GuestStack(const PPCContext& ctx) {
+// can show a stale return address (run 16 analysis, 06 section 19). Every
+// address read lies inside the thread's own guest stack, [stack_end,
+// stack_base) from its PCR (PC run 17 walked off a stack without it).
+std::string GuestStack(const PPCContext& ctx, uint32_t stack_end, uint32_t stack_base) {
   char item[16];
   std::snprintf(item, sizeof(item), "%08X", uint32_t(ctx.lr));
   std::string out = item;
   uint32_t sp = ctx.r1.u32;
-  const uint32_t top = sp + 0x40000;
-  for (int i = 0; i < 24 && sp; ++i) {
+  if (stack_end >= stack_base || sp < stack_end || sp + 4 > stack_base) {
+    return out;
+  }
+  for (int i = 0; i < 24; ++i) {
     const uint32_t prev = GuestU32(sp);
-    if (prev <= sp || prev >= top || (prev & 3)) break;
+    if (prev <= sp || prev + 4 > stack_base || prev - 8 < stack_end || (prev & 3)) break;
     const uint32_t lr = GuestU32(prev - 8);
     if (lr < 0x82000000u || lr >= 0x83000000u) break;
     std::snprintf(item, sizeof(item), " %08X", lr);
@@ -665,6 +670,11 @@ void LogThreadSnapshot(const char* when) {
     if (auto* state = t->thread_state()) {
       row.guest_ctx = state->context();
     }
+    if (t->pcr_ptr()) {
+      auto* pcr = kernel->memory()->TranslateVirtual<rex::system::X_KPCR*>(t->pcr_ptr());
+      row.stack_end = pcr->stack_end_ptr;
+      row.stack_base = pcr->stack_base_ptr;
+    }
     for (size_t k = 0; k < n_traces; ++k) {
       if (row.nx_handle && traces[k].nx_handle == row.nx_handle) {
         row.exports = traces[k];
@@ -736,7 +746,8 @@ void LogThreadSnapshot(const char* when) {
     }
     std::string stack;
     if (row.guest_ctx && row.has_exports && row.exports.current) {
-      stack = " guest stack " + GuestStack(*row.guest_ctx) + "; host";
+      stack = " guest stack " + GuestStack(*row.guest_ctx, row.stack_end, row.stack_base) +
+              "; host";
     }
     for (int k = 0; k < row.n_returns; ++k) {
       char item[24];

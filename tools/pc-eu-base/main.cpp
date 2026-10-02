@@ -48,8 +48,10 @@ namespace {
 // each frame stores the caller's r1 at 0(r1), and the prologue of a non-leaf
 // function stores LR at -8 of that caller's r1 ("mflr r12; stw r12,-8(r1);
 // stwu r1,-N(r1)"). Only for a thread inside an export, whose guest
-// registers do not move; frames must go up the stack within 256 KiB.
-std::string GuestStack(const PPCContext& ctx) {
+// registers do not move. Every address read must lie inside the thread's
+// own guest stack, [stack_end, stack_base) from its PCR: run 17 walked off
+// the end of a stack without that bound and the heartbeat stopped there.
+std::string GuestStack(const PPCContext& ctx, uint32_t stack_end, uint32_t stack_base) {
   auto* memory = rex::system::kernel_state()->memory();
   auto load = [memory](uint32_t address) {
     const uint8_t* p = memory->TranslateVirtual<const uint8_t*>(address);
@@ -59,10 +61,12 @@ std::string GuestStack(const PPCContext& ctx) {
   std::snprintf(item, sizeof(item), "%08X", uint32_t(ctx.lr));
   std::string out = item;
   uint32_t sp = ctx.r1.u32;
-  const uint32_t top = sp + 0x40000;
-  for (int i = 0; i < 24 && sp; ++i) {
+  if (stack_end >= stack_base || sp < stack_end || sp + 4 > stack_base) {
+    return out;
+  }
+  for (int i = 0; i < 24; ++i) {
     const uint32_t prev = load(sp);
-    if (prev <= sp || prev >= top || (prev & 3)) break;
+    if (prev <= sp || prev + 4 > stack_base || prev - 8 < stack_end || (prev & 3)) break;
     const uint32_t lr = load(prev - 8);
     if (lr < 0x82000000u || lr >= 0x83000000u) break;
     std::snprintf(item, sizeof(item), " %08X", lr);
@@ -210,8 +214,11 @@ class EuBaseApp final : public rex::ReXApp {
       for (const auto& x : threads) {
         if (uint64_t(x->handle()) == t.nx_thread_id) {
           name = x->name();
-          if (t.current && x->thread_state() && x->thread_state()->context()) {
-            stack = "; guest stack " + GuestStack(*x->thread_state()->context());
+          if (t.current && x->thread_state() && x->thread_state()->context() && x->pcr_ptr()) {
+            auto* pcr = rex::system::kernel_state()->memory()->TranslateVirtual<
+                rex::system::X_KPCR*>(x->pcr_ptr());
+            stack = "; guest stack " + GuestStack(*x->thread_state()->context(),
+                                                  pcr->stack_end_ptr, pcr->stack_base_ptr);
           }
         }
       }
