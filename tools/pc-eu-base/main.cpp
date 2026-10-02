@@ -16,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,7 +29,10 @@
 #include <rex/diagnostics/export_stubs.h>
 #include <rex/logging.h>
 #include <rex/rex_app.h>
+#include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/thread_state.h>
+#include <rex/system/xmemory.h>
 #include <rex/system/xthread.h>
 
 #include "gta4_init.h"
@@ -39,6 +43,64 @@ REXCVAR_DEFINE_BOOL(pc_audio, false, "pc-eu-base",
                     "audio system: XAudioRegisterRenderDriverClient then fails the same way on both");
 
 namespace {
+
+// The guest call chain of a thread from its r1, through the PPC back chain:
+// each frame stores the caller's r1 at 0(r1), and the prologue of a non-leaf
+// function stores LR at -8 of that caller's r1 ("mflr r12; stw r12,-8(r1);
+// stwu r1,-N(r1)"). Only for a thread inside an export, whose guest
+// registers do not move; frames must go up the stack within 256 KiB.
+std::string GuestStack(const PPCContext& ctx) {
+  auto* memory = rex::system::kernel_state()->memory();
+  auto load = [memory](uint32_t address) {
+    const uint8_t* p = memory->TranslateVirtual<const uint8_t*>(address);
+    return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]);
+  };
+  char item[16];
+  std::snprintf(item, sizeof(item), "%08X", uint32_t(ctx.lr));
+  std::string out = item;
+  uint32_t sp = ctx.r1.u32;
+  const uint32_t top = sp + 0x40000;
+  for (int i = 0; i < 24 && sp; ++i) {
+    const uint32_t prev = load(sp);
+    if (prev <= sp || prev >= top || (prev & 3)) break;
+    const uint32_t lr = load(prev - 8);
+    if (lr < 0x82000000u || lr >= 0x83000000u) break;
+    std::snprintf(item, sizeof(item), " %08X", lr);
+    out += item;
+    sp = prev;
+  }
+  return out;
+}
+
+// Run 15/16: the main thread waits in sub_821200D0, "while (sub_82124490())
+// Sleep(1)", i.e. while the bytes at 83137BB7 and 83137BC9 are both set.
+// sub_82124080 (from the game's init) sets them; the boot screen sequencer
+// sub_821238D0 (drawn and updated by sub_821235B0) clears 83137BC9 when the
+// time of the current entry of its table (83137D18, 400 bytes each, index at
+// 83137BC0) has run out and the entry's type (+8) is 3. Its time accumulates
+// from mftb at 83137BB8, unless the byte at 83137BC8 is set.
+void LogBootSequencer() {
+  auto* memory = rex::system::kernel_state()->memory();
+  auto u8 = [memory](uint32_t a) { return *memory->TranslateVirtual<const uint8_t*>(a); };
+  auto u32 = [memory](uint32_t a) {
+    const uint8_t* p = memory->TranslateVirtual<const uint8_t*>(a);
+    return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]);
+  };
+  auto f32 = [&u32](uint32_t a) {
+    const uint32_t v = u32(a);
+    float f;
+    std::memcpy(&f, &v, 4);
+    return f;
+  };
+  const uint32_t index = u32(0x83137BC0);
+  const uint32_t entry = 0x83137D18 + (index < 64 ? index : 0) * 400;
+  REXLOG_INFO("boot sequencer: active {} (83137BB7), main waits on {} (83137BC9), paused {} "
+              "(83137BC8), index {}, time {:.3f} (delta {:.4f}), scale {:.4f}; entry {:08X}: "
+              "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+              u8(0x83137BB7), u8(0x83137BC9), u8(0x83137BC8), index, f32(0x83137BB8),
+              f32(0x83137BBC), f32(0x82041714), entry, u32(entry), u32(entry + 4),
+              u32(entry + 8), u32(entry + 12), u32(entry + 16), u32(entry + 20));
+}
 
 class EuBaseApp final : public rex::ReXApp {
  public:
@@ -110,6 +172,13 @@ class EuBaseApp final : public rex::ReXApp {
                                std::chrono::steady_clock::now() - start)
                                .count();
       LogHeartbeat(seconds);
+      // Every minute the count of each export, so two runs can be compared
+      // over time and not only on first calls (06 section 19).
+      if (seconds >= next_summary_s_) {
+        next_summary_s_ = seconds + 60;
+        const std::string when = "at " + std::to_string(seconds) + " s";
+        rex::diagnostics::LogExportCallSummary(when.c_str());
+      }
       lock.lock();
     }
   }
@@ -122,6 +191,7 @@ class EuBaseApp final : public rex::ReXApp {
     uint64_t calls = 0;
     rex::diagnostics::GetExportCallTotals(&distinct, &calls);
     REXLOG_INFO("heartbeat {} s: exports {} distinct, {} calls", seconds, distinct, calls);
+    LogBootSequencer();
     rex::diagnostics::ExportThreadSnapshot traces[64];
     const size_t n = rex::diagnostics::SnapshotExportThreads(traces, 64);
     // Only tries: a guest thread may hold the kernel's global lock for good
@@ -136,15 +206,19 @@ class EuBaseApp final : public rex::ReXApp {
     for (size_t i = 0; i < n; ++i) {
       const auto& t = traces[i];
       std::string name = "?";
+      std::string stack;
       for (const auto& x : threads) {
         if (uint64_t(x->handle()) == t.nx_thread_id) {
           name = x->name();
+          if (t.current && x->thread_state() && x->thread_state()->context()) {
+            stack = "; guest stack " + GuestStack(*x->thread_state()->context());
+          }
         }
       }
       if (t.current) {
-        REXLOG_INFO("  thread {:08X} '{}': IN {} for {:.1f} s (guest LR {:08X}), {} export calls",
+        REXLOG_INFO("  thread {:08X} '{}': IN {} for {:.1f} s (guest LR {:08X}), {} export calls{}",
                     uint32_t(t.nx_thread_id), name, t.current, t.seconds_in_current, t.guest_lr,
-                    t.calls);
+                    t.calls, stack);
       } else {
         REXLOG_INFO("  thread {:08X} '{}': in guest code, last export {} (guest LR {:08X}), {} "
                     "export calls",
@@ -157,6 +231,7 @@ class EuBaseApp final : public rex::ReXApp {
   std::mutex mutex_;
   std::condition_variable cv_;
   bool stop_ = false;
+  long long next_summary_s_ = 60;
 };
 
 }  // namespace

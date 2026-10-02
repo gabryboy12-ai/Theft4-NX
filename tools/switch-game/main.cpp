@@ -90,6 +90,7 @@
 #include <rex/system/null_graphics_system.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
+#include <rex/system/xmemory.h>
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
 
@@ -566,6 +567,70 @@ struct ThreadRow {
   u32 guest_r1 = 0;
 };
 
+// Guest memory read big-endian (the addresses below are mapped: stacks and
+// the game's data section).
+uint32_t GuestU32(uint32_t address) {
+  const uint8_t* p =
+      rex::system::kernel_state()->memory()->TranslateVirtual<const uint8_t*>(address);
+  return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]);
+}
+
+// The guest call chain from r1 through the PPC back chain: 0(r1) holds the
+// caller's r1, and a non-leaf prologue stores LR at -8 of the caller's r1
+// ("mflr r12; stw r12,-8(r1); stwu r1,-N(r1)"). Only for a thread inside an
+// export, whose guest registers do not move. A function that saves LR through
+// __savegprlr leaves that slot to the generated code, so the frame above it
+// can show a stale return address (run 16 analysis, 06 section 19).
+std::string GuestStack(const PPCContext& ctx) {
+  char item[16];
+  std::snprintf(item, sizeof(item), "%08X", uint32_t(ctx.lr));
+  std::string out = item;
+  uint32_t sp = ctx.r1.u32;
+  const uint32_t top = sp + 0x40000;
+  for (int i = 0; i < 24 && sp; ++i) {
+    const uint32_t prev = GuestU32(sp);
+    if (prev <= sp || prev >= top || (prev & 3)) break;
+    const uint32_t lr = GuestU32(prev - 8);
+    if (lr < 0x82000000u || lr >= 0x83000000u) break;
+    std::snprintf(item, sizeof(item), " %08X", lr);
+    out += item;
+    sp = prev;
+  }
+  return out;
+}
+
+// Runs 15 and 16 (PC too): the main thread waits in sub_821200D0, "while
+// (sub_82124490()) Sleep(1)", i.e. while the bytes at 83137BB7 and 83137BC9
+// are both set. The boot screen sequencer sub_821238D0 clears 83137BC9; its
+// entry 0 (table at 83137D18, 400 bytes each, index at 83137BC0) lasts 6000
+// ms and has type 1: it moves on only when the boot sound it starts
+// (sub_822FAD50 on the object at 82D09E00) reaches state 2, or when the word
+// at 82B11188 is not 0. Its time accumulates at 83137BB8 unless 83137BC8 is
+// set. Addresses of the European base executable (config-eu-base).
+void LogBootSequencer() {
+  auto u8 = [](uint32_t a) {
+    return *rex::system::kernel_state()->memory()->TranslateVirtual<const uint8_t*>(a);
+  };
+  auto f32 = [](uint32_t a) {
+    const uint32_t v = GuestU32(a);
+    float f;
+    std::memcpy(&f, &v, 4);
+    return double(f);
+  };
+  const uint32_t index = GuestU32(0x83137BC0);
+  const uint32_t entry = 0x83137D18 + (index < 64 ? index : 0) * 400;
+  const uint32_t sound_object = 0x82D09E00;
+  const uint32_t sound = GuestU32(sound_object + 16);
+  GAME_INFO("boot sequencer: active %u, main waits on %u, paused %u, index %u, time %.3f s; "
+            "entry %08X: duration %d ms, type %u; skip word 82B11188 = %08X; boot sound object: "
+            "id %04X, sound %08X, state %d",
+            u8(0x83137BB7), u8(0x83137BC9), u8(0x83137BC8), index, f32(0x83137BB8), entry,
+            int32_t(GuestU32(entry)), GuestU32(entry + 8), GuestU32(0x82B11188),
+            GuestU32(sound_object + 4) >> 16, sound,
+            sound >= 0x40000000u && sound < 0xA0000000u ? int(GuestU32(sound + 4) & 0xFFFF)
+                                                        : -1);
+}
+
 // One line per XThread. Each thread is paused (svcSetThreadActivity) only
 // long enough to read its registers and scan its stack; a thread the game
 // had already suspended is read but not resumed by us.
@@ -678,6 +743,9 @@ void LogThreadSnapshot(const char* when) {
       }
     }
     std::string stack;
+    if (row.guest_ctx && row.has_exports && row.exports.current) {
+      stack = " guest stack " + GuestStack(*row.guest_ctx) + "; host";
+    }
     for (int k = 0; k < row.n_returns; ++k) {
       char item[24];
       std::snprintf(item, sizeof(item), " +0x%" PRIx64, row.returns[k] - g_module_base);
@@ -723,11 +791,13 @@ void LogNullGpu() {
             g.waiting_opcode ? "; IN WAIT_REG_MEM for more than 1 s" : "");
 }
 
-// Every 10 s: one line; at 5, 20, 60 s and then every 120 s: the snapshot.
+// Every 10 s: one line; every 60 s: the call count of each export; at 5, 20,
+// 60 s and then every 120 s: the snapshot.
 struct Heartbeat {
   u64 start = 0;
   u64 next_line_s = 10;
   u64 next_snapshot_s = 5;
+  u64 next_summary_s = 60;
 
   void Tick() {
     const u64 seconds = armTicksToNs(armGetSystemTick() - start) / 1'000'000'000ull;
@@ -742,12 +812,21 @@ struct Heartbeat {
                 seconds, distinct, calls, a.mapped_blocks, a.peak_mapped_blocks, a.pool_blocks);
       LogClock();
       LogNullGpu();
+      LogBootSequencer();
       if (REXCVAR_GET(nx_input)) {
         uint64_t published = 0, reads = 0;
         theft4::nx_input::GetCounters(&published, &reads);
         GAME_INFO("input: %" PRIu64 " pad states published, %" PRIu64 " XamInputGetState reads",
                   published, reads);
       }
+    }
+    // Every minute the count of each export, as pc-eu-base does, so the two
+    // runs compare over time and not only on first calls (06 section 19).
+    if (seconds >= next_summary_s) {
+      next_summary_s = seconds + 60;
+      char when[32];
+      std::snprintf(when, sizeof(when), "at %" PRIu64 " s", seconds);
+      rex::diagnostics::LogExportCallSummary(when);
     }
     if (seconds >= next_snapshot_s) {
       next_snapshot_s = next_snapshot_s < 20 ? 20 : next_snapshot_s < 60 ? 60 : seconds + 120;
