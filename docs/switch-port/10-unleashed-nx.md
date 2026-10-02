@@ -9,7 +9,7 @@ in portatile e 1536x864 in dock (scala 0,9 e 0,8 della finestra). Letto il
 | Clone in `/c/dev/refs/` | Repository | Stato |
 |---|---|---|
 | `unleashed-naga` | github.com/NaGaa95/UnleashedRecomp-NX | `84932ed` "0.0.3" (port di NaGa del 2026-07-04 su un lavoro del 19/05) |
-| `unleashed-chansey` | github.com/ChanseyIsTheBest/UnleashedRecomp-NX | `b346e37`: sopra 0.0.3, il ramo `switch-perf-final-0.0.4` fuso con tre PR |
+| `unleashed-chansey` | github.com/ChanseyIsTheBest/UnleashedRecomp-NX | `b346e37` (tag `1.0.0`): sopra 0.0.3, il ramo `switch-perf-final-0.0.4` fuso con tre PR; dal 2026-10-02 il clone è su `origin/switch-1.0.0` = `1f4803d`, il codice della 1.0.0 (§12) |
 | `UnleashedRecomp` | hedge-dev/UnleashedRecomp | upstream PC |
 
 **Il commit `d264d2a` ("Switch: performance work, final build settings,
@@ -381,3 +381,151 @@ ReXGlue (la strada di tutti i run fin qui), la sostituzione del D3D equivale a
 nfsmw-nx per non legarsi agli indirizzi. Da UnleashedRecomp-NX si prendono le
 **regole NVK** (§8), la **diagnostica** (§9) e la **procedura PGO** (§2), che
 valgono con qualunque renderer.
+
+## 12. Release 1.0.0 (letta il 2026-10-02)
+
+Note della release: più prestazioni, corretta la regressione degli occhi scuri
+della 0.0.3 (in realtà presente da 0.0.4), funziona in qualsiasi cartella,
+clock GPU a 460 MHz in portatile. Chansey (Discord): il guadagno viene da un
+profiler CPU nuovo centrato sui cali di frame (esplosioni, scontri con molti
+oggetti) e dalle ottimizzazioni trovate con quello nel codice del gioco.
+
+### Dove sta il codice
+
+**Il tag `1.0.0` punta a `b346e37`, ma il codice della 1.0.0 non è nei commit
+precedenti al tag.** Fra il merge `1aa574c` (0.0.4) e il tag ci sono solo:
+
+| Commit | Data | File | Descrizione | Tipo |
+|---|---|---|---|---|
+| `8ecdf2e` | 2026-09-30 | `docs/SWITCH-PERFORMANCE-AUDIT.md` (+109/−9) | audit della build finale 0.0.4 | documentazione |
+| `347ee17` | 2026-09-30 | — | merge della PR #2 | merge |
+| `4a69709` | 2026-09-30 | `docs/SWITCH-PERFORMANCE-AUDIT.md` (+158/−19) | sezione completa sul driver nell'audit | documentazione |
+| `b346e37` | 2026-09-30 | — | merge della PR #3 (= tag `1.0.0`) | merge |
+
+Il codice è in **un solo commit, `1f4803d`** (2026-10-02, "Switch 1.0.0: dark
+eyes fixed, rounds 11-16, new PGO profile, any SD folder"), sul ramo
+**`switch-1.0.0`**, figlio di `4a69709`: il tag non lo contiene. 439 file (366 sono i `.gcda` del profilo PGO), tra
+cui `gpu/video.cpp` (+1390), `patches/XenonRecomp.patch` (+2589),
+`patches/native_hot_patches.cpp` (1288, nuovo), `patches/audio_dsp_patches.cpp`
+(698, nuovo), `patches/message_dispatch.cpp` (600, nuovo),
+`os/switch/cpu_profiler_switch.cpp` (+409), `docs/SWITCH-PERFORMANCE.md`
+(+450), `docs/SWITCH-DARK-EYES.md` (293, nuovo) e il profilo PGO del round 16.
+Clone aggiornato in `/c/dev/refs/unleashed-chansey`, ora su
+`origin/switch-1.0.0`. Le modifiche sotto vengono dai round 11–16 di
+`docs/SWITCH-PERFORMANCE.md`, tutte con una chiave `[Switch]` propria e
+"image-identical".
+
+### Le modifiche, una per una
+
+CPU/GPU; Sonic = legata al codice o ai dati di Sonic Unleashed (indirizzi,
+strutture, librerie CRI/Havok), generale = vale per qualunque gioco
+ricompilato; noi = applicabile a switch-game.
+
+| Modifica (round) | CPU/GPU | Sonic o generale | Applicabile a noi |
+|---|---|---|---|
+| Dispatch dei messaggi a tabella (11): 227 dispatcher letti all'avvio, una ricerca invece di 200 confronti | CPU | Sonic (motore Hedgehog) | idea sì (trovare con il profiler i dispatcher lineari di GTA IV), codice no |
+| Insieme esatto dei `type_info` (11): niente confronti di stringhe | CPU | generale per giochi MSVC con RTTI | sì, da verificare che GTA IV confronti `type_info` per nome |
+| Funzioni calde native con hash FNV e modo di verifica (11–13, 15) | CPU | Sonic (indirizzi), il metodo è generale | il metodo sì (hash del codice guest all'avvio, verifica registri/memoria): è quello da usare per qualunque funzione nativa di GTA IV |
+| Present senza attesa della registrazione (11) | CPU/GPU | legata al loro renderer | quando avremo un renderer |
+| Kernel del mixer CRI con registri locali (11, 15: ADX, resampler, riverbero) | CPU | Sonic (CRI) | no (GTA IV ha il suo motore audio); il metodo `switch-localize.py` sì |
+| LZX con stato nei registri, cache delle pipeline scritta solo dopo i miss, elenchi di cartelle senza una query per file (11) | CPU, I/O | generale | LZX: GTA IV lo usa con stato persistente, già coperto da `gta4_lzx_hooks.cpp` (§3); gli altri due sì |
+| Passo di generazione del codice (11): funzioni foglia con i registri in locali, accessi D-form a 64 bit, tabelle VMX costanti | CPU | generale (XenonRecomp) | da riportare in `rexglue` (06 §13): è il lavoro più trasferibile |
+| Attese di risorsa a 0,5 ms invece di `Sleep(5)` (12) | CPU | Sonic (cinque cicli del loader) | idea sì: cercare i cicli `Sleep` del caricamento di GTA IV (ne abbiamo appena trovato uno all'avvio, 06 §19) |
+| Confronti in virgola mobile inline (12): 11.669 chiamate rimosse | CPU | generale | sì, nel generatore |
+| Uscita dalla sezione critica senza fence (12) | CPU | generale (kernel HLE) | sì, nel nostro `RtlLeaveCriticalSection`, da verificare con l'audio |
+| Profiler dei fotogrammi lenti (12–13) | diagnostica | generale | sì, piano in 06 §20 |
+| Light field nativo (13), prefetch del render walk (13), prefetch del grafo di scena (15) | CPU | Sonic | no; i prefetch `dcbt` come prefetch host (13) sì, nel generatore |
+| Attese dei lock per oggetto (13) | CPU | legata al loro D3D | no |
+| Vibrazione deduplicata (13): uno stop per IPC HID solo una volta | CPU | generale | sì in `nx_input` quando ci sarà la vibrazione |
+| Gamma saltata con esponente 1 (13) | GPU | legata al renderer | quando avremo un renderer |
+| Meno cambi di modo FPCR (14) | CPU | generale (XenonRecomp) | sì, nel generatore (5 % del thread principale da loro) |
+| `memcpy`/`memset` guest di dimensione costante inline (14) | CPU | generale | sì, nel generatore |
+| Risvegli mirati del dispatcher e semafori che svegliano uno solo (14) | CPU | generale (kernel HLE) | sì: da confrontare con `KeWaitForMultipleObjects` e i semafori di ReXGlue |
+| Sezioni critiche: CAS forte e breve spin (14) | CPU | generale | sì, da verificare |
+| Indice dei modificatori dell'interfaccia, cache più grande (14, 15) | CPU | Sonic | no |
+| Multiply-add espliciti (`-ffp-contract=off` + `fma` solo dove il guest le ha) (15) | CPU, fedeltà | generale | sì, nel generatore: rende identiche le ricompilazioni |
+| `1/sqrt` scalare dei prodotti scalari (15) | CPU | generale | sì, nel generatore |
+| Allocatore a pool nativo, animazione dei materiali, cluster localizzati (15) | CPU | Sonic | no (il metodo sì) |
+| Copie dei resolve decise al submit, campionamento di profondità in sola lettura, ripristino di profondità in alias, costanti dei vertici conservate, reset delle query uno per uno (15) | GPU | legate al loro renderer (D3D sostituito) | solo come idee per il renderer nativo; il reset delle query uno per uno (NVK usa il copy engine per più query) vale per qualunque renderer su NVK |
+| `vkCmdDrawIndirect` evitato sul percorso pre-Turing del fork Mesa (15) | GPU | generale (driver) | sì, regola NVK (11-vulkan-probe.md) |
+| Occhi scuri (16): bug del loro traduttore di shader (alpha-test sinking che stampava le righe non rinominate di un filtro d'ombra); verifica di 1.385 shader contro la 0.0.3 | GPU, fedeltà | loro (XenosRecomp modificato) | no; il metodo di verifica (tradurre con due versioni e confrontare su ingressi uguali) sì |
+| PGO col profilo del round 16 (1.0.0) | CPU | generale | sì, procedura in §2 e 06 §13 |
+| Boost GPU in portatile 460,8 MHz (1.0.0) | GPU | generale | sì, sotto |
+| Nessun file di log per default (1.0.0) | I/O | generale | non ora (servono i log); per una release sì |
+| `config.toml` con tutte le opzioni (1.0.0) | — | generale | sì per una release (`game.toml`) |
+| Qualsiasi cartella della SD (1.0.0) | — | generale | sì, sotto |
+
+### Il profiler
+
+Descritto in 06 §20 con il piano per switch-game. In breve: thread
+registrati; un campionatore ogni 2 ms che scarta i thread che non hanno girato
+(`InfoType_ThreadTickCount`), mette in pausa gli altri
+(`svcSetThreadActivity` + `svcGetThreadContext3`), legge PC e, se in una SVC,
+gli indirizzi di ritorno sullo stack, e li riprende; report ogni 30 s in una
+sola scrittura, nominato offline con `nm` (`tools/switch-cpu-profile.py`). I
+fotogrammi lenti: `FrameWorkEnd`/`FrameWorkStart` attorno a `Present`, il
+thread del gioco campionato sempre (anche in attesa) in un anello di 2 s, i
+campioni dei fotogrammi oltre soglia in una sezione propria del report. Lo
+stall watchdog (`stall_watch_switch.cpp`): nessun fotogramma da N s → per ogni
+thread "ha girato?", PC, LR, frame pointer, ritorni sullo stack, SVC in corso;
+`[hitch]` per i fotogrammi oltre 100 ms.
+
+### "Funziona in qualsiasi cartella"
+
+`os/switch/process_switch.cpp`: legge `__system_argv[0]` (il percorso
+dell'NRO che hbmenu e i forwarder passano come `argv[0]`, impostato da
+`argvSetup()` prima dei costruttori statici), normalizza `\` in `/`, aggiunge
+`sdmc:` se manca, e lo accetta solo se comincia con `sdmc:/` e finisce in
+`.nro`; altrimenti `sdmc:/switch/UnleashedRecomp/UnleashedRecomp.nro`. La
+cartella dell'NRO diventa la radice di file del gioco, `config.toml`,
+salvataggi, cache, `install/` e log (`user/paths.cpp`). NRO alla radice della
+SD: `sdmc:/`.
+
+**Da noi** `kRootDir = "sdmc:/switch/theft4"` e
+`kGameDir = "sdmc:/switch/theft4/game"` sono fissi in
+`tools/switch-game/main.cpp` (con log, crash log, `game.toml`, `cache`,
+`cache1`, `user`, `saves`, `marketplace`, `runtime-cache` sotto). **Applicabile
+così com'è**: stessa funzione, radice = cartella dell'NRO, gioco in
+`<radice>/game`, ripiego su `sdmc:/switch/theft4` se `argv[0]` non serve
+(nxlink passa un percorso diverso). Va fatto prima di `StartLogging()` (il log
+sta nella radice). Non urgente: una riga in più nel log con la radice scelta.
+
+### "Clock GPU a 460 MHz in portatile"
+
+`os/switch/perf_switch.cpp` (dichiaratamente da `sdk/src/ui/switch_apm.cpp` di
+nfsmw-nx), su un thread libnx proprio (0x10000 di stack, priorità 0x3B):
+`apmInitialize`; se `apmGetPerformanceMode` non è `Normal` (portatile) non fa
+niente; legge la configurazione attuale e i clock reali con `clkrst` (GPU,
+EMC); `apmSetPerformanceConfiguration(Normal, 0x92220008)` (GPU 460,8 MHz, RAM
+1331,2: la coppia dei giochi commerciali; 0x92220007 alzerebbe la RAM a 1600);
+poi controlla i clock ogni 150 ms per 1,5 s, perché apm ritorna prima che pcv
+li applichi; se la RAM si è mossa di più di 20 MHz rimette la configurazione
+di prima. La sessione apm resta aperta. nfsmw-nx fa lo stesso con una tabella
+di configurazioni e un controllo periodico della RAM
+(`RexSwitchApmVigilar`), e in dock non chiede niente; nessuno dei due la
+riapplica al cambio dock/portatile.
+
+**Da noi:** in `GameMain`, dopo `StartLogging()` (per scrivere il risultato)
+e prima di creare il runtime, su un thread libnx proprio come loro, dietro una
+cvar (`nx_handheld_gpu_boost`). **Quando**: solo con una GPU vera; con la GPU
+nulla non c'è lavoro di GPU da accelerare e si cambierebbe solo il consumo.
+**Al cambio dock/portatile**: un `appletHook` su
+`AppletHookType_OnPerformanceMode` che, entrando in `Normal`, la applica se non
+è già stata applicata (caso: avvio in dock, poi sganciata); in dock la
+configurazione di `Boost` resta quella del sistema.
+
+### Tabella finale
+
+| Modifica | Guadagno dichiarato | Applicabile a noi | Quando |
+|---|---|---|---|
+| Round 11 (dispatch, natives, mixer, generazione del codice) | 57,7 FPS contro 52 (858x482, CPU a 1020 MHz) | generazione del codice e metodo dei natives sì; dispatch e mixer no | generatore: quando il gioco gira (06 §13); natives: dopo il profiler |
+| Round 12 (attese di risorsa, FP compare inline, profiler dei fotogrammi lenti) | 59 contro 58 FPS all'hub, +5 FPS in esplosioni e impatti | FP compare e profiler sì; attese di risorsa come idea | generatore: con la grafica; profiler: con la GPU vera (06 §20) |
+| Round 13 (light field, prefetch, lock per oggetto) | "nettamente più veloce" nelle scene intense di Jungle Joyride | prefetch `dcbt` nel generatore | con la grafica |
+| Round 14 (FPCR, memcpy inline, risvegli mirati, sezioni critiche) | non isolato (FPCR: 5,3 % dei campioni del thread principale; risvegli: 2/3 dei campioni del sound server) | sì (generatore e kernel HLE) | kernel: dopo l'audio (06 §19); generatore: con la grafica |
+| Round 15 CPU (ADX, multiply-add espliciti, pool, cluster) | non isolato | multiply-add espliciti e `1/sqrt` scalare sì | con la grafica |
+| Round 15 GPU (copie al submit, profondità in sola lettura, …) | 39,7 contro 37,7 FPS in un punto limitato dalla GPU | solo idee (renderer diverso); reset delle query uno per uno sì | renderer nativo |
+| Round 16: occhi scuri | correzione (fedeltà) | no (loro traduttore) | — |
+| PGO col profilo del round 16 | non isolato | sì | quando il gioco gira (06 §13) |
+| Boost GPU 460,8 MHz in portatile | non misurato nelle note (GPU da 307,2 a 460,8 MHz) | sì | con la GPU vera |
+| Qualsiasi cartella della SD | comodità | sì | quando si vuole (piccolo) |
+| Nessun log per default, `config.toml` completo | comodità | sì | per una release |
