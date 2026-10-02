@@ -34,9 +34,10 @@
 // stay on in Release, newlib's assert and libstdc++ write only there. Stub
 // exports hit are summarised at the stop and at exit.
 //
-// Exit: hold + for 1 s, then a menu picks one of four ways out (run 15
-// bisects the error the console shows at exit; see "Exit" below and
-// tools/switch-common/nx_exit.h). Never draw on the console after
+// Exit: hold + for 1 s; the process leaves with exit(0) (mode A), or with
+// the cooperative stop of mode D (cvar nx_exit_mode = D); never with
+// svcExitProcess nor with paused threads (run 15, 09-rules.md section 9; see
+// "Exit" below and tools/switch-common/nx_exit.h). Never draw on the console after
 // consoleExit (run 11): console output goes through ConsolePrint under
 // g_console_mutex, and CloseConsole shuts it once.
 //
@@ -105,11 +106,9 @@ REXCVAR_DEFINE_BOOL(nx_null_gpu, true, "Switch",
 REXCVAR_DEFINE_BOOL(nx_input, true, "Switch",
                     "Give the game the Switch controller as its 360 pad (nx_input.h). false: "
                     "no input system, XamInputGetState says not connected (run 14)");
-REXCVAR_DEFINE_STRING(nx_exit_mode, "", "Switch",
-                      "Exit mode at + (hold 1 s): A, B, C or D (nx_exit.h); empty: the menu "
-                      "on screen asks");
-
-extern "C" void __appExit(void);
+REXCVAR_DEFINE_STRING(nx_exit_mode, "A", "Switch",
+                      "Exit at + (hold 1 s): A = exit(0) with the threads alive, D = every "
+                      "thread told to end and joined for 2 s, then exit(0) (nx_exit.h)");
 
 namespace {
 
@@ -205,15 +204,7 @@ bool DurableWriteBounded(const char* data, size_t size) {
   return true;
 }
 
-// Set once the exit has paused the game's threads: one of them may hold the
-// log mutex for good, so from then on every write waits at most 200 ms.
-std::atomic<bool> g_exiting{false};
-
 void DurableWrite(const char* data, size_t size) {
-  if (g_exiting.load(std::memory_order_relaxed)) {
-    DurableWriteBounded(data, size);
-    return;
-  }
   std::lock_guard<std::timed_mutex> lock(g_log_file_mutex);
   DurableWriteLocked(data, size);
 }
@@ -307,7 +298,7 @@ bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
 
 // The exit mode chosen at + (0 until then) and its step count. Each step
 // goes first to game-exit.log (nx_exit::Step: write + fsync on a descriptor
-// opened at start-up), then, while no thread is paused, to game.log too.
+// opened at start-up), then to game.log.
 constexpr const char* kExitStepPath = "sdmc:/switch/theft4/game-exit.log";
 char g_exit_mode = 0;
 int g_exit_step = 0;
@@ -317,11 +308,9 @@ void ExitStep(const char* what) {
     return;
   }
   const char* line = theft4::nx_exit::Step(g_exit_mode, ++g_exit_step, what);
-  if (!g_exiting.load()) {
-    char text[300];
-    const int n = std::snprintf(text, sizeof(text), "[game] %s", line);
-    DurableWriteBounded(text, size_t(n < int(sizeof(text)) ? n : int(sizeof(text)) - 1));
-  }
+  char text[300];
+  const int n = std::snprintf(text, sizeof(text), "[game] %s", line);
+  DurableWriteBounded(text, size_t(n < int(sizeof(text)) ? n : int(sizeof(text)) - 1));
 }
 
 u64 CallerOffset(const void* return_address) {
@@ -342,9 +331,7 @@ thread_local bool t_in_termination_log = false;
 
 void LogTermination(const char* what, int code, const void* caller) {
   ExitStep(what);
-  // With the threads paused (modes B, C) the lock malloc and the logger need
-  // may be held for good: the step line above is all that is written.
-  if (t_in_termination_log || !g_logging_ready || g_exiting.load()) {
+  if (t_in_termination_log || !g_logging_ready) {
     return;
   }
   t_in_termination_log = true;
@@ -360,7 +347,9 @@ void LogTermination(const char* what, int code, const void* caller) {
 
 // Link-time wrappers (-Wl,--wrap=exit,--wrap=_exit,--wrap=_Exit,--wrap=abort,
 // --wrap=svcExitProcess): every reference in the NRO, newlib and libnx
-// included, reaches these first.
+// included, reaches these first. Nothing of ours calls svcExitProcess any
+// more (run 15): its wrapper only traces a call from libnx (fatal, or the
+// applet's exit without a loader).
 extern "C" {
 [[noreturn]] void __real_exit(int code);
 [[noreturn]] void __real__exit(int code);
@@ -577,10 +566,6 @@ struct ThreadRow {
   u32 guest_r1 = 0;
 };
 
-// Set by the exit once every XThread it found is paused: the snapshot then
-// reads them as they are and resumes none.
-std::atomic<bool> g_threads_paused_for_exit{false};
-
 // One line per XThread. Each thread is paused (svcSetThreadActivity) only
 // long enough to read its registers and scan its stack; a thread the game
 // had already suspended is read but not resumed by us.
@@ -633,7 +618,6 @@ void LogThreadSnapshot(const char* when) {
 
   u64 self_id = 0;
   svcGetThreadId(&self_id, CUR_THREAD_HANDLE);
-  const bool exit_paused = g_threads_paused_for_exit.load();
   for (ThreadRow& row : rows) {
     if (!row.nx_handle) {
       continue;
@@ -642,7 +626,7 @@ void LogThreadSnapshot(const char* when) {
     if (R_SUCCEEDED(svcGetThreadId(&id, row.nx_handle)) && id == self_id) {
       continue;
     }
-    row.pause_rc = exit_paused ? 0 : svcSetThreadActivity(row.nx_handle, ThreadActivity_Paused);
+    row.pause_rc = svcSetThreadActivity(row.nx_handle, ThreadActivity_Paused);
     ThreadContext ctx{};
     row.context_rc = svcGetThreadContext3(&ctx, row.nx_handle);
     if (R_SUCCEEDED(row.context_rc)) {
@@ -665,7 +649,7 @@ void LogThreadSnapshot(const char* when) {
       row.guest_lr = u32(row.guest_ctx->lr);
       row.guest_r1 = row.guest_ctx->r1.u32;
     }
-    if (!exit_paused && R_SUCCEEDED(row.pause_rc)) {
+    if (R_SUCCEEDED(row.pause_rc)) {
       svcSetThreadActivity(row.nx_handle, ThreadActivity_Runnable);
     }
   }
@@ -705,9 +689,7 @@ void LogThreadSnapshot(const char* when) {
                 row.handle, row.thread_id, row.name.c_str(), row.guest ? "guest" : "host",
                 row.running ? ", running" : ", not running", exports, row.guest_lr,
                 row.guest_r1, row.pc - g_module_base, row.lr - g_module_base, stack.c_str(),
-                exit_paused                   ? " (paused for the exit)"
-                : R_SUCCEEDED(row.pause_rc) ? ""
-                                              : " (already paused by the game)");
+                R_SUCCEEDED(row.pause_rc) ? "" : " (already paused by the game)");
     } else {
       GAME_INFO("  thread %08X id %u '%s' %s%s: %s; guest lr %08X r1 %08X; host context not "
                 "read (handle %08X, pause rc 0x%X, context rc 0x%X)",
@@ -776,62 +758,52 @@ struct Heartbeat {
   }
 };
 
-// What + records before leaving: where the threads are, the exports and
-// stubs called, the guest memory peak.
+// What + records before leaving, with the game's threads still running:
+// the exports and stubs called, the guest memory, the clock, the null GPU.
+// No thread snapshot: it pauses each thread, and nothing pauses threads on
+// the way out any more.
 void LogExitSummary() {
   static std::atomic<bool> done{false};
   if (done.exchange(true)) {
     return;
   }
-  LogThreadSnapshot("at exit");
   rex::diagnostics::LogExportCallSummary("at exit");
   LogStubSummaryOnce("at exit");
   LogArena("at exit");
+  LogClock();
+  LogNullGpu();
   rex::FlushLogging();
 }
 
-// ── Exit (run 15: four modes, tools/switch-common/nx_exit.h) ───────────────
+// ── Exit (09-rules.md section 9, tools/switch-common/nx_exit.h) ────────────
 //
-// + held for 1 s (or + after a stop) opens a menu, unless the cvar
-// nx_exit_mode names the mode:
-//   A  exit(0), which is what returning from main does (crt0 enters main
-//      with LR = exit): atexit handlers, _exit, __libnx_exit (__appExit, then
-//      back to hbloader). The game's threads still run.
-//   B  every XThread paused (svcSetThreadActivity, rc per thread), summary on
-//      the exit worker (5 s deadline), __appExit on the worker (3 s), then
-//      svcExitProcess. The sequence of run 14.
-//   C  as B without __appExit.
-//   D  every guest thread ends itself at its next export (svcExitThread from
-//      the export entry hook), the null GPU's threads are told to stop, join
-//      for at most 2 s, then exit(0) as A.
-// Every step is in game-exit.log (write + fsync on its own descriptor), and
-// in game.log while no thread is paused.
-// Run 14: + with B ended in "The software was closed because an error
-// occurred" after the summary, with no crash report; the smoke too.
+// + held for 1 s, or the system asking the applet to exit:
+//   A  (default) exit(0), which is what returning from main does (crt0 enters
+//      main with LR = exit): atexit handlers, _exit, __libnx_exit (__appExit,
+//      then back to hbloader). The game's threads still run.
+//   D  (cvar nx_exit_mode = D) every guest thread ends itself at its next
+//      export (svcExitThread from the export entry hook), the null GPU's
+//      threads are told to stop, join for at most 2 s, then exit(0) as A.
+// Run 15: A and D leave cleanly, in the game and in the smoke. The modes that
+// paused every thread and ended in svcExitProcess (B with __appExit, C
+// without) showed "The software was closed because an error occurred" and
+// are gone. Every step is in game-exit.log (write + fsync on its own
+// descriptor) and in game.log.
 
 PadState g_pad;
 
 constexpr size_t kMaxExitThreads = 256;
-constexpr u64 kExitSummaryTimeoutMs = 5000;
-constexpr u64 kAppExitTimeoutMs = 3000;
 constexpr u64 kJoinTimeoutMs = 2000;
 std::vector<rex::system::object_ref<rex::system::XThread>> g_exit_xthreads;  // reserved at start
 Handle g_exit_handles[kMaxExitThreads];
-theft4::nx_exit::PausedThread g_exit_paused[kMaxExitThreads];
-size_t g_exit_paused_count = 0;
-size_t g_exit_xthread_count = 0;
-bool g_exit_have_xthreads = false;
-const char* g_exit_reason = "";
-u64 g_exit_pause_us = 0;
 
 // The XThreads (kernel object table, waited for at most 200 ms) and the
 // threads of the export traces (each with its Horizon handle).
 size_t CollectExitThreadHandles() {
   size_t n = 0;
   if (auto* kernel = rex::system::kernel_state()) {
-    g_exit_have_xthreads = kernel->object_table()->TryGetObjectsByType<rex::system::XThread>(
+    kernel->object_table()->TryGetObjectsByType<rex::system::XThread>(
         &g_exit_xthreads, std::chrono::milliseconds(200));
-    g_exit_xthread_count = g_exit_xthreads.size();
     for (auto& t : g_exit_xthreads) {
       if (auto* host = t->thread(); host && n < kMaxExitThreads) {
         g_exit_handles[n++] = host->nx_kernel_handle();
@@ -844,68 +816,6 @@ size_t CollectExitThreadHandles() {
     g_exit_handles[n++] = traces[k].nx_handle;
   }
   return n;
-}
-
-void ExitSummaryJob(void*) {
-  size_t stopped = 0;
-  for (size_t i = 0; i < g_exit_paused_count; ++i) {
-    stopped += g_exit_paused[i].stopped() ? 1 : 0;
-  }
-  GAME_INFO("exit requested (%s, mode %c): %zu threads paused in %" PRIu64 " us, %zu stopped, "
-            "%zu NOT stopped; XThreads %s (%zu)",
-            g_exit_reason, g_exit_mode, g_exit_paused_count, g_exit_pause_us, stopped,
-            g_exit_paused_count - stopped, g_exit_have_xthreads ? "listed" : "NOT listed",
-            g_exit_xthread_count);
-  for (size_t i = 0; i < g_exit_paused_count; ++i) {
-    const auto& t = g_exit_paused[i];
-    GAME_INFO("  exit pause: handle %08X thread id %" PRIu64 ": svcSetThreadActivity rc 0x%X, "
-              "svcGetThreadContext3 rc 0x%X, pc +0x%" PRIx64 " -> %s",
-              t.handle, t.thread_id, t.pause_rc, t.context_rc,
-              t.pc ? t.pc - g_module_base : 0, t.stopped() ? "stopped" : "NOT STOPPED");
-  }
-  LogExitSummary();
-  LogClock();
-  LogNullGpu();
-  rex::FlushLogging();
-  CloseConsole();
-}
-
-void AppExitJob(void*) {
-  __appExit();
-}
-
-// Modes B and C.
-[[noreturn]] void ExitPaused(bool app_exit) {
-  ExitStep("pausing every XThread (svcSetThreadActivity)");
-  const u64 t0 = armGetSystemTick();
-  const size_t n = CollectExitThreadHandles();
-  g_exit_paused_count =
-      theft4::nx_exit::PauseThreads(g_exit_handles, n, g_exit_paused, kMaxExitThreads);
-  g_exit_pause_us = armTicksToNs(armGetSystemTick() - t0) / 1000;
-  g_threads_paused_for_exit.store(true);
-  g_exiting.store(true);  // from here the steps go to game-exit.log only
-  size_t stopped = 0;
-  for (size_t i = 0; i < g_exit_paused_count; ++i) {
-    stopped += g_exit_paused[i].stopped() ? 1 : 0;
-  }
-  char text[160];
-  std::snprintf(text, sizeof(text),
-                "%zu threads paused, %zu stopped, in %" PRIu64
-                " us; summary on the exit worker (deadline 5 s)",
-                g_exit_paused_count, stopped, g_exit_pause_us);
-  ExitStep(text);
-  const bool summary = theft4::nx_exit::RunOnExitWorker(ExitSummaryJob, nullptr,
-                                                        kExitSummaryTimeoutMs);
-  ExitStep(summary ? "summary finished" : "summary NOT finished within 5 s");
-  if (app_exit) {
-    ExitStep("__appExit on the exit worker (deadline 3 s): userAppExit, __nx_win_exit, "
-             "fsdevUnmountAll, fsExit, timeExit, hidExit, appletExit, smExit; the SD card is "
-             "unmounted, so this is the last step that can be written");
-    theft4::nx_exit::RunOnExitWorker(AppExitJob, nullptr, kAppExitTimeoutMs);
-  } else {
-    ExitStep("no __appExit; next svcExitProcess");
-  }
-  svcExitProcess();  // wrapped: its step is written while the SD card is mounted
 }
 
 // Mode D: guest threads end themselves at their next export.
@@ -951,44 +861,22 @@ void ExitCooperative() {
   ExitStep(text);
 }
 
-[[noreturn]] void ExitGame(char mode, const char* reason) {
+[[noreturn]] void ExitGame(const char* reason) {
+  const char mode = theft4::nx_exit::ParseExitMode(REXCVAR_GET(nx_exit_mode).c_str());
   g_exit_mode = mode;
-  g_exit_reason = reason;
   char text[200];
   std::snprintf(text, sizeof(text), "chosen (%s): %s", reason,
                 theft4::nx_exit::ExitModeDescription(mode));
   ExitStep(text);
-  switch (mode) {
-    case 'B':
-      ExitPaused(true);
-    case 'C':
-      ExitPaused(false);
-    case 'D':
-      ExitCooperative();
-      std::exit(0);
-    default:  // 'A'
-      ExitStep("exit(0), as a return from main; the game's threads still run");
-      std::exit(0);
+  if (g_logging_ready) {
+    LogExitSummary();
   }
-}
-
-void PrintLine(const char* text) {
-  ConsolePrint(text);
-}
-
-// The mode: the cvar, else the menu (0 = cancelled). When the system asks
-// the applet to exit there is no menu: the cvar or A.
-char PickExitMode(bool system_request) {
-  if (char mode = theft4::nx_exit::ParseExitMode(REXCVAR_GET(nx_exit_mode).c_str())) {
-    return mode;
+  if (mode == 'D') {
+    ExitCooperative();
+  } else {
+    ExitStep("exit(0), as a return from main; the game's threads still run");
   }
-  if (system_request) {
-    return 'A';
-  }
-  if (REXCVAR_GET(nx_input)) {
-    theft4::nx_input::Publish(&g_pad, true);  // the game sees nothing pressed
-  }
-  return theft4::nx_exit::ChooseExitMode(&g_pad, PrintLine, ConsoleRefresh, 'A');
+  std::exit(0);
 }
 
 [[noreturn]] void WaitForPlusAndExit(PadState* pad) {
@@ -1004,12 +892,9 @@ char PickExitMode(bool system_request) {
       ConsoleRefresh();
       svcSleepThread(16'000'000);
     }
-    const bool system_request = !plus;
-    if (const char mode = PickExitMode(system_request)) {
-      ExitGame(mode, system_request          ? "the system asked the applet to exit"
-                     : g_stopped.load() ? "+ after the stop"
-                                        : "+");
-    }
+    ExitGame(!plus             ? "the system asked the applet to exit"
+             : g_stopped.load() ? "+ after the stop"
+                                : "+");
   }
 }
 
@@ -1058,16 +943,15 @@ namespace {
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
   // What the exit needs, made now while allocating is safe (ExitGame).
   g_exit_xthreads.reserve(kMaxExitThreads);
-  if (!theft4::nx_exit::StartExitWorker()) {
-    GAME_ERROR("exit worker not created: at + the summary is skipped, svcExitProcess still runs");
-  }
   if (!theft4::nx_exit::OpenStepLog(kExitStepPath)) {
     GAME_ERROR("cannot open %s (errno %d): the exit steps go to game.log only", kExitStepPath,
                errno);
   }
-  GAME_INFO("exit: hold + for 1 s, then the menu (+ A, - B, X C, Y D, B cancel); cvar "
-            "nx_exit_mode '%s'; steps in %s",
-            REXCVAR_GET(nx_exit_mode).c_str(), kExitStepPath);
+  {
+    const char mode = theft4::nx_exit::ParseExitMode(REXCVAR_GET(nx_exit_mode).c_str());
+    GAME_INFO("exit: hold + for 1 s -> mode %c, %s (cvar nx_exit_mode); steps in %s", mode,
+              theft4::nx_exit::ExitModeDescription(mode), kExitStepPath);
+  }
   if (!CheckGameFiles()) {
     WaitForPlusAndExit(&g_pad);
   }
@@ -1160,17 +1044,12 @@ namespace {
     if (input) {
       theft4::nx_input::Publish(&g_pad, false);
     }
-    // + is START for the game; held for 1 s it opens the exit menu.
+    // + is START for the game; held for 1 s it exits.
     if (padGetButtons(&g_pad) & HidNpadButton_Plus) {
       if (!plus_since) {
         plus_since = armGetSystemTick();
       } else if (armTicksToNs(armGetSystemTick() - plus_since) >= 1'000'000'000ull) {
-        plus_since = 0;
-        if (const char mode = PickExitMode(false)) {
-          ExitGame(mode, g_stopped.load() ? "+ after the stop" : "+");
-        }
-        ConsolePrint("back to the game\n");
-        continue;
+        ExitGame(g_stopped.load() ? "+ held after the stop" : "+ held for 1 s");
       }
     } else {
       plus_since = 0;
@@ -1184,7 +1063,7 @@ namespace {
     ConsoleRefresh();
     svcSleepThread(16'000'000);
   }
-  ExitGame(PickExitMode(true), "the system asked the applet to exit");
+  ExitGame("the system asked the applet to exit");
 }
 
 }  // namespace

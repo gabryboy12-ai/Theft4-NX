@@ -1,16 +1,16 @@
-// The exit sequence of switch-game, shared with switch-smoke so the smoke
-// tests the same code (06-game-boot-plan.md section 17):
+// Exit of switch-game and switch-smoke (06-game-boot-plan.md sections 17-19,
+// 09-rules.md section 9).
 //
-//   1. PauseThreads: every given thread but the caller is paused with
-//      svcSetThreadActivity(ThreadActivity_Paused), each result code kept,
-//      and its context read back (svcGetThreadContext3 succeeds only on a
-//      thread that is not running) as the check that it stopped;
-//   2. RunOnExitWorker: the summary runs on a thread created at start-up and
-//      is abandoned at its deadline. A paused thread may hold a lock the
-//      summary needs (malloc, the log file, spdlog, the console), and the
-//      exit must not depend on it;
-//   3. the caller ends the process (svcExitProcess).
+// Run 15 settled it: under hbloader the process leaves with exit(0), never
+// with svcExitProcess nor with the game's threads paused. Two modes remain:
 //
+//   A  (default) exit(0), what returning from main does: atexit handlers,
+//      _exit, __libnx_exit (__appExit, then back to hbloader);
+//   D  (cvar nx_exit_mode = D) every thread is told to end and joined for at
+//      most 2 s, then exit(0) as A.
+//
+// PauseThreads and RunOnExitWorker are no longer on any exit path: only the
+// smoke's pause test uses them (cvar nx_smoke_pause_test, off by default).
 // PauseThreads takes no lock and does not allocate.
 
 #pragma once
@@ -51,12 +51,7 @@ bool StartExitWorker();
 // earlier call makes this return false at once.
 bool RunOnExitWorker(void (*job)(void*), void* arg, u64 timeout_ms);
 
-// ── Exit modes (run 15: bisection of the error at exit) ───────────────────
-//
-//   A  (+)  libnx's standard exit: main returns, working threads still alive
-//   B  (-)  pause every thread, summary, __appExit, svcExitProcess
-//   C  (X)  as B without __appExit
-//   D  (Y)  cooperative: tell every thread to end, join (2 s), return as A
+// ── Exit modes ─────────────────────────────────────────────────────────────
 
 // Steps go to a file of their own, opened at start-up: each line is written
 // and fsync'd on that descriptor (no allocation, no lock), so its last line
@@ -66,15 +61,9 @@ bool OpenStepLog(const char* path);
 // valid until the next call) for a copy in the main log.
 const char* Step(char mode, int n, const char* what);
 
-// The exit menu on the console: + A, - B, X C, Y D, B cancels (returns 0).
-// It first waits for every button to be released. print writes a line on
-// screen; refresh redraws. If the system asks the applet to exit, returns
-// fallback.
-char ChooseExitMode(PadState* pad, void (*print)(const char*), void (*refresh)(), char fallback);
-
-// "A".."D" from a cvar value ("" or anything else: 0, the menu decides).
+// "A" or "D" from the cvar nx_exit_mode; anything else (B and C included,
+// removed after run 15) gives A.
 char ParseExitMode(const char* value);
-
 const char* ExitModeDescription(char mode);
 
 }  // namespace theft4::nx_exit

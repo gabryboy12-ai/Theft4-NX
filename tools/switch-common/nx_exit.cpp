@@ -147,54 +147,12 @@ const char* Step(char mode, int n, const char* what) {
 }
 
 char ParseExitMode(const char* value) {
-  if (!value || !value[0] || value[1]) return 0;
-  const char c = char(value[0] & ~0x20);  // upper case
-  return c >= 'A' && c <= 'D' ? c : 0;
+  return value && (value[0] == 'D' || value[0] == 'd') && !value[1] ? 'D' : 'A';
 }
 
 const char* ExitModeDescription(char mode) {
-  switch (mode) {
-    case 'A':
-      return "libnx standard exit: return from main, threads still alive";
-    case 'B':
-      return "pause every thread, summary, __appExit, svcExitProcess";
-    case 'C':
-      return "pause every thread, summary, svcExitProcess (no __appExit)";
-    case 'D':
-      return "tell every thread to end, join (2 s), return from main";
-    default:
-      return "?";
-  }
-}
-
-char ChooseExitMode(PadState* pad, void (*print)(const char*), void (*refresh)(), char fallback) {
-  print("\nExit mode:  +  A  return from main (libnx standard exit)\n"
-        "            -  B  pause threads, summary, __appExit, svcExitProcess\n"
-        "            X  C  pause threads, summary, svcExitProcess\n"
-        "            Y  D  stop threads cooperatively, join 2 s, return from main\n"
-        "            B  cancel\n");
-  bool released = false;
-  while (appletMainLoop()) {
-    padUpdate(pad);
-    const u64 held = padGetButtons(pad);
-    if (!released) {
-      released = (held & (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_X |
-                          HidNpadButton_Y | HidNpadButton_B)) == 0;
-    } else {
-      const u64 down = padGetButtonsDown(pad);
-      if (down & HidNpadButton_Plus) return 'A';
-      if (down & HidNpadButton_Minus) return 'B';
-      if (down & HidNpadButton_X) return 'C';
-      if (down & HidNpadButton_Y) return 'D';
-      if (down & HidNpadButton_B) {
-        print("exit cancelled\n");
-        return 0;
-      }
-    }
-    refresh();
-    svcSleepThread(16'000'000);
-  }
-  return fallback;
+  return mode == 'D' ? "tell every thread to end, join (2 s), exit(0)"
+                     : "exit(0), as a return from main, threads still alive";
 }
 
 }  // namespace theft4::nx_exit

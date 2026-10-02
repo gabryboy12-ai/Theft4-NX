@@ -150,3 +150,24 @@ Nei documenti, nei commit e nei riepiloghi una correzione è "corretta" solo
 dopo un run sulla console che la mostra funzionare; prima è "da verificare".
 Il run 12 ha smentito la correzione dell'uscita del run 11, dichiarata
 corretta senza prova.
+
+## 9. Uscita: sotto hbloader si esce con `exit(0)`
+
+**Sotto hbloader non si chiude mai con `svcExitProcess` né con la pausa dei
+thread: si esce con `exit(0)`.**
+
+Dati del run 15 (`out/console-runs/run15/`, stesso NRO, quattro modi scelti
+all'uscita, nello smoke e nel gioco): il modo A (`exit(0)`, il ritorno da
+`main`, con i thread vivi) e il modo D (thread fermati in modo cooperativo,
+join per 2 s, poi `exit(0)`) escono puliti; il modo B (pausa di tutti i thread
+con `svcSetThreadActivity`, riepilogo, `__appExit`, `svcExitProcess`) e il
+modo C (come B senza `__appExit`) danno "The software was closed because an
+error occurred", senza report. La causa più probabile è `svcExitProcess`; il
+run 15 non la separa dalla pausa dei thread, perché B e C fanno tutti e due
+l'una e l'altra.
+
+In switch-game e switch-smoke l'uscita è A per default; D resta con la cvar
+`nx_exit_mode = D`. La pausa resta solo come diagnostica (istantanee dei
+thread del gioco; passo 6 dello smoke con la cvar `nx_smoke_pause_test`), mai
+sul percorso d'uscita. Il `--wrap=svcExitProcess` resta come traccia di una
+chiamata da libnx. Da qui la chiusura non è più una priorità.
