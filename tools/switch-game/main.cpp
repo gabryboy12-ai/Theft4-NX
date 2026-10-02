@@ -37,9 +37,9 @@
 // Exit: hold + for 1 s; the process leaves with exit(0) (mode A), or with
 // the cooperative stop of mode D (cvar nx_exit_mode = D); never with
 // svcExitProcess nor with paused threads (run 15, 09-rules.md section 9; see
-// "Exit" below and tools/switch-common/nx_exit.h). Never draw on the console after
-// consoleExit (run 11): console output goes through ConsolePrint under
-// g_console_mutex, and CloseConsole shuts it once.
+// "Exit" below and tools/switch-common/nx_exit.h). The console stays open
+// until the process ends (mode A of run 15 left it so); console output goes
+// through ConsolePrint under g_console_mutex.
 //
 // Graphics: the null GPU (cvar nx_null_gpu, rex/system/null_graphics_system.h)
 // lets the game past the Vd* exports without drawing. Input: the Switch
@@ -137,9 +137,9 @@ namespace {
 
 // ── Console ────────────────────────────────────────────────────────────────
 
-// The console belongs to whoever holds this mutex; after CloseConsole nothing
-// draws (the framebuffer is gone). Bounded: a thread that cannot take it
-// within 200 ms skips the screen, and the line still reaches game.log.
+// The console belongs to whoever holds this mutex. Bounded: a thread that
+// cannot take it within 200 ms skips the screen, and the line still reaches
+// game.log.
 std::timed_mutex g_console_mutex;
 bool g_console_open = false;  // under g_console_mutex
 
@@ -160,14 +160,6 @@ void ConsoleRefresh() {
       consoleUpdate(nullptr);
     }
     g_console_mutex.unlock();
-  }
-}
-
-void CloseConsole() {
-  std::lock_guard<std::timed_mutex> lock(g_console_mutex);
-  if (g_console_open) {
-    g_console_open = false;
-    consoleExit(nullptr);
   }
 }
 
