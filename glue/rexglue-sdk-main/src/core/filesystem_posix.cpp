@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <atomic>
+#include <cerrno>
 #include <iostream>
 
 #include <fcntl.h>
@@ -214,19 +216,37 @@ class PosixFileHandle : public FileHandle {
   bool Read(size_t file_offset, void* buffer, size_t buffer_length,
             size_t* out_bytes_read) override {
     ssize_t out = pread(handle_, buffer, buffer_length, file_offset);
-    *out_bytes_read = out;
+    *out_bytes_read = out >= 0 ? size_t(out) : 0;
+    if (out < 0) {
+      LogFailure("read", file_offset, buffer_length);
+    }
     return out >= 0 ? true : false;
   }
   bool Write(size_t file_offset, const void* buffer, size_t buffer_length,
              size_t* out_bytes_written) override {
     ssize_t out = pwrite(handle_, buffer, buffer_length, file_offset);
-    *out_bytes_written = out;
+    *out_bytes_written = out >= 0 ? size_t(out) : 0;
+    if (out < 0) {
+      LogFailure("write", file_offset, buffer_length);
+    }
     return out >= 0 ? true : false;
   }
   bool SetLength(size_t length) override { return ftruncate(handle_, length) >= 0 ? true : false; }
   void Flush() override { fsync(handle_); }
 
  private:
+  // The guest sees only a status (END_OF_FILE for any failure): the first 32
+  // failures say which file, where and the errno.
+  void LogFailure(const char* what, size_t offset, size_t length) const {
+    const int error = errno;
+    static std::atomic<uint32_t> failures{0};
+    if (failures.fetch_add(1, std::memory_order_relaxed) < 32) {
+      REXFS_WARN("host {} failed: '{}' offset {} length {} fd {} errno {} ({})", what,
+                 path().string(), offset, length, handle_, error, strerror(error));
+    }
+    errno = error;
+  }
+
   int handle_ = -1;
 };
 
@@ -254,25 +274,17 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(const std::filesystem::path
                                                      bool /*allow_share_delete*/) {
   // POSIX allows unlinking/replacing an open file, so there is no share-delete
   // analog to thread through here.
-  int open_access = 0;
-  if (desired_access & FileAccess::kGenericRead) {
-    open_access |= O_RDONLY;
-  }
-  if (desired_access & FileAccess::kGenericWrite) {
-    open_access |= O_WRONLY;
-  }
-  if (desired_access & FileAccess::kGenericExecute) {
-    open_access |= O_RDONLY;
-  }
-  if (desired_access & FileAccess::kGenericAll) {
-    open_access |= O_RDWR;
-  }
-  if (desired_access & FileAccess::kFileReadData) {
-    open_access |= O_RDONLY;
-  }
-  if (desired_access & FileAccess::kFileWriteData) {
-    open_access |= O_WRONLY;
-  }
+  // O_RDONLY is 0 and O_WRONLY 1: OR-ing them gave O_WRONLY for a handle
+  // asked for reading and writing, and every read on it failed (EBADF). Run 17
+  // on Switch: the game reads back the cache:\ copies it writes, got
+  // C0000011 eleven times and called XamShowDirtyDiscErrorUI.
+  const bool want_read =
+      desired_access & (FileAccess::kGenericRead | FileAccess::kGenericExecute |
+                        FileAccess::kGenericAll | FileAccess::kFileReadData);
+  const bool want_write =
+      desired_access & (FileAccess::kGenericWrite | FileAccess::kGenericAll |
+                        FileAccess::kFileWriteData | FileAccess::kFileAppendData);
+  int open_access = want_write ? (want_read ? O_RDWR : O_WRONLY) : O_RDONLY;
   if (desired_access & FileAccess::kFileAppendData) {
     open_access |= O_APPEND;
   }
