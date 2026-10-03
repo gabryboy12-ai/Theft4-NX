@@ -1574,3 +1574,167 @@ thread, già usate dalle istantanee); per le prestazioni un campionamento ogni
 `svcSetThreadActivity`); sulla Switch un run con il profiler acceso e uno
 spento, stessa scena, la differenza di fps deve essere piccola, e lo script
 deve nominare le funzioni (`sub_82…` e host) dall'ELF del run.
+
+## 23. Run 17: il gioco carica la città e si ferma su un errore di lettura (2026-10-03)
+
+`out/console-runs/run17/`, NRO del commit `b1acd44`. PC di confronto:
+`out/pc-runs/run17e` (stesso codice generato). Strumenti:
+`tools/compare_export_traces.py` e i conteggi per finestra di 10 s del battito.
+
+### A.1 Il sequenziatore e il confronto con il PC
+
+- **La voce 0 passa anche sulla Switch.** Battito dei 20 s: `index 0`, tipo 1,
+  client audio già registrato (`null audio: client 0 registered, callback
+  82172BE8`); 30 s: `index 2`; 40 s: `index 5`, `main waits on 0`; 120 s:
+  `active 0` (sequenziatore spento, `index 8`). Sul PC la voce 0 era passata
+  prima dei 10 s e il sequenziatore era spento a 30 s: la Switch arriva allo
+  stesso punto **15–20 s dopo all'inizio e circa 90 s dopo alla fine**.
+- **Export:** le stesse 117 del PC, più `XamUserWriteProfileSettings` (solo
+  Switch, LR `829C45B8`: c'è un pad e il gioco salva il profilo). Stesso
+  ordine per le prime 37; dopo cambia solo l'ordine fra thread
+  (`KfAcquireSpinLock` prima di `ExGetXConfigSetting`). Nessuna export chiamata
+  da un LR diverso. Unico primo risultato diverso: `XamInputSetState`, PC
+  `0x48F` (nessun pad), Switch 0. **Le 20 export nuove attese ci sono tutte.**
+- **Thread:** `ExCreateThread` 25 come sul PC; 15 thread chiamano export su
+  tutti e due; 30 XThread sulla Switch (25 guest + 5 host: `Kernel Host
+  Tasks`, `XMA Decoder`, `Audio Worker (null)`, `GPU Commands (null)`, `GPU
+  VSync (null)`).
+- **File:** gli stessi 325 percorsi del PC. `maps\east\bronx_*.img` aperti a
+  ~40 s (PC ~10 s). Unica differenza: 78 aperture di `cache:\`/`cache1:\`
+  riescono sul PC (copie fatte dai run PC precedenti) e falliscono sulla
+  Switch (cartella vuota all'inizio).
+
+### A.2 Fotogrammi, letture, fin dove arriva il caricamento
+
+| Finestra | VdSwap/s | letture ogni 10 s | MB/s | `XamInputGetState`/s |
+|---|---|---|---|---|
+| 30–160 s | 60 | 280–750 | 0,15–1,5 | 0–11 |
+| 170–330 s | 13–51 | 290–560 | 0,9–1,5 | uguale a VdSwap (un pad letto per fotogramma) |
+| 340–616 s | 60 | **0** | 0 | 29 fino a 460 s, poi 6–9 |
+
+- **Switch:** 13.423 `NtReadFile`, ~331 MB in 335 s (~25 KB per lettura),
+  5.040 `NtWriteFile` (le copie in `cache:\`; un'istantanea mostra un thread
+  `IN NtWriteFile for 0.2 s`). La latenza di `NtReadFile` non era misurata
+  (aggiunta per il run 18: riga `file I/O` del battito).
+- **PC:** 84.335 letture, 2,6 GB in 360 s, picchi di 65 MB/s mentre copia i
+  `.img` nella cache.
+- **Dove si ferma (~335 s).** Il thread guest id 8 (`F8000C80`) fa 11 letture
+  e ricevono tutte `C0000011` (END_OF_FILE) con `bytes=4294967295`; poi chiama
+  `XamShowDirtyDiscErrorUI` (LR `829A1250`), che sulla Switch non c'è: `STOP
+  at the first function missing`. Quel thread si parcheggia **tenendo una
+  sezione critica**: a 420 s il thread delle letture (id 7) è `IN
+  RtlEnterCriticalSection for 87.4 s` e da lì non c'è più nessuna lettura. Il
+  resto del gioco gira (60 VdSwap/s, pad letto).
+- **Causa trovata nel codice (da verificare):** `FileHandle::OpenExisting`
+  (`src/core/filesystem_posix.cpp`) costruiva i flag con `|=`; `O_RDONLY` è 0
+  e `O_WRONLY` 1, quindi un handle chiesto in lettura **e** scrittura era
+  aperto `O_WRONLY` e ogni `read` falliva (EBADF). `PosixFileHandle::Read`
+  metteva -1 nei byte letti (da qui 4294967295) e `HostPathFile::ReadSync`
+  traduce ogni errore in END_OF_FILE. Il gioco rilegge le copie che scrive in
+  `cache:\` (sul PC, con `CreateFile` di Windows, funziona). Il percorso letto
+  non è nel log: dal run 18 ogni errore di lettura o scrittura dell'host scrive
+  `host read failed: '<percorso>' offset … errno …` (i primi 32).
+- **Per dopo (non fatto):** la copia in `cache:\` è un'ottimizzazione della
+  360 (disco ottico → HDD); sulla Switch sorgente e cache sono la stessa SD, e
+  copiare costa e basta. Una cvar che non monta `cache:`/`cache1:` è da provare
+  **dopo** questa correzione, per vedere se il gioco salta la copia.
+
+### A.3 Audio nullo
+
+- Gira sul thread host `Audio Worker (null)` (XThread id 3, `F8000018`).
+- **187,1–188,0 callback al secondo da 30 a 120 s** (atteso 48000/256 =
+  187,5); `frames submitted` = `callbacks`, `played` = `callbacks` − 7 (gli 8
+  crediti): nessuna deriva del timer.
+- **Da 130 s cala:** 50–107/s fino a 160 s, 63–78/s fino a 460 s, 44–48/s
+  dopo; il PC resta a ~187/s. L'istantanea dei 420 s mostra il worker `IN
+  KeWaitForMultipleObjects` **dentro il callback guest**: il callback aspetta
+  oggetti del motore audio del gioco e rallenta quando il gioco è sotto
+  carico; il timer non è la causa probabile. Dal run 18 il battito scrive
+  callback al secondo nella finestra, durata media e massima del callback,
+  periodi e `resyncs` (periodi persi dopo più di 100 ms di ritardo).
+
+### A.4 Aperture non riuscite
+
+Tutte `C000000F`, nessun altro codice: 10 in `audio\config` (i sette noti più
+`rpf.xml`, `waveslots.xml`, `effects.dat11`, gli stessi del PC), 44 in
+`cache:\` e 80 in `cache1:\` (il tentativo sulla cache prima del disco).
+Nient'altro.
+
+### B. Crash alla chiusura con + (modo A)
+
+- **Log:** `game-exit.log` ha i passi 1–5 fino a `_exit`; `game.log` finisce
+  con `TERMINATION: _exit(0) called from LR … + 0x68d4`; nessuna riga
+  `std::terminate`. `game-crash.log` ha **solo l'intestazione** `=== unhandled
+  access violation ===`: il gestore è partito, ma le righe successive (stesso
+  descrittore, subito dopo) non sono arrivate sulla SD.
+- **Letture in corso all'uscita: 0.** Le `NtReadFile` (13.423) sono tante
+  quante le completioni `[AsyncIO] complete`, l'ultima a ~335 s; le scritture
+  sono sincrone e ferme da prima dei 360 s. Dal run 18 il primo passo d'uscita
+  scrive `file operations in flight: N`.
+- **Thread host vivi all'uscita:** i 5 XThread host di A.1, il thread
+  principale, quelli del logger. Rispetto al run 16 sono nuovi `XMA Decoder` e
+  `Audio Worker (null)` (prima non c'era un sistema audio), e c'è un thread
+  guest parcheggiato nello STOP.
+- **Le due ipotesi.** (2) "letture dalla SD in volo mentre libnx chiude i
+  servizi": **non regge per questo run**, nessuna lettura era in corso. (1)
+  "un thread host attivo mentre `exit(0)` distrugge gli statici": il passo 5
+  (`_exit`) viene **dopo** gli handler `atexit` e i distruttori statici, e
+  un'intestazione scritta seguita da righe perse dice che il fault arriva
+  mentre `__appExit` smonta il file system (`fsdevUnmountAll`). Il fault è
+  quindi di un altro thread, **dopo** la distruzione degli statici e durante la
+  chiusura dei servizi di libnx: compatibile con un thread host ancora vivo
+  che usa qualcosa già distrutto o già chiuso (una variante della 1); i log
+  non bastano a dire di più (nessun PC del fault).
+- **Correzione (da verificare); il default torna a D** (`nx_exit_mode`, A
+  resta selezionabile):
+  1. `file I/O gate closed`: `NtCreateFile`/`NtOpenFile`/`NtReadFile`/
+     `NtReadFileScatter`/`NtWriteFile` si contano in corso dall'entrata al
+     completamento (una lettura asincrona fino al suo task host) e, chiuso il
+     cancello, rifiutano le nuove con `C0000120` (CANCELLED);
+     `file_io::{EnterIo, CloseIoGate, WaitIoIdle}` in `rex/system/xfile.h`;
+  2. attesa delle operazioni in corso, al più 2 s, con riga `file I/O: idle
+     after N ms` o `STILL BUSY`;
+  3. `rex::audio::StopNullAudio(2000)`: il worker esce al periodo successivo
+     (flag), un callback in corso finisce; riga `null audio worker ended after
+     N ms` o `STILL RUNNING`;
+  4. il modo D di prima: thread guest fuori alla prossima export, GPU nulla
+     ferma, join di 2 s, poi `exit(0)`.
+  Il decoder XMA resta acceso (il suo `Pause` aspetta senza limite): se il
+  run 18 crasha ancora all'uscita, è il prossimo candidato.
+
+### C. Smoke
+
+- **I cinque thread** non sono quelli del passo 6 (spento): li avvia `main`
+  dopo la sonda Vulkan per il test d'uscita, con lo stesso `StartExitWorkers`
+  del passo 6: `spin`, `mutex`, `malloc`, `SD read`, `mutex holder` (stack 64
+  KiB, priorità 0x3B). Riga: `exit test: 5 threads working in the background;
+  + exits with mode A …` (`tools/switch-smoke/main.cpp`, `StartExitWorkers` e
+  la fine di `main`).
+- **Dal log:** `teardown step 1`–`13` tutti presenti, `console reopened`,
+  `VULKAN OK`, la riga del test d'uscita e **nessuna riga `waiting for +`**
+  (la prima era a 1 s); `smoke-exit.log` vuoto. Thread del processo prima e
+  dopo: `-1` tutte e due le volte (`svcGetThreadList` rifiuta
+  `CUR_PROCESS_HANDLE`). **Il crash è nel primo secondo dell'attesa del +**:
+  non durante lo smontaggio e non al +.
+- **Run 18 (da verificare):** `nx_vk_reopen_console = false` per default
+  (variante diagnostica: torna a true se non cambia niente); numero di thread
+  con `envGetOwnProcessHandle()` (un fallimento scrive `-codice`); righe dopo
+  il primo giro dell'attesa e a 250 e 500 ms con i contatori dei cinque
+  thread; cvar `nx_smoke_exit_workers` (vera) per provare l'attesa senza i
+  cinque thread.
+
+### Run 18: cosa guardare (`out/console-runs/run18-build/`)
+
+- **Gioco:** nessuna riga `host read failed` (o, se c'è, il percorso e
+  l'errno); le righe `file open` ora finiscono con `access 0x…` e si ripetono
+  per ogni combinazione nuova di percorso, disposition e accesso: le creazioni
+  dei file di `cache:\` con un accesso in lettura e scrittura (per esempio
+  `0xC0000000`) sono il caso che prima diventava `O_WRONLY`; `NtReadFile` che
+  continua a salire dopo i 335 s; nessuno STOP su `XamShowDirtyDiscErrorUI`;
+  righe `file I/O` (MB/s, latenza media e massima) e `null audio`
+  (callback/s, durata del callback, `resyncs`).
+- **Uscita con + (D):** in `game-exit.log` `file operations in flight`, `file
+  I/O gate closed`, `file I/O: idle after`, `null audio worker ended after`,
+  `N of M threads ended within 2 s`, poi `atexit` e `_exit`; e se esce pulito.
+- **Smoke:** le righe `waiting for +: first pass …`, `250 ms`, `500 ms`;
+  `process threads`; se con la console chiusa il crash sparisce.

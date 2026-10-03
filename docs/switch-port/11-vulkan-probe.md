@@ -205,6 +205,24 @@ crash, la causa è la riapertura della console sulla finestra usata da Vulkan;
 la correzione sarebbe allora non riaprirla (il gioco non userà la console
 insieme a Vulkan) o ricrearla con una `NWindow` nuova.
 
+**Run 17 (valori di default, tutte e tre le varianti a vero).** Sonda di
+nuovo `VULKAN OK`; `teardown step 1`–`13` tutti scritti, `console reopened`,
+la riga del test d'uscita, poi **nessuna** riga `waiting for +` (la prima era a
+1 s) e `smoke-exit.log` vuoto: il crash è nel primo secondo dell'attesa, non
+nello smontaggio e non al +. Il numero di thread era `-1` prima e dopo
+(`svcGetThreadList` rifiuta `CUR_PROCESS_HANDLE`). I cinque thread di quella
+riga sono quelli del test d'uscita (`StartExitWorkers` in `main`, non il passo
+6). Nessun crash report di Atmosphère. Dettagli in 06 §23 C.
+
+**Run 18 (da verificare).** `nx_vk_reopen_console = false` per default
+(variante diagnostica: torna a vero se non cambia niente); il numero di thread
+con `envGetOwnProcessHandle()` e il codice d'errore se fallisce; righe dopo il
+primo giro dell'attesa e a 250 e 500 ms con i contatori dei cinque thread;
+cvar `nx_smoke_exit_workers` (vera) per l'attesa senza i cinque thread. Se con
+la console chiusa il crash sparisce, la causa è la riapertura sulla `NWindow`
+usata da Vulkan (candidato 1); se resta, il run successivo prova
+`nx_smoke_exit_workers = false`.
+
 ## Cosa serve per costruire il backend Vulkan di ReXGlue per Switch (solo analisi)
 
 ### Cosa lo esclude oggi
