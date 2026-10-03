@@ -4,10 +4,11 @@
 // Run 15 settled it: under hbloader the process leaves with exit(0), never
 // with svcExitProcess nor with the game's threads paused. Two modes remain:
 //
-//   A  (default) exit(0), what returning from main does: atexit handlers,
-//      _exit, __libnx_exit (__appExit, then back to hbloader);
-//   D  (cvar nx_exit_mode = D) every thread is told to end and joined for at
-//      most 2 s, then exit(0) as A.
+//   A  exit(0), what returning from main does: atexit handlers, _exit,
+//      __libnx_exit (__appExit, then back to hbloader); default of the smoke;
+//   D  every thread is told to end and joined for at most 2 s, then exit(0)
+//      as A; default of the game since run 18 (it also closes the file I/O
+//      gate and stops the null audio worker first, 06 §23).
 //
 // PauseThreads and RunOnExitWorker are no longer on any exit path: only the
 // smoke's pause test uses them (cvar nx_smoke_pause_test, off by default).

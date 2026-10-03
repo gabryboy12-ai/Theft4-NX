@@ -34,8 +34,9 @@
 // stay on in Release, newlib's assert and libstdc++ write only there. Stub
 // exports hit are summarised at the stop and at exit.
 //
-// Exit: hold + for 1 s; the process leaves with exit(0) (mode A), or with
-// the cooperative stop of mode D (cvar nx_exit_mode = D); never with
+// Exit: hold + for 1 s; the process leaves with the cooperative stop of mode
+// D (default since run 18), or with exit(0) at once (mode A, cvar
+// nx_exit_mode = A); never with
 // svcExitProcess nor with paused threads (run 15, 09-rules.md section 9; see
 // "Exit" below and tools/switch-common/nx_exit.h). The console stays open
 // until the process ends (mode A of run 15 left it so); console output goes
@@ -87,6 +88,7 @@
 #include <rex/runtime.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xfile.h>
 #include <rex/audio/null_audio_system.h>
 #include <rex/system/null_graphics_system.h>
 #include <rex/system/thread_state.h>
@@ -108,9 +110,10 @@ REXCVAR_DEFINE_BOOL(nx_null_gpu, true, "Switch",
 REXCVAR_DEFINE_BOOL(nx_input, true, "Switch",
                     "Give the game the Switch controller as its 360 pad (nx_input.h). false: "
                     "no input system, XamInputGetState says not connected (run 14)");
-REXCVAR_DEFINE_STRING(nx_exit_mode, "A", "Switch",
-                      "Exit at + (hold 1 s): A = exit(0) with the threads alive, D = every "
-                      "thread told to end and joined for 2 s, then exit(0) (nx_exit.h)");
+REXCVAR_DEFINE_STRING(nx_exit_mode, "D", "Switch",
+                      "Exit at + (hold 1 s): D = file I/O gate closed and drained, null audio "
+                      "stopped, every thread told to end and joined (2 s each), then exit(0); "
+                      "A = exit(0) with the threads alive (runs 15-17) (nx_exit.h)");
 
 namespace {
 
@@ -819,6 +822,9 @@ struct Heartbeat {
   u64 next_line_s = 10;
   u64 next_snapshot_s = 5;
   u64 next_summary_s = 60;
+  u64 last_line_s = 0;
+  rex::audio::NullAudioStats last_audio;
+  rex::system::file_io::IoStats last_io;
 
   void Tick() {
     const u64 seconds = armTicksToNs(armGetSystemTick() - start) / 1'000'000'000ull;
@@ -834,11 +840,42 @@ struct Heartbeat {
       LogClock();
       LogNullGpu();
       LogBootSequencer();
+      const double window_s = double(seconds - last_line_s);
+      last_line_s = seconds;
       if (REXCVAR_GET(nx_null_audio)) {
+        // Run 17: 187 callbacks a second up to 120 s, then 45-100: the window
+        // rate, how long the guest callback takes and how often the worker
+        // fell more than 100 ms behind say whether the callback is slow.
         const auto a = rex::audio::GetNullAudioStats();
+        const uint64_t calls = a.callbacks - last_audio.callbacks;
         GAME_INFO("null audio: %u clients, %" PRIu64 " callbacks, %" PRIu64
-                  " frames submitted, %" PRIu64 " played",
-                  a.clients, a.callbacks, a.frames_submitted, a.frames_played);
+                  " frames submitted, %" PRIu64 " played; last %.0f s: %.1f callbacks/s, "
+                  "callback mean %.3f ms max %.3f ms, %" PRIu64 " periods, %" PRIu64 " resyncs",
+                  a.clients, a.callbacks, a.frames_submitted, a.frames_played, window_s,
+                  window_s > 0 ? double(calls) / window_s : 0.0,
+                  calls ? double(a.callback_ns - last_audio.callback_ns) / double(calls) / 1e6
+                        : 0.0,
+                  double(a.callback_ns_max) / 1e6, a.periods - last_audio.periods,
+                  a.resyncs - last_audio.resyncs);
+        last_audio = a;
+      }
+      {
+        // Reads and writes of the guest files (host transfer times) and the
+        // operations in flight, which the exit waits for.
+        const auto io = rex::system::file_io::TakeIoStats();
+        const uint64_t reads = io.reads - last_io.reads;
+        const uint64_t writes = io.writes - last_io.writes;
+        const double read_mb = double(io.read_bytes - last_io.read_bytes) / 1e6;
+        GAME_INFO("file I/O: %" PRIu64 " reads %.1f MB, %" PRIu64 " writes %.1f MB; last %.0f s: "
+                  "%" PRIu64 " reads %.2f MB = %.2f MB/s, read mean %.3f ms max %.3f ms, %" PRIu64
+                  " writes, write mean %.3f ms max %.3f ms; in flight %u",
+                  io.reads, double(io.read_bytes) / 1e6, io.writes, double(io.write_bytes) / 1e6,
+                  window_s, reads, read_mb, window_s > 0 ? read_mb / window_s : 0.0,
+                  reads ? double(io.read_ns - last_io.read_ns) / double(reads) / 1e6 : 0.0,
+                  double(io.read_ns_max) / 1e6, writes,
+                  writes ? double(io.write_ns - last_io.write_ns) / double(writes) / 1e6 : 0.0,
+                  double(io.write_ns_max) / 1e6, io.in_flight);
+        last_io = io;
       }
       GAME_INFO("buttons: %" PRIu64 " changes, now 0x%" PRIx64, g_button_changes,
                 g_buttons_now);
@@ -886,10 +923,13 @@ void LogExitSummary() {
 // ── Exit (09-rules.md section 9, tools/switch-common/nx_exit.h) ────────────
 //
 // + held for 1 s, or the system asking the applet to exit:
-//   A  (default) exit(0), which is what returning from main does (crt0 enters
-//      main with LR = exit): atexit handlers, _exit, __libnx_exit (__appExit,
-//      then back to hbloader). The game's threads still run.
-//   D  (cvar nx_exit_mode = D) every guest thread ends itself at its next
+//   A  (cvar nx_exit_mode = A) exit(0), which is what returning from main
+//      does (crt0 enters main with LR = exit): atexit handlers, _exit,
+//      __libnx_exit (__appExit, then back to hbloader). The game's threads
+//      still run. Run 17: an access violation after _exit (06 §23).
+//   D  (default since run 18; to be verified) the file exports refuse new
+//      operations (C0000120) and those in flight get 2 s; the null audio
+//      worker stops (flag, 2 s); every guest thread ends itself at its next
 //      export (svcExitThread from the export entry hook), the null GPU's
 //      threads are told to stop, join for at most 2 s, then exit(0) as A.
 // Run 15: A and D leave cleanly, in the game and in the smoke. The modes that
@@ -969,6 +1009,69 @@ void ExitCooperative() {
   ExitStep(text);
 }
 
+// What is still running when the exit starts (run 17 crashed after _exit in
+// mode A, 06 §23): the guest file operations in flight and the host XThreads.
+// Names only: nothing is paused.
+void LogExitState() {
+  char text[256];
+  std::snprintf(text, sizeof(text), "file operations in flight: %u (opens, reads, writes)",
+                rex::system::file_io::IoInFlight());
+  ExitStep(text);
+  if (!g_logging_ready) {
+    return;
+  }
+  if (auto* kernel = rex::system::kernel_state()) {
+    kernel->object_table()->TryGetObjectsByType<rex::system::XThread>(
+        &g_exit_xthreads, std::chrono::milliseconds(200));
+    std::string hosts;
+    size_t count = 0;
+    for (auto& t : g_exit_xthreads) {
+      if (!t->is_guest_thread() && t->is_running()) {
+        hosts += hosts.empty() ? "" : ", ";
+        hosts += t->name();
+        ++count;
+      }
+    }
+    GAME_INFO("exit: %zu host XThreads running: %s", count, hosts.c_str());
+    g_exit_xthreads.clear();
+  }
+}
+
+// Mode D, before the threads are told to end: (a) the file exports refuse new
+// opens, reads and writes (C0000120, CANCELLED); (b) the operations in flight
+// get at most 2 s to finish.
+void StopFileIo() {
+  rex::system::file_io::CloseIoGate();
+  char text[160];
+  std::snprintf(text, sizeof(text),
+                "file I/O gate closed (new opens, reads, writes -> C0000120); waiting for %u in "
+                "flight, at most 2 s",
+                rex::system::file_io::IoInFlight());
+  ExitStep(text);
+  const u64 start = armGetSystemTick();
+  const bool idle = rex::system::file_io::WaitIoIdle(uint32_t(kJoinTimeoutMs));
+  std::snprintf(text, sizeof(text), "file I/O: %s after %" PRIu64 " ms (%u in flight)",
+                idle ? "idle" : "STILL BUSY", armTicksToNs(armGetSystemTick() - start) / 1'000'000,
+                rex::system::file_io::IoInFlight());
+  ExitStep(text);
+}
+
+// (c) The null audio worker (a host XThread that runs the guest callback
+// every 5.333 ms) stops at its next period: flag, then at most 2 s.
+void StopNullAudioWorker() {
+  if (!REXCVAR_GET(nx_null_audio)) {
+    return;
+  }
+  ExitStep("stopping the null audio worker (flag, at most 2 s)");
+  const u64 start = armGetSystemTick();
+  const bool ended = rex::audio::StopNullAudio(uint32_t(kJoinTimeoutMs));
+  char text[96];
+  std::snprintf(text, sizeof(text), "null audio worker %s after %" PRIu64 " ms",
+                ended ? "ended" : "STILL RUNNING",
+                armTicksToNs(armGetSystemTick() - start) / 1'000'000);
+  ExitStep(text);
+}
+
 [[noreturn]] void ExitGame(const char* reason) {
   const char mode = theft4::nx_exit::ParseExitMode(REXCVAR_GET(nx_exit_mode).c_str());
   g_exit_mode = mode;
@@ -979,7 +1082,10 @@ void ExitCooperative() {
   if (g_logging_ready) {
     LogExitSummary();
   }
+  LogExitState();
   if (mode == 'D') {
+    StopFileIo();
+    StopNullAudioWorker();
     ExitCooperative();
   } else {
     ExitStep("exit(0), as a return from main; the game's threads still run");
@@ -1015,6 +1121,13 @@ void ExitCooperative() {
 // threads, park without logging again.
 namespace rex::diagnostics {
 [[noreturn]] void StopAtMissingFunction(const char* kind, const char* name, uint32_t guest_lr) {
+  // Exit D in progress: a guest thread refused a file operation (C0000120)
+  // may go for an error screen it cannot have. Not a stop of the run: park.
+  if (rex::system::file_io::IoGateClosed()) {
+    for (;;) {
+      svcSleepThread(INT64_MAX);
+    }
+  }
   if (!g_stopped.exchange(true)) {
     const bool guest = rex::system::XThread::IsInThread();
     GAME_ERROR("STOP at the first function missing on Switch: %s (%s), guest LR %08X, %s",
