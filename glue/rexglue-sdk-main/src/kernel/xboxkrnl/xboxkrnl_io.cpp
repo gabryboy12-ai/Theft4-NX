@@ -29,6 +29,7 @@
 #include <rex/system/xtypes.h>
 #include <rex/thread/mutex.h>
 
+#include <chrono>
 #include <mutex>
 #include <new>
 #include <string>
@@ -105,6 +106,13 @@ static bool IsValidPath(const std::string_view s, bool is_pattern) {
   return true;
 }
 
+// Host transfer time for file_io::RecordRead/RecordWrite.
+static uint64_t ElapsedNs(std::chrono::steady_clock::time_point start) {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - start)
+                      .count());
+}
+
 struct FileReadCompletion {
   object_ref<XFile> file;
   object_ref<XEvent> supplied_event;
@@ -177,12 +185,14 @@ static void StoreImmediateIoStatus(const object_ref<XFile>& file, uint32_t io_st
 }
 
 // Every open, for comparing platforms (run 16): the first 200 opens and then
-// each path not seen before, with the export, disposition, options, result
-// and the action taken. NtOpenFile goes through NtCreateFile_entry and says so.
+// each path not seen before with that disposition and access (run 18: the
+// creates of cache:\ files, same path as the failed open before them, were not
+// logged), with the export, disposition, options, result, action and access.
+// NtOpenFile goes through NtCreateFile_entry and says so.
 thread_local const char* t_open_export = "NtCreateFile";
 
 static void TraceFileOpen(const std::string& path, uint32_t disposition, uint32_t options,
-                          X_STATUS result, uint32_t action) {
+                          X_STATUS result, uint32_t action, uint32_t access) {
   static std::mutex mutex;
   static std::unordered_set<std::string> seen;
   static uint64_t count = 0;
@@ -191,11 +201,14 @@ static void TraceFileOpen(const std::string& path, uint32_t disposition, uint32_
   {
     std::lock_guard<std::mutex> lock(mutex);
     n = ++count;
-    log = seen.insert(path).second || n <= 200;
+    log = seen.insert(path + '|' + std::to_string(disposition) + '|' + std::to_string(access))
+              .second ||
+          n <= 200;
   }
   if (log) {
-    REXKRNL_INFO("file open #{}: {} '{}' disposition {} options {:#x} -> {:08X} (action {})", n,
-                 t_open_export, path, disposition, options, uint32_t(result), action);
+    REXKRNL_INFO(
+        "file open #{}: {} '{}' disposition {} options {:#x} -> {:08X} (action {}) access {:#x}",
+        n, t_open_export, path, disposition, options, uint32_t(result), action, access);
   }
 }
 
@@ -209,6 +222,20 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
   // if (allocation_size_ptr) {
   //  allocation_size = *allocation_size_ptr;
   //}
+
+  // The exit gate (file_io::CloseIoGate): no new open once the process is
+  // leaving; counted in flight until it returns.
+  file_io::IoScope io_scope;
+  if (!io_scope.entered()) {
+    if (handle_out) {
+      *handle_out = X_INVALID_HANDLE_VALUE;
+    }
+    if (io_status_block) {
+      io_status_block->status = X_STATUS_CANCELLED;
+      io_status_block->information = 0;
+    }
+    return X_STATUS_CANCELLED;
+  }
 
   if (!object_attrs) {
     // ..? Some games do this. This parameter is not optional.
@@ -268,7 +295,7 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
 
   *handle_out = handle;
   TraceFileOpen(target_path, uint32_t(creation_disposition), uint32_t(create_options), result,
-                uint32_t(file_action));
+                uint32_t(file_action), uint32_t(desired_access));
   if (XFAILED(result)) {
     REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
   } else {
@@ -301,6 +328,17 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
       (uint32_t)file_handle, (uint32_t)event_handle, apc_routine_ptr.guest_address(),
       apc_context.guest_address(), io_status_block.guest_address(), buffer.guest_address(),
       (uint32_t)buffer_length, byte_offset_ptr ? (int64_t)byte_offset : -1);
+
+  // The exit gate (file_io::CloseIoGate). An admitted asynchronous read stays
+  // counted until its host task has completed it.
+  file_io::IoScope io_scope;
+  if (!io_scope.entered()) {
+    if (io_status_block) {
+      io_status_block->status = X_STATUS_CANCELLED;
+      io_status_block->information = 0;
+    }
+    return X_STATUS_CANCELLED;
+  }
 
   auto file = REX_KERNEL_OBJECTS()->LookupObject<XFile>(file_handle);
   if (!file) {
@@ -337,7 +375,9 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
   if (inline_completion) {
     completion.PrepareWaitObject();
     uint32_t bytes_read = 0;
+    const auto start = std::chrono::steady_clock::now();
     result = file->ReadTransfer(buffer.guest_address(), buffer_length, byte_offset, &bytes_read);
+    file_io::RecordRead(bytes_read, ElapsedNs(start));
     completion.Complete(result, bytes_read);
     REXKRNL_IMPORT_RESULT(
         "NtReadFile", "{:#x} inline=1 synchronous={} completion_port={} wait={} transferred={}",
@@ -352,9 +392,12 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
          length = static_cast<uint32_t>(buffer_length), byte_offset]() {
           REXKRNL_DEBUG("[AsyncIO] worker start iosb={:08X} kind=read", completion.io_status_block);
           uint32_t bytes_read = 0;
+          const auto start = std::chrono::steady_clock::now();
           const X_STATUS status =
               completion.file->ReadTransfer(buffer_address, length, byte_offset, &bytes_read);
+          file_io::RecordRead(bytes_read, ElapsedNs(start));
           completion.Complete(status, bytes_read);
+          file_io::LeaveIo();  // the count NtReadFile handed over (io_scope.Release)
         },
         [completion]() {
           completion.PrepareWaitObject();
@@ -374,6 +417,7 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
     REXKRNL_IMPORT_RESULT("NtReadFile", "{:#x} async admission rejected", failure);
     return failure;
   }
+  io_scope.Release();
 
   REXKRNL_IMPORT_RESULT("NtReadFile", "{:#x} inline=0 wait={} completion_port={}", X_STATUS_PENDING,
                         ev ? "event" : "file", has_completion_port);
@@ -383,6 +427,16 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
 u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_ptr,
                             mapped_void apc_context, ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block,
                             mapped_u32 segment_array, u32 length, mapped_u64 byte_offset_ptr) {
+  // The exit gate, as in NtReadFile.
+  file_io::IoScope io_scope;
+  if (!io_scope.entered()) {
+    if (io_status_block) {
+      io_status_block->status = X_STATUS_CANCELLED;
+      io_status_block->information = 0;
+    }
+    return X_STATUS_CANCELLED;
+  }
+
   auto file = REX_KERNEL_OBJECTS()->LookupObject<XFile>(file_handle);
   if (!file) {
     if (io_status_block) {
@@ -425,7 +479,9 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
   if (inline_completion) {
     completion.PrepareWaitObject();
     uint32_t bytes_read = 0;
+    const auto start = std::chrono::steady_clock::now();
     result = file->ReadScatterTransfer(segments, length, byte_offset, &bytes_read);
+    file_io::RecordRead(bytes_read, ElapsedNs(start));
     completion.Complete(result, bytes_read);
     REXKRNL_IMPORT_RESULT("NtReadFileScatter",
                           "{:#x} inline=1 synchronous={} completion_port={} wait={} transferred={}",
@@ -442,9 +498,12 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
           REXKRNL_DEBUG("[AsyncIO] worker start iosb={:08X} kind=scatter",
                         completion.io_status_block);
           uint32_t bytes_read = 0;
+          const auto start = std::chrono::steady_clock::now();
           const X_STATUS status =
               completion.file->ReadScatterTransfer(segments, length, byte_offset, &bytes_read);
+          file_io::RecordRead(bytes_read, ElapsedNs(start));
           completion.Complete(status, bytes_read);
+          file_io::LeaveIo();  // handed over by io_scope.Release
         },
         [completion]() {
           completion.PrepareWaitObject();
@@ -463,6 +522,7 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
     StoreImmediateIoStatus(file, io_status_block.guest_address(), failure, 0);
     return failure;
   }
+  io_scope.Release();
 
   REXKRNL_IMPORT_RESULT("NtReadFileScatter", "{:#x} inline=0 wait={} completion_port={}",
                         X_STATUS_PENDING, ev ? "event" : "file", has_completion_port);
@@ -472,6 +532,16 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
 u32 NtWriteFile_entry(u32 file_handle, u32 event_handle, u32 apc_routine, mapped_void apc_context,
                       ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block, mapped_void buffer,
                       u32 buffer_length, mapped_u64 byte_offset_ptr) {
+  // The exit gate (file_io::CloseIoGate); the write is synchronous.
+  file_io::IoScope io_scope;
+  if (!io_scope.entered()) {
+    if (io_status_block) {
+      io_status_block->status = X_STATUS_CANCELLED;
+      io_status_block->information = 0;
+    }
+    return X_STATUS_CANCELLED;
+  }
+
   X_STATUS result = X_STATUS_SUCCESS;
 
   // Grab event to signal.
@@ -493,9 +563,11 @@ u32 NtWriteFile_entry(u32 file_handle, u32 event_handle, u32 apc_routine, mapped
     if (true || file->is_synchronous()) {
       // Synchronous request.
       uint32_t bytes_written = 0;
+      const auto start = std::chrono::steady_clock::now();
       result = file->Write(buffer.guest_address(), buffer_length,
                            byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
                            &bytes_written, apc_context.guest_address());
+      file_io::RecordWrite(bytes_written, ElapsedNs(start));
 
       if (io_status_block) {
         io_status_block->status = result;

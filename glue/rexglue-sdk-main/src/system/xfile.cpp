@@ -18,9 +18,12 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xfile.h>
+#include <rex/thread.h>
 #include <rex/thread/mutex.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <limits>
 #include <new>
 #include <span>
@@ -505,5 +508,82 @@ void XFile::NotifyIOCompletionPorts(XIOCompletion::IONotification& notification)
     port.second->QueueNotification(notification);
   }
 }
+
+namespace file_io {
+namespace {
+
+std::atomic<uint32_t> g_in_flight{0};
+std::atomic<bool> g_gate_closed{false};
+std::atomic<uint64_t> g_refused{0};
+std::atomic<uint64_t> g_reads{0}, g_read_bytes{0}, g_read_ns{0}, g_read_ns_max{0};
+std::atomic<uint64_t> g_writes{0}, g_write_bytes{0}, g_write_ns{0}, g_write_ns_max{0};
+
+void StoreMax(std::atomic<uint64_t>& max, uint64_t value) {
+  uint64_t seen = max.load(std::memory_order_relaxed);
+  while (value > seen && !max.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+  }
+}
+
+}  // namespace
+
+bool EnterIo() {
+  g_in_flight.fetch_add(1, std::memory_order_seq_cst);
+  if (g_gate_closed.load(std::memory_order_seq_cst)) {
+    g_in_flight.fetch_sub(1, std::memory_order_seq_cst);
+    g_refused.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  return true;
+}
+
+void LeaveIo() { g_in_flight.fetch_sub(1, std::memory_order_seq_cst); }
+
+void CloseIoGate() { g_gate_closed.store(true, std::memory_order_seq_cst); }
+
+bool IoGateClosed() { return g_gate_closed.load(std::memory_order_seq_cst); }
+
+uint32_t IoInFlight() { return g_in_flight.load(std::memory_order_seq_cst); }
+
+bool WaitIoIdle(uint32_t timeout_ms) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (IoInFlight()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    rex::thread::Sleep(std::chrono::milliseconds(1));
+  }
+  return true;
+}
+
+void RecordRead(uint64_t bytes, uint64_t nanoseconds) {
+  g_reads.fetch_add(1, std::memory_order_relaxed);
+  g_read_bytes.fetch_add(bytes, std::memory_order_relaxed);
+  g_read_ns.fetch_add(nanoseconds, std::memory_order_relaxed);
+  StoreMax(g_read_ns_max, nanoseconds);
+}
+
+void RecordWrite(uint64_t bytes, uint64_t nanoseconds) {
+  g_writes.fetch_add(1, std::memory_order_relaxed);
+  g_write_bytes.fetch_add(bytes, std::memory_order_relaxed);
+  g_write_ns.fetch_add(nanoseconds, std::memory_order_relaxed);
+  StoreMax(g_write_ns_max, nanoseconds);
+}
+
+IoStats TakeIoStats() {
+  IoStats s;
+  s.in_flight = IoInFlight();
+  s.refused = g_refused.load(std::memory_order_relaxed);
+  s.reads = g_reads.load(std::memory_order_relaxed);
+  s.read_bytes = g_read_bytes.load(std::memory_order_relaxed);
+  s.read_ns = g_read_ns.load(std::memory_order_relaxed);
+  s.read_ns_max = g_read_ns_max.exchange(0, std::memory_order_relaxed);
+  s.writes = g_writes.load(std::memory_order_relaxed);
+  s.write_bytes = g_write_bytes.load(std::memory_order_relaxed);
+  s.write_ns = g_write_ns.load(std::memory_order_relaxed);
+  s.write_ns_max = g_write_ns_max.exchange(0, std::memory_order_relaxed);
+  return s;
+}
+
+}  // namespace file_io
 
 }  // namespace rex::system

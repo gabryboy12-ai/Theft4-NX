@@ -86,6 +86,63 @@ constexpr bool IsInlineCompletionEligible(bool synchronous_file, bool has_suppli
   return synchronous_file || (!has_supplied_event && !has_apc_routine && !has_completion_port);
 }
 
+// ── Exit gate and counters (switch-game's exit, 06-game-boot-plan.md §23) ──
+//
+// NtCreateFile/NtOpenFile/NtReadFile/NtReadFileScatter/NtWriteFile count
+// themselves in flight from entry to completion (an asynchronous read until
+// its host task completes it). Once CloseIoGate is called, new operations are
+// refused with X_STATUS_CANCELLED; WaitIoIdle waits for those in flight.
+// EnterIo counts first and checks the gate after, so an operation either sees
+// the gate closed or is seen by WaitIoIdle.
+
+// false: the gate is closed, the operation must return X_STATUS_CANCELLED
+// (and not call LeaveIo).
+bool EnterIo();
+void LeaveIo();
+void CloseIoGate();
+bool IoGateClosed();
+uint32_t IoInFlight();
+// true: nothing in flight within timeout_ms (polled every millisecond).
+bool WaitIoIdle(uint32_t timeout_ms);
+
+// Host transfer time of a read or write (ReadTransfer, Write), for the logs.
+void RecordRead(uint64_t bytes, uint64_t nanoseconds);
+void RecordWrite(uint64_t bytes, uint64_t nanoseconds);
+
+struct IoStats {
+  uint32_t in_flight = 0;
+  uint64_t refused = 0;         // after CloseIoGate
+  uint64_t reads = 0;           // NtReadFile/NtReadFileScatter transfers done
+  uint64_t read_bytes = 0;
+  uint64_t read_ns = 0;         // sum of host transfer times
+  uint64_t read_ns_max = 0;     // largest since the previous TakeIoStats
+  uint64_t writes = 0;
+  uint64_t write_bytes = 0;
+  uint64_t write_ns = 0;
+  uint64_t write_ns_max = 0;
+};
+// Totals since start; the two maxima restart from zero after each call.
+IoStats TakeIoStats();
+
+// Counts the operation in flight for its scope; Release hands the count to
+// an asynchronous completion, which then calls LeaveIo itself.
+class IoScope {
+ public:
+  IoScope() : entered_(EnterIo()) {}
+  ~IoScope() {
+    if (entered_) {
+      LeaveIo();
+    }
+  }
+  IoScope(const IoScope&) = delete;
+  IoScope& operator=(const IoScope&) = delete;
+  bool entered() const { return entered_; }
+  void Release() { entered_ = false; }
+
+ private:
+  bool entered_;
+};
+
 }  // namespace file_io
 
 // https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_directory_information
