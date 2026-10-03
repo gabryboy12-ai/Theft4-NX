@@ -41,7 +41,9 @@
 #include "probes.h"
 
 // Run 16 crashed after "VULKAN OK", before +: variants to bisect it (11 §run 16).
-REXCVAR_DEFINE_BOOL(nx_vk_reopen_console, true, "Switch",
+// Run 17 crashed the same way with all three at true; run 18 tries the console
+// left closed (a diagnostic variant: back to true if nothing changes).
+REXCVAR_DEFINE_BOOL(nx_vk_reopen_console, false, "Switch",
                     "Vulkan probe: reopen the console on the default NWindow after the "
                     "teardown (false: the screen stays as Vulkan left it, lines go to the log)");
 REXCVAR_DEFINE_BOOL(nx_vk_wait_idle, true, "Switch",
@@ -1031,18 +1033,23 @@ void Probe::Destroy() {
   Step("done");
 }
 
+}  // namespace
+
 // Threads of this process (svcGetThreadList): the probe logs the count before
-// and after, so threads the driver leaves behind show up.
+// and after, so threads the driver leaves behind show up. Run 17 logged -1
+// with CUR_PROCESS_HANDLE: the pseudo-handle is refused here, so the real one
+// (hbloader passes it, envGetOwnProcessHandle) goes first; a failure is
+// returned as -(result code).
 int ProcessThreadCount() {
   s32 n = 0;
   u64 ids[128];
-  if (R_FAILED(svcGetThreadList(&n, ids, 128, CUR_PROCESS_HANDLE))) {
-    return -1;
+  const Handle own = envGetOwnProcessHandle();
+  Result rc = svcGetThreadList(&n, ids, 128, own != INVALID_HANDLE ? own : CUR_PROCESS_HANDLE);
+  if (R_FAILED(rc) && own != INVALID_HANDLE) {
+    rc = svcGetThreadList(&n, ids, 128, CUR_PROCESS_HANDLE);
   }
-  return int(n);
+  return R_FAILED(rc) ? -int(rc) : int(n);
 }
-
-}  // namespace
 
 bool RunVulkanProbe(void (*close_console)(), void (*reopen_console)()) {
   SMOKE_INFO("step 7 Vulkan (mesa-switch NVK, static libvulkan.a): instance, device, features, "

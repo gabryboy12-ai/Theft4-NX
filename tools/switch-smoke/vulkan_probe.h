@@ -6,3 +6,6 @@
 // before the surface is created, reopen_console after the teardown. Returns
 // true on success; the SMOKE verdict does not depend on it.
 bool RunVulkanProbe(void (*close_console)(), void (*reopen_console)());
+
+// Threads of this process (svcGetThreadList); a failure gives -(result code).
+int ProcessThreadCount();

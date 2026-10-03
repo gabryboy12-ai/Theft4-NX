@@ -104,6 +104,10 @@ REXCVAR_DEFINE_STRING(nx_exit_mode, "A", "Switch",
 REXCVAR_DEFINE_BOOL(nx_smoke_vulkan, true, "Switch",
                     "Step 7: the Vulkan probe (NVK: features, surface, 5 s of frames, pipeline "
                     "and submit timings), after the memory probes");
+REXCVAR_DEFINE_BOOL(nx_smoke_exit_workers, true, "Switch",
+                    "Exit test: start the five working threads (spin, mutex, malloc, SD read, "
+                    "mutex holder) before waiting for +. Runs 16-17 crashed in the first "
+                    "second of that wait: false tells whether they are needed for it");
 REXCVAR_DEFINE_BOOL(nx_smoke_pause_test, false, "Switch",
                     "Step 6: pause five working threads with svcSetThreadActivity, check "
                     "they stop, resume them (the pause of run 14, no longer used to exit)");
@@ -1371,10 +1375,17 @@ int main(int argc, char** argv) {
 
   // + exits as switch-game does, with threads working in the background.
   const char mode = theft4::nx_exit::ParseExitMode(REXCVAR_GET(nx_exit_mode).c_str());
-  const bool workers = StartExitWorkers();
+  // The five threads (spin, mutex, malloc, SD read, mutex holder; 64 KiB
+  // stacks, priority 0x3B) are StartExitWorkers, the same as step 6's.
+  const bool want_workers = REXCVAR_GET(nx_smoke_exit_workers);
+  SMOKE_INFO("exit test: process threads before the working threads: %d", ProcessThreadCount());
+  const bool workers = want_workers && StartExitWorkers();
   SMOKE_INFO("exit test: %s; + exits with mode %c (%s, cvar nx_exit_mode), steps in %s",
-             workers ? "5 threads working in the background" : "background threads NOT started",
+             !want_workers ? "no threads working in the background (cvar nx_smoke_exit_workers)"
+             : workers     ? "5 threads working in the background"
+                           : "background threads NOT started",
              mode, theft4::nx_exit::ExitModeDescription(mode), kSmokeExitStepPath);
+  SMOKE_INFO("exit test: process threads now: %d", ProcessThreadCount());
   if (g_console_open) {
     std::printf("\nPress + to exit.\n");
     consoleUpdate(nullptr);
@@ -1382,10 +1393,21 @@ int main(int argc, char** argv) {
 
   // Run 16 crashed in this wait, after the Vulkan probe and before +: a
   // durable line at 1, 2, 3, 5, 10 s and then every 10 s says when, and every
-  // change of the buttons is logged with its time.
+  // change of the buttons is logged with its time. Run 17 crashed before the
+  // 1 s line: one more after the first pass of the loop and at 250 and 500 ms,
+  // with the counters of the working threads.
   bool plus = false;
   const u64 wait_start = armGetSystemTick();
-  u64 next_line_s = 1, buttons_now = 0, updates = 0;
+  u64 next_line_s = 1, buttons_now = 0, updates = 0, iterations = 0;
+  u64 next_early_ms = 250;
+  auto log_early = [&](const char* what) {
+    uint64_t counts[kExitWorkers];
+    ExitWorkerCounts(counts);
+    SMOKE_INFO("waiting for +: %s at %.3f s, %" PRIu64 " console updates; worker counts spin %"
+               PRIu64 " mutex %" PRIu64 " malloc %" PRIu64 " SD read %" PRIu64 " holder %" PRIu64,
+               what, double(armTicksToNs(armGetSystemTick() - wait_start)) / 1e9, updates,
+               counts[0], counts[1], counts[2], counts[3], counts[4]);
+  };
   while (appletMainLoop()) {
     padUpdate(&pad);
     const u64 buttons = padGetButtons(&pad);
@@ -1407,6 +1429,14 @@ int main(int argc, char** argv) {
     if (g_console_open) {
       consoleUpdate(nullptr);
       ++updates;
+    }
+    if (++iterations == 1) {
+      log_early("first pass of the loop (padUpdate, console) done");
+    }
+    const u64 ms = armTicksToNs(armGetSystemTick() - wait_start) / 1'000'000ull;
+    if (next_early_ms <= 500 && ms >= next_early_ms) {
+      log_early(next_early_ms == 250 ? "250 ms" : "500 ms");
+      next_early_ms += 250;
     }
     svcSleepThread(16'000'000);
   }
