@@ -44,16 +44,46 @@ struct Counters {
   std::atomic<uint64_t> callbacks{0};
   std::atomic<uint64_t> frames_submitted{0};
   std::atomic<uint64_t> frames_played{0};
+  std::atomic<uint64_t> callback_ns{0};
+  std::atomic<uint64_t> callback_ns_max{0};
+  std::atomic<uint64_t> periods{0};
+  std::atomic<uint64_t> resyncs{0};
 };
 Counters g_counters;
+
+class NullAudioSystem;
+// The instance created last, for StopNullAudio.
+std::atomic<NullAudioSystem*> g_instance{nullptr};
 
 class NullAudioSystem final : public system::IAudioSystem {
  public:
   explicit NullAudioSystem(runtime::FunctionDispatcher* function_dispatcher)
       : function_dispatcher_(function_dispatcher),
-        xma_decoder_(std::make_unique<XmaDecoder>(function_dispatcher)) {}
+        xma_decoder_(std::make_unique<XmaDecoder>(function_dispatcher)) {
+    g_instance.store(this);
+  }
 
-  ~NullAudioSystem() override { Shutdown(); }
+  ~NullAudioSystem() override {
+    NullAudioSystem* self = this;
+    g_instance.compare_exchange_strong(self, nullptr);
+    Shutdown();
+  }
+
+  // StopNullAudio: the worker leaves at its next check of running_.
+  bool StopWorker(uint32_t timeout_ms) {
+    running_ = false;
+    if (!worker_) {
+      return true;
+    }
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!worker_done_.load()) {
+      if (Clock::now() >= deadline) {
+        return false;
+      }
+      rex::thread::Sleep(std::chrono::milliseconds(1));
+    }
+    return true;
+  }
 
   X_STATUS Setup(system::KernelState* kernel_state) override {
     kernel_state_ = kernel_state;
@@ -183,19 +213,30 @@ class NullAudioSystem final : public system::IAudioSystem {
             wrapped_arg = c.wrapped_arg;
           }
           uint64_t args[] = {wrapped_arg};
+          const auto start = Clock::now();
           function_dispatcher_->Execute(worker_->thread_state(), callback, args, 1);
+          const uint64_t ns = uint64_t(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
           g_counters.callbacks.fetch_add(1, std::memory_order_relaxed);
+          g_counters.callback_ns.fetch_add(ns, std::memory_order_relaxed);
+          uint64_t seen = g_counters.callback_ns_max.load(std::memory_order_relaxed);
+          while (ns > seen && !g_counters.callback_ns_max.compare_exchange_weak(
+                                  seen, ns, std::memory_order_relaxed)) {
+          }
         }
       }
+      g_counters.periods.fetch_add(1, std::memory_order_relaxed);
       next += kFramePeriod;
       const auto now = Clock::now();
       if (now > next + 100ms) {
         next = now;  // far behind (a long callback): no burst to catch up
+        g_counters.resyncs.fetch_add(1, std::memory_order_relaxed);
       }
       if (next > now) {
         rex::thread::Sleep(std::chrono::duration_cast<std::chrono::microseconds>(next - now));
       }
     }
+    worker_done_ = true;
   }
 
   runtime::FunctionDispatcher* function_dispatcher_ = nullptr;
@@ -204,6 +245,7 @@ class NullAudioSystem final : public system::IAudioSystem {
   system::object_ref<system::XHostThread> worker_;
   std::atomic<bool> running_{false};
   std::atomic<bool> shut_down_{false};
+  std::atomic<bool> worker_done_{false};
   std::mutex mutex_;                     // clients_
   std::recursive_mutex dispatch_mutex_;  // held while a guest callback runs
   Client clients_[kMaximumClients];
@@ -222,7 +264,16 @@ NullAudioStats GetNullAudioStats() {
   s.callbacks = g_counters.callbacks.load(std::memory_order_relaxed);
   s.frames_submitted = g_counters.frames_submitted.load(std::memory_order_relaxed);
   s.frames_played = g_counters.frames_played.load(std::memory_order_relaxed);
+  s.callback_ns = g_counters.callback_ns.load(std::memory_order_relaxed);
+  s.callback_ns_max = g_counters.callback_ns_max.exchange(0, std::memory_order_relaxed);
+  s.periods = g_counters.periods.load(std::memory_order_relaxed);
+  s.resyncs = g_counters.resyncs.load(std::memory_order_relaxed);
   return s;
+}
+
+bool StopNullAudio(uint32_t timeout_ms) {
+  NullAudioSystem* instance = g_instance.load();
+  return instance ? instance->StopWorker(timeout_ms) : true;
 }
 
 }  // namespace rex::audio

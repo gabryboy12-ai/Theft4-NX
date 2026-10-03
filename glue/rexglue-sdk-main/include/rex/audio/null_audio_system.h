@@ -41,7 +41,18 @@ struct NullAudioStats {
   uint64_t callbacks = 0;        // guest render callbacks called
   uint64_t frames_submitted = 0; // XAudioSubmitRenderDriverFrame
   uint64_t frames_played = 0;    // frames dropped at the real rate
+  uint64_t callback_ns = 0;      // time spent in guest callbacks, in all
+  uint64_t callback_ns_max = 0;  // longest callback since the previous call
+  uint64_t periods = 0;          // worker periods (one every 5.333 ms when on time)
+  uint64_t resyncs = 0;          // periods dropped after falling > 100 ms behind
 };
+// The maximum restarts from zero after each call.
 NullAudioStats GetNullAudioStats();
+
+// Cooperative stop of the worker of the null audio system created last (the
+// exit of switch-game): no new period starts, and a guest callback in
+// progress is let finish. Waits at most timeout_ms; true = the worker ended
+// (or there is none). The XMA decoder is left as it is.
+bool StopNullAudio(uint32_t timeout_ms);
 
 }  // namespace rex::audio
