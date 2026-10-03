@@ -57,6 +57,11 @@
 #if REX_PLATFORM_MAC
 #include <rex/ui/surface_mac.h>
 #endif
+#if REX_PLATFORM_NX
+#include <switch.h>
+
+#include <rex/ui/surface_switch.h>
+#endif
 #if REX_PLATFORM_IOS
 extern "C" void theft4_frame_counter_note_published(void);
 #endif
@@ -576,6 +581,11 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
     type_flags |= Surface::kTypeFlag_CAMetalLayer;
   }
 #endif
+#if REX_PLATFORM_NX
+  if (instance_extensions.ext_NN_vi_surface) {
+    type_flags |= Surface::kTypeFlag_ViNWindow;
+  }
+#endif
   return type_flags;
 }
 
@@ -1017,6 +1027,27 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
           return SurfacePaintConnectResult::kFailureSurfaceUnusable;
         }
         vulkan_surface_create_result = ifn.vkCreateMetalSurfaceEXT(
+            instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
+      } break;
+#endif
+#if REX_PLATFORM_NX
+      case Surface::kTypeIndex_ViNWindow: {
+        auto& vi_surface = static_cast<const ViNWindowSurface&>(new_surface);
+        // libnx takes new dimensions only before the NWindow's first
+        // swapchain (switch-smoke's probe and nfsmw-nx do the same); later
+        // resizes go through oldSwapchain.
+        const Result dimensions_result =
+            nwindowSetDimensions(vi_surface.window(), new_surface_width, new_surface_height);
+        if (R_FAILED(dimensions_result)) {
+          REXLOG_WARN("VulkanPresenter: nwindowSetDimensions({}x{}) failed: 0x{:08X}",
+                      new_surface_width, new_surface_height, dimensions_result);
+        }
+        VkViSurfaceCreateInfoNN surface_create_info;
+        surface_create_info.sType = VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
+        surface_create_info.pNext = nullptr;
+        surface_create_info.flags = 0;
+        surface_create_info.window = vi_surface.window();
+        vulkan_surface_create_result = ifn.vkCreateViSurfaceNN(
             instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
       } break;
 #endif

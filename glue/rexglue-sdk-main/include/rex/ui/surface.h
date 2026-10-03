@@ -35,6 +35,8 @@ class Surface {
     kTypeIndex_Win32Hwnd,
     // macOS — CAMetalLayer presented via MoltenVK (VK_EXT_metal_surface).
     kTypeIndex_CAMetalLayer,
+    // Nintendo Switch — the libnx NWindow (VK_NN_vi_surface).
+    kTypeIndex_ViNWindow,
   };
   using TypeFlags = uint32_t;
   enum : TypeFlags {
@@ -42,6 +44,7 @@ class Surface {
     kTypeFlag_XcbWindow = TypeFlags(1) << kTypeIndex_XcbWindow,
     kTypeFlag_Win32Hwnd = TypeFlags(1) << kTypeIndex_Win32Hwnd,
     kTypeFlag_CAMetalLayer = TypeFlags(1) << kTypeIndex_CAMetalLayer,
+    kTypeFlag_ViNWindow = TypeFlags(1) << kTypeIndex_ViNWindow,
   };
 
   Surface(const Surface& surface) = delete;

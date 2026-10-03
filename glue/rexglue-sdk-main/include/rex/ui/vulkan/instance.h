@@ -71,6 +71,10 @@ class VulkanInstance {
 #ifdef VK_USE_PLATFORM_METAL_EXT
 #include <rex/ui/vulkan/functions/instance_ext_metal_surface.inc>
 #endif
+    // VK_NN_vi_surface (#63)
+#ifdef VK_USE_PLATFORM_VI_NN
+#include <rex/ui/vulkan/functions/instance_nn_vi_surface.inc>
+#endif
     // VK_KHR_get_physical_device_properties2 (#60, promoted to 1.1)
 #include <rex/ui/vulkan/functions/instance_1_1_khr_get_physical_device_properties2.inc>
     // VK_EXT_debug_utils (#129)
@@ -98,6 +102,9 @@ class VulkanInstance {
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
     bool ext_EXT_metal_surface = false;  // #217
+#endif
+#ifdef VK_USE_PLATFORM_VI_NN
+    bool ext_NN_vi_surface = false;  // #63
 #endif
     bool ext_1_1_KHR_get_physical_device_properties2 = false;  // #60
     bool ext_EXT_debug_utils = false;                          // #129

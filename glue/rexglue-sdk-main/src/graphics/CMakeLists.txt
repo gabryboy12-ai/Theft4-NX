@@ -85,7 +85,7 @@ if(REXGLUE_USE_D3D12)
     )
 endif()
 
-if(REXGLUE_USE_VULKAN)
+if(REXGLUE_USE_VULKAN OR REXGLUE_SWITCH_VULKAN)
     list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_SPIRV_SOURCES} ${REXGPU_XENOS_VULKAN_SOURCES})
 endif()
 
@@ -140,6 +140,71 @@ function(rexgpu_configure_plugin target export_name)
         )
     endif()
 endfunction()
+
+# Switch with the Vulkan backend (REXGLUE_SWITCH_VULKAN, CORE_ONLY still on;
+# 06-game-boot-plan.md section 24): no plugin to load in an NRO, so one static
+# library with the backend and the SDL-free part of rexui (presenter, window
+# base, Vulkan provider/presenter/device, the NWindow window and context).
+# switch-game creates VulkanGraphicsSystem itself (cvar nx_gpu) and links this
+# library whole (static constructors register the cvars).
+if(REXGLUE_SWITCH_VULKAN)
+    set(_ui "${REXGLUE_ROOT}/src/ui")
+    add_library(rexgpu-xenos-nx STATIC
+        ${REXGPU_XENOS_SOURCES}
+        ${_ui}/graphics_upload_buffer_pool.cpp
+        ${_ui}/graphics_util.cpp
+        ${_ui}/imgui_dialog.cpp
+        ${_ui}/imgui_drawer.cpp
+        ${_ui}/immediate_drawer.cpp
+        ${_ui}/menu_item.cpp
+        ${_ui}/presenter.cpp
+        ${_ui}/renderdoc_api.cpp
+        ${_ui}/window.cpp
+        ${_ui}/windowed_app_context.cpp
+        ${_ui}/window_nx.cpp
+        ${_ui}/vulkan/linked_type_descriptor_set_allocator.cpp
+        ${_ui}/vulkan/single_layout_descriptor_set_pool.cpp
+        ${_ui}/vulkan/spirv_tools_context.cpp
+        ${_ui}/vulkan/ui_samplers.cpp
+        ${_ui}/vulkan/vulkan_device.cpp
+        ${_ui}/vulkan/vulkan_immediate_drawer.cpp
+        ${_ui}/vulkan/vulkan_instance.cpp
+        ${_ui}/vulkan/vulkan_mem_alloc.cpp
+        ${_ui}/vulkan/vulkan_presenter.cpp
+        ${_ui}/vulkan/vulkan_provider.cpp
+        ${_ui}/vulkan/vulkan_submission_tracker.cpp
+        ${_ui}/vulkan/vulkan_upload_buffer_pool.cpp
+        ${_ui}/vulkan/vulkan_util.cpp
+    )
+    add_library(rex::gpu-xenos-nx ALIAS rexgpu-xenos-nx)
+    target_compile_definitions(rexgpu-xenos-nx PUBLIC REX_HAS_VULKAN=1)
+    target_include_directories(rexgpu-xenos-nx PRIVATE
+        ${REXGLUE_ROOT}/thirdparty/renderdoc
+        ${REXGLUE_ROOT}/thirdparty/stb
+        ${REXGLUE_ROOT}/src  # ui/shaders/bytecode
+        ${REXGLUE_ROOT}
+    )
+    target_compile_options(rexgpu-xenos-nx PRIVATE -Wno-unused-variable)
+    target_link_libraries(rexgpu-xenos-nx PUBLIC
+        rexruntime
+        Vulkan::Headers
+        GPUOpen::VulkanMemoryAllocator
+        imgui::imgui
+    )
+    target_link_libraries(rexgpu-xenos-nx PRIVATE
+        xxHash::xxhash
+        snappy
+        utf8cpp
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+        GenericCodeGen
+        OSDependent
+        OGLCompiler
+        SPIRV-Tools-static
+    )
+    return()
+endif()
 
 add_library(rexgpu-xenos SHARED
     plugin_main.cpp

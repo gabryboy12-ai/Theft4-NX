@@ -27,7 +27,10 @@
 #include "vulkan_moltenvk.h"
 #endif
 
-#if REX_PLATFORM_IOS
+#if REX_PLATFORM_IOS || REX_PLATFORM_NX
+// iOS (MoltenVK) and Switch (Mesa's libvulkan.a, NVK) link the driver into the
+// executable; api.h defines VK_NO_PROTOTYPES, so the two entry points used
+// are declared here.
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vkGetInstanceProcAddr(VkInstance instance, const char* name);
 extern "C" VKAPI_ATTR void VKAPI_CALL
@@ -52,7 +55,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
 
   // Load the RenderDoc API if connected.
 
-#if !REX_PLATFORM_IOS
+#if !REX_PLATFORM_IOS && !REX_PLATFORM_NX
   vulkan_instance->renderdoc_api_ = RenderDocAPI::CreateIfConnected();
 #endif
 
@@ -66,6 +69,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   // iOS applications statically link MoltenVK. Dynamic loader discovery is
   // unavailable in the app sandbox and unnecessary when these exported entry
   // points are already part of the executable.
+  ifn.vkGetInstanceProcAddr = &vkGetInstanceProcAddr;
+  ifn.vkDestroyInstance = &vkDestroyInstance;
+  loader_loaded = true;
+#elif REX_PLATFORM_NX
+  // No loader and no dlopen in an NRO: NVK is inside the executable
+  // (vkCreateInstance this way: switch-smoke step 7 and nfsmw-nx).
   ifn.vkGetInstanceProcAddr = &vkGetInstanceProcAddr;
   ifn.vkDestroyInstance = &vkDestroyInstance;
   loader_loaded = true;
@@ -106,7 +115,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   }
 #endif
 
-#if !REX_PLATFORM_IOS
+#if !REX_PLATFORM_IOS && !REX_PLATFORM_NX
 #define XE_VULKAN_LOAD_LOADER_FUNCTION(name) \
   functions_loaded &= (ifn.name = vulkan_instance->loader_.GetSymbol<PFN_##name>(#name)) != nullptr;
   XE_VULKAN_LOAD_LOADER_FUNCTION(vkGetInstanceProcAddr);
@@ -195,6 +204,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     // #217.
     requested_extensions.emplace("VK_EXT_metal_surface",
                                  &vulkan_instance->extensions_.ext_EXT_metal_surface);
+#endif
+#ifdef VK_USE_PLATFORM_VI_NN
+    // #63.
+    requested_extensions.emplace("VK_NN_vi_surface",
+                                 &vulkan_instance->extensions_.ext_NN_vi_surface);
 #endif
   }
 
@@ -481,6 +495,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
 #ifdef VK_USE_PLATFORM_METAL_EXT
   if (vulkan_instance->extensions_.ext_EXT_metal_surface) {
 #include <rex/ui/vulkan/functions/instance_ext_metal_surface.inc>
+  }
+#endif
+#ifdef VK_USE_PLATFORM_VI_NN
+  if (vulkan_instance->extensions_.ext_NN_vi_surface) {
+#include <rex/ui/vulkan/functions/instance_nn_vi_surface.inc>
   }
 #endif
   if (vulkan_instance->extensions_.ext_KHR_surface) {

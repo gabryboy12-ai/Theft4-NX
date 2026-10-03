@@ -40,6 +40,13 @@ if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
     set(REXGLUE_HEADLESS_XMA_DECODER ON CACHE BOOL "" FORCE)
     set(REXGLUE_HEADLESS_INPUT ON CACHE BOOL "" FORCE)
 endif()
+# Switch only: also build ReXGlue's Vulkan backend as one static library
+# (rexgpu-xenos-nx) without SDL3, CORE_ONLY staying on (06-game-boot-plan.md
+# section 24). switch-game turns it on; the run binaries are built without it.
+option(REXGLUE_SWITCH_VULKAN "Switch: also build the Vulkan GPU backend (rexgpu-xenos-nx)" OFF)
+if(REXGLUE_SWITCH_VULKAN AND NOT LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+    message(FATAL_ERROR "REXGLUE_SWITCH_VULKAN is for the Switch build only")
+endif()
 if(REXGLUE_HEADLESS_KERNEL AND NOT (REXGLUE_CORE_ONLY AND REXGLUE_RUNTIME_ONLY))
     message(FATAL_ERROR "REXGLUE_HEADLESS_KERNEL requires CORE_ONLY and RUNTIME_ONLY")
 endif()
@@ -320,8 +327,12 @@ if(REXGLUE_CORE_ONLY)
         if(REXGLUE_HEADLESS_KERNEL)
             add_subdirectory(src/kernel)
         endif()
+        if(REXGLUE_SWITCH_VULKAN)
+            add_subdirectory(src/graphics)  # rexgpu-xenos-nx only
+        endif()
     endif()
-    message(STATUS "ReXGlue minimal: ${REX_PLATFORM}; system runtime=${REXGLUE_RUNTIME_ONLY}; no renderer or host tools")
+    message(STATUS "ReXGlue minimal: ${REX_PLATFORM}; system runtime=${REXGLUE_RUNTIME_ONLY}; "
+                   "Switch Vulkan backend=${REXGLUE_SWITCH_VULKAN}; no host tools")
     return()
 endif()
 add_subdirectory(src/filesystem)

@@ -226,6 +226,70 @@ endif()
 #=============================================================================
 add_subdirectory(utfcpp)
 
+#=============================================================================
+# Switch with ReXGlue's Vulkan backend (REXGLUE_SWITCH_VULKAN, CORE_ONLY still
+# on; 06-game-boot-plan.md section 24): what rexgpu-xenos-nx needs on top of
+# the core set. No SDL3; no volk (NVK is linked into the NRO, the instance takes
+# vkGetInstanceProcAddr directly); same SPIR-V settings as the desktop.
+#=============================================================================
+if(REXGLUE_SWITCH_VULKAN)
+    set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    set(SNAPPY_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory(snappy)
+    target_compile_options(snappy PRIVATE -w)
+
+    set(VULKAN_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(VULKAN_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "" FORCE)
+    add_subdirectory(vulkan-headers)
+    set(VMA_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory(vulkan-memory-allocator)
+
+    set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/imgui")
+    add_library(imgui OBJECT
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_demo.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+    )
+    add_library(imgui::imgui ALIAS imgui)
+    target_include_directories(imgui PUBLIC $<BUILD_INTERFACE:${IMGUI_DIR}>)
+    target_compile_options(imgui PRIVATE -w)
+
+    set(SPIRV_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPIRV_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory(spirv-headers)
+    set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "" FORCE)
+    set(SPIRV_SKIP_TESTS ON CACHE BOOL "" FORCE)
+    set(SPIRV_WERROR OFF CACHE BOOL "" FORCE)
+    set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE BOOL "" FORCE)
+    add_subdirectory(spirv-tools)
+    target_compile_options(SPIRV-Tools-static PRIVATE -w)
+
+    set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
+    set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+    set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(SKIP_GLSLANG_INSTALL ON CACHE BOOL "" FORCE)
+    set(ENABLE_RTTI ON CACHE BOOL "" FORCE)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+    # glslang's precompiled header is passed with an MSYS path (/c/...) that
+    # devkitA64's native GCC cannot open.
+    set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+    add_subdirectory(glslang)
+    if(NOT TARGET glslang::SPIRV)
+        add_library(glslang::SPIRV ALIAS SPIRV)
+    endif()
+    # glslang picks OSDependent by WIN32/UNIX, and the devkitA64 toolchain is
+    # neither: its pthread version (TLS for the pool allocator).
+    if(NOT TARGET OSDependent)
+        add_subdirectory(glslang/glslang/OSDependent/Unix glslang-osdependent)
+    endif()
+endif()
+
 if(REXGLUE_CORE_ONLY AND NOT REXGLUE_HEADLESS_XMA_DECODER)
     return()
 endif()

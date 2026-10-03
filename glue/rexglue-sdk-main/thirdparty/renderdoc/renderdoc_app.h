@@ -30,7 +30,7 @@
 
 #if defined(WIN32) || defined(_WIN32)
 	#define RENDERDOC_CC __cdecl
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__SWITCH__)  // Switch: no RenderDoc, the types only
 	#define RENDERDOC_CC
 #else
 	#error "Unknown platform"

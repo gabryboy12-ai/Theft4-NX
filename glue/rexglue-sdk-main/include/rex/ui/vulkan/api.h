@@ -57,6 +57,18 @@
 #endif
 #endif
 
+#if REX_PLATFORM_NX
+// Horizon surface (nn::vi, VK_NN_vi_surface): NVK implements it (switch-smoke
+// step 7, run 16; nfsmw-nx). vulkan.hpp's dynamic loader only knows __unix__,
+// __APPLE__, QNX and Fuchsia; NVK is linked into the executable, nothing to load.
+#ifndef VK_USE_PLATFORM_VI_NN
+#define VK_USE_PLATFORM_VI_NN
+#endif
+#ifndef VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL
+#define VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL 0
+#endif
+#endif
+
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_hpp_macros.hpp>
 #include <vulkan/vulkan_to_string.hpp>

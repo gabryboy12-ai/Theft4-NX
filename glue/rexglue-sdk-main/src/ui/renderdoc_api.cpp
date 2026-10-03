@@ -16,7 +16,8 @@ namespace rex {
 namespace ui {
 
 std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
-#if REX_PLATFORM_MAC || REX_PLATFORM_IOS
+#if REX_PLATFORM_MAC || REX_PLATFORM_IOS || REX_PLATFORM_NX
+  // Switch: no RenderDoc on Horizon, and an NRO cannot load libraries.
   // The vendored RenderDoc app API header doesn't expose a macOS path.
   // Keep RenderDoc optional and simply report "not connected" on this platform.
   return nullptr;
