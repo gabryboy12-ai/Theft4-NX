@@ -103,6 +103,12 @@
 #include "nx_exit.h"
 #include "nx_input.h"
 
+#if THEFT4_NX_VULKAN
+#include <rex/graphics/vulkan/graphics_system.h>
+#include <rex/ui/window_nx.h>
+#include <rex/ui/windowed_app_context_nx.h>
+#endif
+
 REXCVAR_DEFINE_BOOL(nx_null_gpu, true, "Switch",
                     "Give the runtime the null GPU (rex/system/null_graphics_system.h): the "
                     "Vd* exports work and the ring is consumed without drawing. false: the "
@@ -110,6 +116,10 @@ REXCVAR_DEFINE_BOOL(nx_null_gpu, true, "Switch",
 REXCVAR_DEFINE_BOOL(nx_input, true, "Switch",
                     "Give the game the Switch controller as its 360 pad (nx_input.h). false: "
                     "no input system, XamInputGetState says not connected (run 14)");
+REXCVAR_DEFINE_STRING(nx_gpu, "null", "Switch",
+                      "GPU: null = the null GPU (nx_null_gpu = false: none); vulkan = ReXGlue's "
+                      "Vulkan backend on NVK, presenting on the default NWindow with the console "
+                      "closed (only in a build with THEFT4_SWITCH_GAME_VULKAN; 06 section 24)");
 REXCVAR_DEFINE_STRING(nx_exit_mode, "D", "Switch",
                       "Exit at + (hold 1 s): D = file I/O gate closed and drained, null audio "
                       "stopped, every thread told to end and joined (2 s each), then exit(0); "
@@ -126,6 +136,13 @@ constexpr const char* kConfigPath = "sdmc:/switch/theft4/game.toml";
 
 bool g_logging_ready = false;
 std::atomic<bool> g_stopped{false};
+#if THEFT4_NX_VULKAN
+// nx_gpu = vulkan: the UI context (this thread), the window and the backend.
+// Never destroyed, as the runtime.
+std::unique_ptr<rex::ui::NxWindowedAppContext> g_ui_context;
+std::unique_ptr<rex::ui::Window> g_window;
+rex::graphics::vulkan::VulkanGraphicsSystem* g_vulkan_graphics = nullptr;
+#endif
 std::atomic<bool> g_main_thread_returned{false};
 u64 g_module_base = 0;
 u64 g_module_text_size = 0;  // the R-X block at the base (for the stack scan)
@@ -1187,6 +1204,33 @@ namespace {
 
   rex::RuntimeConfig config;
   config.tool_mode = false;
+  // Phase (a) of the renderer (06 section 24, not tried on the console yet):
+  // ReXGlue's Vulkan backend, created here as the null GPU is; the UI thread
+  // is this loop (PumpFromUIThread), the window the default NWindow, which
+  // the console gives up first.
+  const bool want_vulkan = REXCVAR_GET(nx_gpu) == "vulkan";
+#if THEFT4_NX_VULKAN
+  if (want_vulkan) {
+    {
+      std::lock_guard<std::timed_mutex> lock(g_console_mutex);
+      if (g_console_open) {
+        consoleExit(nullptr);
+        g_console_open = false;
+      }
+    }
+    g_ui_context = std::make_unique<rex::ui::NxWindowedAppContext>();
+    runtime->set_app_context(g_ui_context.get());
+    auto vulkan = std::make_unique<rex::graphics::vulkan::VulkanGraphicsSystem>();
+    g_vulkan_graphics = vulkan.get();
+    config.graphics = std::move(vulkan);
+    GAME_INFO("graphics: ReXGlue's Vulkan backend on NVK (cvar nx_gpu = vulkan); console closed");
+  } else
+#else
+  if (want_vulkan) {
+    GAME_ERROR("nx_gpu = vulkan, but this build has no Vulkan backend "
+               "(THEFT4_SWITCH_GAME_VULKAN off): the null GPU instead");
+  }
+#endif
   // Run 13 stopped at VdSetGraphicsInterruptCallback: without a graphics
   // object every Vd* export that needs one stops the run. The null GPU
   // consumes the ring and raises the interrupts without drawing.
@@ -1231,6 +1275,22 @@ namespace {
     WaitForPlusAndExit(&g_pad);
   }
   LogArena("after Setup");
+#if THEFT4_NX_VULKAN
+  if (g_vulkan_graphics) {
+    // As ReXApp does: the window, then the presenter Setup made on this thread.
+    g_window = rex::ui::Window::Create(*g_ui_context, "Theft4", rex::ui::NxWindow::kWidth,
+                                       rex::ui::NxWindow::kHeight);
+    if (!g_window || !g_window->Open()) {
+      GAME_ERROR("Vulkan: the NWindow window did not open");
+    } else if (!g_vulkan_graphics->presenter()) {
+      GAME_ERROR("Vulkan: GPU set up without a presenter");
+    } else {
+      g_window->SetPresenter(g_vulkan_graphics->presenter());
+      GAME_INFO("Vulkan: presenter on the default NWindow (%ux%u)", rex::ui::NxWindow::kWidth,
+                rex::ui::NxWindow::kHeight);
+    }
+  }
+#endif
   // The 360's utility-drive caches, which the PC run showed the game opening
   // (cache:/valid.txt, cache1:/valid.txt). To be verified on the console: the
   // runtime left cache: unresolved on purpose (Runtime::SetupVfs).
@@ -1294,6 +1354,11 @@ namespace {
       GAME_INFO("main guest thread is no longer running");
     }
     heartbeat.Tick();
+#if THEFT4_NX_VULKAN
+    if (g_ui_context) {
+      g_ui_context->PumpFromUIThread();  // posted functions, then the paint
+    }
+#endif
     ConsoleRefresh();
     svcSleepThread(16'000'000);
   }

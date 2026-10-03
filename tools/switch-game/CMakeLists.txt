@@ -29,16 +29,26 @@ endif()
 include("${THEFT4_GENERATED_DIR}/sources.cmake")  # GENERATED_SOURCES
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
+# Phase (a) of the renderer (06-game-boot-plan.md section 24): ReXGlue's Vulkan
+# backend (rexgpu-xenos-nx) and NVK linked in; the cvar nx_gpu picks it at run
+# time, the null GPU stays the default. Off for the run binaries: configure a
+# separate build directory with -DTHEFT4_SWITCH_GAME_VULKAN=ON.
+option(THEFT4_SWITCH_GAME_VULKAN "Link ReXGlue's Vulkan backend and NVK (cvar nx_gpu)" OFF)
+set(REXGLUE_SWITCH_VULKAN ${THEFT4_SWITCH_GAME_VULKAN} CACHE BOOL "" FORCE)
 add_subdirectory("${THEFT4_ROOT}/glue/rexglue-sdk-main" rexglue-sdk)
 
 # Stubs for the imports the SDK does not define (missing_imports.py), from the
 # archives actually linked; regenerated when they or the generated header change.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+# missing_imports.py calls the devkitPro nm (an MSYS path): run it with the
+# MSYS python even when the Vulkan build points Python3_EXECUTABLE at
+# native_python.sh for SPIRV-Tools.
+set(THEFT4_HOST_PYTHON "${Python3_EXECUTABLE}" CACHE FILEPATH "Python for missing_imports.py")
 set(MISSING_IMPORTS_CPP "${CMAKE_CURRENT_BINARY_DIR}/missing_imports.cpp")
 set(MISSING_IMPORTS_TXT "${CMAKE_CURRENT_BINARY_DIR}/missing_imports.txt")
 add_custom_command(
     OUTPUT "${MISSING_IMPORTS_CPP}" "${MISSING_IMPORTS_TXT}"
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/missing_imports.py"
+    COMMAND "${THEFT4_HOST_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/missing_imports.py"
             --header "${THEFT4_GENERATED_DIR}/gta4_init.h"
             --nm "${CMAKE_NM}"
             --out "${MISSING_IMPORTS_CPP}"
@@ -88,6 +98,24 @@ target_link_libraries(switch-game PRIVATE
     -Wl,--end-group
 )
 target_link_options(switch-game PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/switch-game.map")
+if(THEFT4_SWITCH_GAME_VULKAN)
+    # The whole backend archive (its cvars and the Window::Create of the NWindow
+    # register or are found only that way), then NVK as switch-smoke links it:
+    # Mesa's static libvulkan.a and its dependencies (vulkan.pc), libelf stubbed.
+    # main.cpp only: the generated sources keep their flags and objects (the
+    # backend is linked LINK_ONLY below, so its usage requirements stay out).
+    set_source_files_properties(main.cpp PROPERTIES
+        COMPILE_DEFINITIONS "THEFT4_NX_VULKAN=1;REX_HAS_VULKAN=1"
+        INCLUDE_DIRECTORIES
+            "$<TARGET_PROPERTY:Vulkan-Headers,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:VulkanMemoryAllocator,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>")
+    target_sources(switch-game PRIVATE "${THEFT4_ROOT}/tools/switch-smoke/nx_elf_stubs.c")
+    target_link_options(switch-game PRIVATE
+        "LINKER:--whole-archive,$<TARGET_FILE:rexgpu-xenos-nx>,--no-whole-archive")
+    set_property(TARGET switch-game APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:rexgpu-xenos-nx>")
+    target_link_directories(switch-game PRIVATE "${DEVKITPRO}/portlibs/switch/lib")
+    target_link_libraries(switch-game PRIVATE $<LINK_ONLY:rexgpu-xenos-nx>
+        -Wl,--start-group vulkan expat zstd z nx -Wl,--end-group)
+endif()
 # Every way out of the process goes through main.cpp's __wrap_* first, which
 # logs the code and the caller before the real function runs.
 target_link_options(switch-game PRIVATE

@@ -1738,3 +1738,100 @@ Nient'altro.
   `N of M threads ended within 2 s`, poi `atexit` e `_exit`; e se esce pulito.
 - **Smoke:** le righe `waiting for +: first pass …`, `250 ms`, `500 ms`;
   `process threads`; se con la console chiusa il crash sparisce.
+
+## 24. Fase (a) del renderer: il backend Vulkan di ReXGlue dentro switch-game (piano, 2026-10-03)
+
+Fase (a) di §11: la grafica imitata di ReXGlue (plugin `xenos`, backend
+Vulkan) su NVK, solo per vedere i primi fotogrammi. Base: la sonda del run 16
+(11-vulkan-probe.md: presentazione su `NWindow`, FIFO, 3 immagini, 60,6 fps,
+API 1.3, niente fragment shader interlock → ReXGlue userà
+`Path::kHostRenderTargets`). Riferimento per i pezzi Switch: l'SDK di
+nfsmw-nx (`<refs>/nfsmw-nx/sdk`), che ha già `VK_NN_vi_surface`, la
+`NWindow` come `Surface`, NVK statico e lo stack glslang/SPIRV-Tools per
+aarch64.
+
+**Questo giro: solo fino a "compila e linka".** Niente prova sulla console,
+la GPU nulla resta com'è e resta il default.
+
+### Passi
+
+1. **SDK, CMake** (`glue/rexglue-sdk-main/CMakeLists.txt`,
+   `thirdparty/CMakeLists.txt`, `src/graphics/CMakeLists.txt`,
+   `src/ui/CMakeLists.txt`): opzione `REXGLUE_SWITCH_VULKAN` (spenta), che
+   sulla Switch **lascia `REXGLUE_CORE_ONLY` acceso** e in più:
+   - aggiunge le dipendenze del backend: `vulkan-headers`,
+     `vulkan-memory-allocator`, `spirv-headers`, `spirv-tools`, `glslang`,
+     `snappy` (`xxHash` e `imgui` ci sono già);
+   - una libreria statica `rexgpu-xenos-static`: i sorgenti di `rexgpu-xenos`
+     (nucleo, traduttore SPIR-V, `vulkan/*`) più la parte di `rexui` senza
+     SDL (`presenter`, `window`, `windowed_app_context`, `immediate_drawer`,
+     `imgui_drawer`, `graphics_util`, `graphics_upload_buffer_pool`,
+     `ui/vulkan/*` tranne MoltenVK), con `REX_HAS_VULKAN=1`. Niente
+     `window_sdl`, `windowed_app_context_sdl`, `sdl_virtual_key`, overlay.
+2. **Loader statico**: `vulkan_instance.cpp` sulla Switch prende
+   `vkGetInstanceProcAddr`/`vkDestroyInstance` da `libvulkan.a` (come già fa
+   iOS con MoltenVK), senza `DynamicLibrary`; RenderDoc spento.
+3. **Surface `NWindow`**: tipo `kTypeIndex_ViNWindow` in `rex/ui/surface.h`,
+   `ViNWindowSurface` in `rex/ui/surface_switch.h`, estensione di istanza
+   `VK_NN_vi_surface` (funzioni in `functions/instance_nn_vi_surface.inc`),
+   ramo `vkCreateViSurfaceNN` in `vulkan_presenter.cpp` con
+   `nwindowSetDimensions` prima della prima swapchain (come la sonda e
+   nfsmw-nx).
+4. **Finestra e contesto minimi per Switch** (nel nostro SDK, sotto
+   `REX_PLATFORM_NX`): un `ui::Window` sulla `NWindow` di default
+   (`nwindowGetDefault()`, 1280×720) e un `WindowedAppContext` il cui thread
+   dell'interfaccia è il ciclo principale di switch-game (esegue le funzioni
+   in coda a ogni giro); presi da `window_switch.cpp` e
+   `windowed_app_context_switch.cpp` di nfsmw-nx, ridotti.
+5. **switch-game**: `libvulkan.a` (`vulkan expat zstd z nx`, due volte) e
+   `nx_elf_stubs.c` come lo smoke (target `INTERFACE` come `rex::nvk` di
+   nfsmw-nx); `--whole-archive` sulla libreria del backend; cvar `nx_gpu =
+   null|vulkan` (**default `null`**): `vulkan` crea `VulkanGraphicsSystem`
+   direttamente (come `CreateNullGraphicsSystem`, nessun caricamento di
+   plugin), il contesto e la finestra, e li dà al runtime.
+6. **Trappole di §12, da fare quando si prova sulla console** (non in questo
+   giro): `__nx_nv_transfermem_size` alzato prima di `nvInitialize`,
+   sotto-allocazione da blocchi grandi, un submit per fotogramma,
+   `MESA_SHADER_CACHE_DISABLE`.
+
+### Esito di questo giro (compila e linka; non provato sulla console)
+
+Come configurarlo (stessa cartella di build, così i sorgenti generati non si
+ricompilano: la definizione e gli include del backend vanno solo su
+`main.cpp`, la libreria è linkata `$<LINK_ONLY:…>`):
+
+```
+export THEFT4_NATIVE_PYTHON=/<drive>/<python nativo>/python.exe
+cmake -S tools/switch-game -B out/build/switch-game -DTHEFT4_SWITCH_GAME_VULKAN=ON       -U "_Python3_*" -U Python3_EXECUTABLE       -DPython3_EXECUTABLE=$PWD/tools/switch-game/native_python.sh       -DTHEFT4_HOST_PYTHON=/usr/bin/python3.12.exe
+ninja -C out/build/switch-game -j3 switch-game_nro
+```
+
+e per tornare al build dei run: `-DTHEFT4_SWITCH_GAME_VULKAN=OFF` e
+`Python3_EXECUTABLE` di nuovo sul python di MSYS.
+
+- `rexgpu-xenos-nx` (30 oggetti: nucleo, SPIR-V, `vulkan/*`, parte di `rexui`,
+  `window_nx.cpp`) e le dipendenze compilano con devkitA64 GCC 16.1;
+  `switch-game.elf` linka: **nessun simbolo SDL**, ci sono
+  `vkCreateViSurfaceNN`, `VulkanGraphicsSystem`, `NxWindow`,
+  `Window::Create`, glslang. NRO 63,2 MB contro 43,6 MB senza backend.
+- Problemi dell'ambiente risolti: l'header precompilato di glslang ha un
+  percorso MSYS che GCC nativo non apre (PCH spenti per le dipendenze); il
+  python di MSYS non importa `pyexpat`, che serve ai generatori di
+  SPIRV-Tools, e un python Windows non riceve convertiti i `/c/…` dentro gli
+  argomenti composti (`tools/switch-game/native_python.sh`, con
+  `THEFT4_NATIVE_PYTHON`); `missing_imports.py` resta sul python di MSYS
+  (`THEFT4_HOST_PYTHON`, chiama `nm` di devkitPro); glslang non crea
+  `OSDependent` perché la toolchain non è né WIN32 né UNIX (aggiunta la
+  versione pthread); `renderdoc_app.h` non conosceva la piattaforma (Switch
+  trattata come Linux per i soli tipi, RenderDoc spento come su iOS).
+- **Scelte fatte in questo giro** (dai riferimenti di 11 e nfsmw-nx, da
+  confermare): il backend è creato da switch-game come la GPU nulla, senza
+  caricatore di plugin; il thread dell'interfaccia è il ciclo principale di
+  switch-game (`PumpFromUIThread` a ogni giro di 16 ms); con `nx_gpu =
+  vulkan` la console viene chiusa prima della surface; la finestra è fissa a
+  1280×720 (niente dock: in dock l'immagine resta a 720p).
+- **Aperto per la prova sulla console:** le trappole di §12 (transfer memory
+  di nvdrv, sotto-allocazione, un submit per fotogramma), il percorso EDRAM
+  senza interlock (`kHostRenderTargets`), memoria condivisa da 512 MB senza
+  sparse binding, e la traduzione degli shader (glslang a runtime) sul thread della
+  GPU.
