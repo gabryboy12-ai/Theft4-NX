@@ -19,7 +19,7 @@ endif()
 get_filename_component(THEFT4_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 add_subdirectory("${THEFT4_ROOT}/glue/rexglue-sdk-main" rexglue-sdk)
 
-add_executable(switch-smoke main.cpp probes.cpp vulkan_probe.cpp nx_elf_stubs.c
+add_executable(switch-smoke main.cpp probes.cpp sd_bench.cpp vulkan_probe.cpp nx_elf_stubs.c
     "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp")
 target_compile_features(switch-smoke PRIVATE cxx_std_23)
 target_include_directories(switch-smoke PRIVATE "${THEFT4_ROOT}/glue/rexglue-sdk-main/include"

@@ -72,6 +72,7 @@
 
 #include "nx_exit.h"
 #include "probes.h"
+#include "sd_bench.h"
 #include "vulkan_probe.h"
 
 namespace {
@@ -104,6 +105,14 @@ REXCVAR_DEFINE_STRING(nx_exit_mode, "A", "Switch",
 REXCVAR_DEFINE_BOOL(nx_smoke_vulkan, true, "Switch",
                     "Step 7: the Vulkan probe (NVK: features, surface, 5 s of frames, pipeline "
                     "and submit timings), after the memory probes");
+REXCVAR_DEFINE_BOOL(nx_smoke_sd_bench, true, "Switch",
+                    "Step 6b: SD benchmark (sd_bench.cpp): sequential 1 MiB and random 64 KiB "
+                    "reads of nx_smoke_sd_bench_file, 1 and 3 threads, 10 s each; 5 s of 32 KiB "
+                    "appends to a scratch file");
+REXCVAR_DEFINE_STRING(nx_smoke_sd_bench_file,
+                      "sdmc:/switch/theft4/game/xbox360/audio/sfx/speech.rpf", "Switch",
+                      "Large game file read by step 6b (speech.rpf, 784 MiB: no wrap in 10 s); "
+                      "if missing, common.rpf");
 REXCVAR_DEFINE_BOOL(nx_smoke_exit_workers, true, "Switch",
                     "Exit test: start the five working threads (spin, mutex, malloc, SD read, "
                     "mutex holder) before waiting for +. Runs 16-17 crashed in the first "
@@ -1363,6 +1372,15 @@ int main(int argc, char** argv) {
   const bool passed_before_shutdown = g_first_failure.empty();
   RunProbes(g_memory.get());
   StepGuestMemoryShutdown();
+  if (REXCVAR_GET(nx_smoke_sd_bench)) {
+    struct stat st {};
+    const std::string& file = REXCVAR_GET(nx_smoke_sd_bench_file);
+    RunSdBenchmark(stat(file.c_str(), &st) == 0 ? file.c_str()
+                                                : "sdmc:/switch/theft4/game/common.rpf",
+                   10);
+  } else {
+    SMOKE_INFO("step 6b SD benchmark: skipped (cvar nx_smoke_sd_bench)");
+  }
   if (passed_before_shutdown && !g_first_failure.empty()) {
     // The verdict above came before the arena was released.
     Report(true, "SMOKE FAIL at %s", g_first_failure.c_str());
