@@ -53,6 +53,12 @@ bool CreateParentFolder(const std::filesystem::path& path);
 // Creates an empty file at the given path, overwriting if it exists.
 bool CreateEmptyFile(const std::filesystem::path& path);
 
+#if REX_PLATFORM_NX
+// Repeats of a host read or write that returned less than asked (and not end
+// of file): FileHandle::Read/Write go on until the whole length is done.
+void GetNxShortTransfers(uint64_t* short_reads, uint64_t* short_writes);
+#endif
+
 // Opens the file at the given path with the specified mode.
 // This behaves like fopen and the returned handle can be used with stdio.
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode);

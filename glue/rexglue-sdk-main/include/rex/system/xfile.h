@@ -109,7 +109,15 @@ bool WaitIoIdle(uint32_t timeout_ms);
 void RecordRead(uint64_t bytes, uint64_t nanoseconds);
 void RecordWrite(uint64_t bytes, uint64_t nanoseconds);
 
+// Run 19: how the read times and sizes spread (totals since start).
+// Latency buckets: < 0.25, 0.5, 1, 2, 4, 8, 16, 32 ms, and the rest.
+// Size buckets: < 4 KiB, < 16 KiB, <= 32 KiB, < 128 KiB, < 1 MiB, and the rest.
+constexpr int kReadLatencyBuckets = 9;
+constexpr int kReadSizeBuckets = 6;
+
 struct IoStats {
+  uint64_t read_latency[kReadLatencyBuckets] = {};
+  uint64_t read_size[kReadSizeBuckets] = {};
   uint32_t in_flight = 0;
   uint64_t refused = 0;         // after CloseIoGate
   uint64_t reads = 0;           // NtReadFile/NtReadFileScatter transfers done

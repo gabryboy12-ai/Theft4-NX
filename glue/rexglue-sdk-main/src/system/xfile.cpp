@@ -517,6 +517,23 @@ std::atomic<bool> g_gate_closed{false};
 std::atomic<uint64_t> g_refused{0};
 std::atomic<uint64_t> g_reads{0}, g_read_bytes{0}, g_read_ns{0}, g_read_ns_max{0};
 std::atomic<uint64_t> g_writes{0}, g_write_bytes{0}, g_write_ns{0}, g_write_ns_max{0};
+std::atomic<uint64_t> g_read_latency[kReadLatencyBuckets];
+std::atomic<uint64_t> g_read_size[kReadSizeBuckets];
+
+int LatencyBucket(uint64_t nanoseconds) {
+  uint64_t limit = 250'000;  // 0.25 ms, doubling
+  int b = 0;
+  while (b < kReadLatencyBuckets - 1 && nanoseconds >= limit) {
+    limit *= 2;
+    ++b;
+  }
+  return b;
+}
+
+int SizeBucket(uint64_t bytes) {
+  return bytes < 4096 ? 0 : bytes < 16384 ? 1 : bytes <= 32768 ? 2 : bytes < 131072 ? 3
+       : bytes < 1048576 ? 4 : 5;
+}
 
 void StoreMax(std::atomic<uint64_t>& max, uint64_t value) {
   uint64_t seen = max.load(std::memory_order_relaxed);
@@ -560,6 +577,8 @@ void RecordRead(uint64_t bytes, uint64_t nanoseconds) {
   g_read_bytes.fetch_add(bytes, std::memory_order_relaxed);
   g_read_ns.fetch_add(nanoseconds, std::memory_order_relaxed);
   StoreMax(g_read_ns_max, nanoseconds);
+  g_read_latency[LatencyBucket(nanoseconds)].fetch_add(1, std::memory_order_relaxed);
+  g_read_size[SizeBucket(bytes)].fetch_add(1, std::memory_order_relaxed);
 }
 
 void RecordWrite(uint64_t bytes, uint64_t nanoseconds) {
@@ -581,6 +600,12 @@ IoStats TakeIoStats() {
   s.write_bytes = g_write_bytes.load(std::memory_order_relaxed);
   s.write_ns = g_write_ns.load(std::memory_order_relaxed);
   s.write_ns_max = g_write_ns_max.exchange(0, std::memory_order_relaxed);
+  for (int b = 0; b < kReadLatencyBuckets; ++b) {
+    s.read_latency[b] = g_read_latency[b].load(std::memory_order_relaxed);
+  }
+  for (int b = 0; b < kReadSizeBuckets; ++b) {
+    s.read_size[b] = g_read_size[b].load(std::memory_order_relaxed);
+  }
   return s;
 }
 

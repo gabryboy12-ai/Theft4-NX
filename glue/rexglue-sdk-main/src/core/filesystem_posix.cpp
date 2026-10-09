@@ -164,13 +164,16 @@ static uint64_t convertUnixtimeToWinFiletime(time_t unixtime) {
 
 #if REX_PLATFORM_NX
 // newlib/libnx have no pread/pwrite. Emulate them with lseek + read/write and
-// restore the file position afterwards. The mutex serialises these helpers
-// against each other only: any other read/write/lseek on the same fd outside
-// them can interleave and see or move the temporary position.
-static std::mutex g_nx_positional_io_mutex;
+// restore the file position afterwards. The mutexes serialise these helpers
+// on the same descriptor only: any other read/write/lseek on the same fd
+// outside them can interleave and see or move the temporary position.
+// Run 18: one mutex for every file made the reads of the async worker wait
+// behind the 14 ms writes of the cache: copy; now one of 64, picked by fd.
+static std::mutex g_nx_positional_io_mutex[64];
+static std::atomic<uint64_t> g_nx_short_reads{0}, g_nx_short_writes{0};
 
 static ssize_t NxPositionalIo(int fd, void* buffer, size_t length, off_t offset, bool write) {
-  std::lock_guard<std::mutex> lock(g_nx_positional_io_mutex);
+  std::lock_guard<std::mutex> lock(g_nx_positional_io_mutex[unsigned(fd) % 64]);
   const off_t saved = lseek(fd, 0, SEEK_CUR);
   if (saved < 0 || lseek(fd, offset, SEEK_SET) < 0) {
     return -1;
@@ -190,6 +193,13 @@ static ssize_t pwrite(int fd, const void* buffer, size_t length, off_t offset) {
   return NxPositionalIo(fd, const_cast<void*>(buffer), length, offset, true);
 }
 #endif  // REX_PLATFORM_NX
+
+#if REX_PLATFORM_NX
+void GetNxShortTransfers(uint64_t* short_reads, uint64_t* short_writes) {
+  *short_reads = g_nx_short_reads.load(std::memory_order_relaxed);
+  *short_writes = g_nx_short_writes.load(std::memory_order_relaxed);
+}
+#endif
 
 bool CreateEmptyFile(const std::filesystem::path& path) {
 #if REX_PLATFORM_NX
@@ -213,23 +223,53 @@ class PosixFileHandle : public FileHandle {
     close(handle_);
     handle_ = -1;
   }
+  // A transfer shorter than asked is repeated for the rest until the whole
+  // length is done, end of file (0) or an error; on NX each repeat counts as
+  // a short read or write (GetNxShortTransfers).
   bool Read(size_t file_offset, void* buffer, size_t buffer_length,
             size_t* out_bytes_read) override {
-    ssize_t out = pread(handle_, buffer, buffer_length, file_offset);
-    *out_bytes_read = out >= 0 ? size_t(out) : 0;
-    if (out < 0) {
-      LogFailure("read", file_offset, buffer_length);
+    size_t done = 0;
+    while (done < buffer_length) {
+      ssize_t out = pread(handle_, static_cast<uint8_t*>(buffer) + done, buffer_length - done,
+                          off_t(file_offset + done));
+      if (out < 0) {
+        *out_bytes_read = done;
+        LogFailure("read", file_offset + done, buffer_length - done);
+        return false;
+      }
+      if (out == 0) {
+        break;
+      }
+      done += size_t(out);
+#if REX_PLATFORM_NX
+      if (done < buffer_length) {
+        g_nx_short_reads.fetch_add(1, std::memory_order_relaxed);
+      }
+#endif
     }
-    return out >= 0 ? true : false;
+    *out_bytes_read = done;
+    return true;
   }
   bool Write(size_t file_offset, const void* buffer, size_t buffer_length,
              size_t* out_bytes_written) override {
-    ssize_t out = pwrite(handle_, buffer, buffer_length, file_offset);
-    *out_bytes_written = out >= 0 ? size_t(out) : 0;
-    if (out < 0) {
-      LogFailure("write", file_offset, buffer_length);
+    size_t done = 0;
+    while (done < buffer_length) {
+      ssize_t out = pwrite(handle_, static_cast<const uint8_t*>(buffer) + done,
+                           buffer_length - done, off_t(file_offset + done));
+      if (out <= 0) {
+        *out_bytes_written = done;
+        LogFailure("write", file_offset + done, buffer_length - done);
+        return false;
+      }
+      done += size_t(out);
+#if REX_PLATFORM_NX
+      if (done < buffer_length) {
+        g_nx_short_writes.fetch_add(1, std::memory_order_relaxed);
+      }
+#endif
     }
-    return out >= 0 ? true : false;
+    *out_bytes_written = done;
+    return true;
   }
   bool SetLength(size_t length) override { return ftruncate(handle_, length) >= 0 ? true : false; }
   void Flush() override { fsync(handle_); }
