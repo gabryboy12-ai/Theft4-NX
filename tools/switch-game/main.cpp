@@ -144,6 +144,14 @@ REXCVAR_DEFINE_INT32(nx_nvmap_mb, 0, "Switch",
                      "nx_gpu = vulkan: MB of libnx's nvdrv transfer memory "
                      "(__nx_nv_transfermem_size, bookkeeping of every GPU allocation; libnx 8). 0 = "
                      "leave libnx's (nfsmw-nx: 0x235C SharedMemoryTooSmall when it runs out)");
+REXCVAR_DEFINE_BOOL(nx_vk_dump_frames, false, "Switch",
+                    "nx_gpu = vulkan: also write the guest output captured at 20, 40, 60, 120 "
+                    "and 240 s as PPM files in sdmc:/switch/theft4/frames (the capture and its "
+                    "pixel statistics are logged in any case)");
+REXCVAR_DEFINE_BOOL(nx_mount_cache, true, "Switch",
+                    "Mount cache: and cache1: on the SD (run 12). false: the game finds no "
+                    "utility drive; to see whether it then skips copying ~2 GB into it (run 19: "
+                    "the copy runs at 2 MB/s for the whole session, on every boot)");
 REXCVAR_DEFINE_STRING(nx_exit_mode, "D", "Switch",
                       "Exit at + (hold 1 s): D = file I/O gate closed and drained, null audio "
                       "stopped, every thread told to end and joined (2 s each), then exit(0); "
@@ -157,6 +165,8 @@ constexpr const char* kLogPath = "sdmc:/switch/theft4/game.log";
 constexpr const char* kPreviousLogPath = "sdmc:/switch/theft4/game.prev.log";
 constexpr const char* kCrashPath = "sdmc:/switch/theft4/game-crash.log";
 constexpr const char* kConfigPath = "sdmc:/switch/theft4/game.toml";
+constexpr const char* kAltConfigPath = "sdmc:/switch/theft4/switch-game.toml";
+constexpr const char* kFrameDumpDir = "sdmc:/switch/theft4/frames";
 
 bool g_logging_ready = false;
 std::atomic<bool> g_stopped{false};
@@ -203,8 +213,13 @@ void ConsolePrint(const char* text) {
   g_console_mutex.unlock();
 }
 
+// Run 19: refreshing every 16 ms cost the UI thread 11-15 % of a core. Only
+// stderr text (written to the console without consoleUpdate) needs it now.
+std::atomic<bool> g_console_dirty{false};
+
 void ConsoleRefresh() {
-  if (g_console_mutex.try_lock()) {
+  if (g_console_dirty.load(std::memory_order_relaxed) && g_console_mutex.try_lock()) {
+    g_console_dirty.store(false, std::memory_order_relaxed);
     if (g_console_open) {
       consoleUpdate(nullptr);
     }
@@ -554,6 +569,7 @@ ssize_t StderrWrite(struct _reent* r, void* fd, const char* ptr, size_t len) {
   if (g_console_stderr && g_console_stderr->write_r && g_console_mutex.try_lock()) {
     if (g_console_open) {
       g_console_stderr->write_r(r, fd, ptr, len);
+      g_console_dirty.store(true, std::memory_order_relaxed);
     }
     g_console_mutex.unlock();
   }
@@ -606,9 +622,20 @@ void StartLogging() {
   if (!policy_ok) {
     GAME_ERROR("diagnostics::Configure(logging): %s", policy_error.c_str());
   }
-  rex::cvar::LoadConfig(kConfigPath);
+  // Run 19: the Vulkan run had no game.toml on the SD (the notes of run 18
+  // named it switch-game.toml), so nx_gpu stayed null. Both names are read,
+  // game.toml first, and each one found or missing is a [game] line.
+  for (const char* path : {kConfigPath, kAltConfigPath}) {
+    struct stat st {};
+    const bool found = stat(path, &st) == 0;
+    GAME_INFO("config %s: %s", path, found ? "found, loaded" : "not found");
+    if (found) {
+      rex::cvar::LoadConfig(path);
+    }
+  }
   rex::cvar::FinalizeInit();
-  GAME_INFO("cvars from argv, then %s", kConfigPath);
+  GAME_INFO("cvars from argv, then %s and %s; nx_gpu = %s", kConfigPath, kAltConfigPath,
+            REXCVAR_GET(nx_gpu).c_str());
   StartLogWriter();
   GAME_INFO("log: %s", g_log_buffered
                            ? "buffered, written once a second by its own thread and at once on "
@@ -1100,6 +1127,17 @@ void LogLogCost(uint64_t* last_lines, uint64_t* last_writes, uint64_t* last_ns) 
 
 void LogThreadSnapshot(const char* when);
 
+// KeDelayExecutionThread by interval since start (run 20, B.3): a relative
+// interval under 1 ms becomes 0 ms in XThread::Delay, i.e. a yield, so the
+// game's short sleeps may spin.
+void LogDelayCounts() {
+  const auto d = rex::system::GetDelayCounters();
+  GAME_INFO("KeDelayExecutionThread since start: %" PRIu64 " zero, %" PRIu64
+            " under 1 ms (became 0), %" PRIu64 " 1-9 ms, %" PRIu64 " 10 ms or more, %" PRIu64
+            " absolute; %" PRIu64 " alertable",
+            d.zero, d.sub_millisecond, d.short_ms, d.long_ms, d.absolute, d.alertable);
+}
+
 #if THEFT4_NX_VULKAN
 // nx_gpu = vulkan: presents, draws and submits of the window, the failures,
 // the Vulkan heaps (VK_EXT_memory_budget); after 20 s without a present, one
@@ -1157,6 +1195,78 @@ void LogVulkan(double window_s) {
   g_vk_beat.submits = submits;
 }
 
+// Run 20 (A.2): at 20, 40, 60, 120 and 240 s the guest output the presenter
+// holds is read back (CaptureGuestOutput, R8G8B8X8) on this UI thread. The
+// log gets its size and how much of it is not black; with nx_vk_dump_frames
+// it is also written as a binary PPM in kFrameDumpDir (on the SD only).
+void CaptureFrame(uint64_t seconds) {
+  auto* presenter = g_vulkan_graphics ? g_vulkan_graphics->presenter() : nullptr;
+  if (!presenter) {
+    GAME_INFO("frame at %" PRIu64 " s: no presenter", seconds);
+    return;
+  }
+  rex::ui::RawImage image;
+  const u64 start = armGetSystemTick();
+  if (!presenter->CaptureGuestOutput(image) || !image.width || !image.height) {
+    GAME_INFO("frame at %" PRIu64 " s: CaptureGuestOutput gave nothing (no guest output yet?)",
+              seconds);
+    return;
+  }
+  const u64 capture_ms = armTicksToNs(armGetSystemTick() - start) / 1'000'000;
+  uint64_t lit = 0, sum = 0;
+  uint32_t max_value = 0;
+  for (uint32_t y = 0; y < image.height; ++y) {
+    const uint8_t* row = image.data.data() + size_t(y) * image.stride;
+    for (uint32_t x = 0; x < image.width; ++x) {
+      const uint32_t v = uint32_t(row[x * 4]) + row[x * 4 + 1] + row[x * 4 + 2];
+      lit += v > 24;  // more than ~8 per channel
+      sum += v;
+      max_value = std::max(max_value, v);
+    }
+  }
+  const double pixels = double(image.width) * double(image.height);
+  GAME_INFO("frame at %" PRIu64 " s: guest output %ux%u (capture %" PRIu64
+            " ms), %.2f%% of pixels not black, mean %.1f, max %u (of 765)",
+            seconds, image.width, image.height, capture_ms, 100.0 * double(lit) / pixels,
+            double(sum) / pixels, max_value);
+  if (!REXCVAR_GET(nx_vk_dump_frames)) {
+    return;
+  }
+  mkdir(kFrameDumpDir, 0777);
+  char path[96];
+  std::snprintf(path, sizeof(path), "%s/frame-%03" PRIu64 "s.ppm", kFrameDumpDir, seconds);
+  FILE* file = std::fopen(path, "wb");
+  if (!file) {
+    GAME_ERROR("frame at %" PRIu64 " s: cannot create %s (errno %d)", seconds, path, errno);
+    return;
+  }
+  std::fprintf(file, "P6\n%u %u\n255\n", image.width, image.height);
+  std::vector<uint8_t> rgb(size_t(image.width) * 3);
+  for (uint32_t y = 0; y < image.height; ++y) {
+    const uint8_t* row = image.data.data() + size_t(y) * image.stride;
+    for (uint32_t x = 0; x < image.width; ++x) {
+      rgb[x * 3] = row[x * 4];
+      rgb[x * 3 + 1] = row[x * 4 + 1];
+      rgb[x * 3 + 2] = row[x * 4 + 2];
+    }
+    std::fwrite(rgb.data(), 1, rgb.size(), file);
+  }
+  std::fclose(file);
+  GAME_INFO("frame at %" PRIu64 " s: written to %s", seconds, path);
+}
+
+void CheckFrameCaptures(u64 start_tick) {
+  static const uint64_t kTimes[] = {20, 40, 60, 120, 240};
+  static size_t next = 0;
+  if (!g_vulkan_graphics || next >= std::size(kTimes)) {
+    return;
+  }
+  const uint64_t seconds = armTicksToNs(armGetSystemTick() - start_tick) / 1'000'000'000ull;
+  if (seconds >= kTimes[next]) {
+    CaptureFrame(kTimes[next++]);
+  }
+}
+
 // Every loop of the UI thread (cheap): 20 s without a present -> one
 // snapshot, again only after presents move.
 void CheckVulkanStall() {
@@ -1195,6 +1305,7 @@ struct Heartbeat {
   rex::system::file_io::IoStats last_io;
   std::vector<std::pair<Handle, u64>> last_cpu;
   u64 last_line_tick = 0;
+  u64 last_rates_s = 0;
   uint64_t last_log_lines = 0, last_log_writes = 0, last_log_ns = 0;
 
   void Tick() {
@@ -1207,8 +1318,10 @@ struct Heartbeat {
       rex::diagnostics::GetExportCallTotals(&distinct, &calls);
       const auto a = rex::memory::nx::GetGuestArenaStats();
       GAME_INFO("heartbeat %" PRIu64 " s: exports %zu distinct, %" PRIu64
-                " calls; guest memory %zu blocks (peak %zu of %zu)",
-                seconds, distinct, calls, a.mapped_blocks, a.peak_mapped_blocks, a.pool_blocks);
+                " calls (tracing %s); guest memory %zu blocks (peak %zu of %zu)",
+                seconds, distinct, calls, rex::diagnostics::g_export_tracing ? "on" : "OFF",
+                a.mapped_blocks, a.peak_mapped_blocks, a.pool_blocks);
+      LogDelayCounts();
       LogClock();
       LogNullGpu();
       LogBootSequencer();
@@ -1296,6 +1409,8 @@ struct Heartbeat {
       char when[32];
       std::snprintf(when, sizeof(when), "at %" PRIu64 " s", seconds);
       rex::diagnostics::LogExportCallSummary(when);
+      rex::diagnostics::LogExportCallRates(when, double(seconds - last_rates_s), 20);
+      last_rates_s = seconds;
     }
     if (seconds >= next_snapshot_s) {
       next_snapshot_s = next_snapshot_s < 20 ? 20 : next_snapshot_s < 60 ? 60 : seconds + 120;
@@ -1658,6 +1773,10 @@ double MeasureThreadLocalNs(uint32_t iterations) {
     g_vulkan_graphics = vulkan.get();
     config.graphics = std::move(vulkan);
     GAME_INFO("graphics: ReXGlue's Vulkan backend on NVK (cvar nx_gpu = vulkan); console closed");
+  } else if (GAME_INFO("graphics: this NRO has the Vulkan backend, but nx_gpu = %s: put "
+                       "nx_gpu = \"vulkan\" in %s",
+                       REXCVAR_GET(nx_gpu).c_str(), kConfigPath),
+             false) {
   } else
 #else
   if (want_vulkan) {
@@ -1728,9 +1847,13 @@ double MeasureThreadLocalNs(uint32_t iterations) {
   // The 360's utility-drive caches, which the PC run showed the game opening
   // (cache:/valid.txt, cache1:/valid.txt). To be verified on the console: the
   // runtime left cache: unresolved on purpose (Runtime::SetupVfs).
-  GAME_INFO("about to mount cache: and cache1: on %s/cache and %s/cache1", kRootDir, kRootDir);
-  if (!runtime->MountCacheDevices(root / "cache", root / "cache1")) {
-    GAME_ERROR("cache: or cache1: not mounted (see the [sdk] lines above)");
+  if (!REXCVAR_GET(nx_mount_cache)) {
+    GAME_INFO("cache: and cache1: NOT mounted (cvar nx_mount_cache = false)");
+  } else {
+    GAME_INFO("about to mount cache: and cache1: on %s/cache and %s/cache1", kRootDir, kRootDir);
+    if (!runtime->MountCacheDevices(root / "cache", root / "cache1")) {
+      GAME_ERROR("cache: or cache1: not mounted (see the [sdk] lines above)");
+    }
   }
 
   GAME_INFO("about to LoadXexImage(game:/default.xex)");
@@ -1791,6 +1914,7 @@ double MeasureThreadLocalNs(uint32_t iterations) {
     heartbeat.Tick();
 #if THEFT4_NX_VULKAN
     CheckVulkanStall();
+    CheckFrameCaptures(heartbeat.start);
     if (g_ui_context) {
       g_ui_context->PumpFromUIThread();  // posted functions, then the paint
     }

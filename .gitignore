@@ -808,3 +808,6 @@ LibertyRecomp/gpu/shader/**/*.metallib
 
 # Theft4-NX: codegen post-passes for the Switch build (docs/switch-port/08-nfsmw-nx.md).
 !/tools/switch-codegen/*.py
+
+# Theft4-NX: frame dumps of switch-game (nx_vk_dump_frames), wherever they are copied
+*.ppm
