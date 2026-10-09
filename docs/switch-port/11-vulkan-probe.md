@@ -223,6 +223,17 @@ la console chiusa il crash sparisce, la causa è la riapertura sulla `NWindow`
 usata da Vulkan (candidato 1); se resta, il run successivo prova
 `nx_smoke_exit_workers = false`.
 
+**Run 18 (`out/console-runs/run18/`, una prova).** Con la console lasciata
+chiusa (`variants: reopen console NO`) il crash **non c'è più**: `teardown
+step 12: console left closed`, `VULKAN OK`, thread del processo 2 prima e
+dopo lo smontaggio, 7 con i cinque thread del test; righe `waiting for +`
+a 0, 250 e 500 ms con i contatori che salgono (spin 1,7 M, mutex 2,0 M,
+malloc 2,4 M, SD read 209, holder 455 a 0,5 s), poi ogni secondo fino a 554 s;
+`+` a 554,3 s, modo A in tre passi, uscita pulita. Coerente con il candidato
+1 (la riapertura della console sulla `NWindow` usata da Vulkan); da
+riconfermare nei prossimi run. Il gioco con `nx_gpu = vulkan` (06 §24–25)
+chiude la console prima della surface e non la riapre.
+
 ## Cosa serve per costruire il backend Vulkan di ReXGlue per Switch (solo analisi)
 
 ### Cosa lo esclude oggi

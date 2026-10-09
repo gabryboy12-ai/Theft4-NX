@@ -171,3 +171,48 @@ In switch-game e switch-smoke l'uscita è A per default; D resta con la cvar
 thread del gioco; passo 6 dello smoke con la cvar `nx_smoke_pause_test`), mai
 sul percorso d'uscita. Il `--wrap=svcExitProcess` resta come traccia di una
 chiamata da libnx. Da qui la chiusura non è più una priorità.
+
+## 10. Uscita del gioco: modo D (una sola prova pulita, da riconfermare nei prossimi run)
+
+Run 18 (`out/console-runs/run18/`, commit `58b4efc`), `+` tenuto 1 s dopo
+~762 s dall'avvio del thread guest: `game-exit.log` ha tutti i 12 passi, in
+quest'ordine e senza righe anomale:
+
+1. scelta del modo D;
+2. `file operations in flight: 1`;
+3. cancello I/O chiuso (nuove aperture, letture e scritture → `C0000120`),
+   attesa dell'operazione in corso, al più 2 s;
+4. `file I/O: idle after 0 ms`;
+5. stop del worker dell'audio nullo (flag, al più 2 s);
+6. `null audio worker ended after 4 ms`;
+7. ogni thread guest esce alla prossima export (`svcExitThread`), i thread
+   della GPU nulla si fermano;
+8. join, al più 2 s;
+9. `9 of 31 threads ended within 2 s` (gli altri 22 sono thread guest fermi
+   in un'attesa che non arriva mai a un'altra export: il join usa tutti i 2 s);
+10. `exit(0)`; 11. handler `atexit`; 12. `_exit`.
+
+`game-crash.log` vuoto, nessun report di Atmosphère, la console torna al
+menu. Il run 18 non aveva i tempi dei singoli passi (solo le durate di 4 e 6
+e il limite di 8); dal run 19 ogni passo porta `+N ms` dalla scelta del modo.
+Due righe da notare, non errori: il passo 8 conta 59 handle (XThread più
+tracce delle export, con i doppioni) mentre il passo 9 conta i 31 distinti; la
+riga `exit: 5 host XThreads running:` aveva i nomi vuoti
+(`XObject::name()` è vuoto per i thread; dal run 19 `XThread::thread_name()`).
+
+**Regola:** il modo D resta il default di switch-game; il modo A
+(`exit(0)` con i thread vivi) aveva crashato dopo `_exit` nel run 17. Una
+sola uscita pulita non basta: ogni run successivo deve riportare i 12 passi e
+`game-crash.log` vuoto prima di considerarla stabile.
+
+## 11. Log: niente scrittura sulla SD nel thread che logga (run 19)
+
+Il log durevole di switch-game (apri, scrivi, `fsync`, chiudi per ogni riga,
+nel thread che logga) è giusto per cercare un crash e sbagliato per misurare:
+nel run 18 il worker delle letture asincrone scriveva così una riga
+`[AsyncIO] complete` per ogni lettura (14.624 righe). Dal run 19 il default è
+un thread di scrittura che svuota il buffer una volta al secondo; i passi
+d'uscita, le terminazioni, lo stop e i fault scrivono il buffer subito. La
+modalità durevole resta con `nx_log_durable = true` per la diagnosi dei crash.
+Lo stesso vale per `thread_local` (su devkitA64 è una chiamata a
+`__aarch64_read_tp`): fuori dai cicli caldi.

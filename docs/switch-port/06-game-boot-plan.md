@@ -1835,3 +1835,174 @@ e per tornare al build dei run: `-DTHEFT4_SWITCH_GAME_VULKAN=OFF` e
   senza interlock (`kHostRenderTargets`), memoria condivisa da 512 MB senza
   sparse binding, e la traduzione degli shader (glslang a runtime) sul thread della
   GPU.
+
+## 25. Run 18: il gioco supera il punto del run 17; strumenti del run 19 (2026-10-09)
+
+`out/console-runs/run18/`, NRO del commit `58b4efc`. Smoke e gioco finiscono
+senza crash.
+
+### A.1 Chiusura (modo D)
+
+Tutti i 12 passi, nessuna riga anomala, `game-crash.log` vuoto: 09-rules §10
+(una sola prova pulita, da riconfermare). Tempi disponibili: I/O fermo dopo
+0 ms, audio nullo fermo dopo 4 ms, join limitato a 2 s (9 di 31 thread
+finiti). Dal run 19 ogni passo porta `+N ms`.
+
+### A.2 Durata e punto d'arresto
+
+- **Acceso ~762 s** (dal thread guest avviato all'uscita: tick host
+  8.076.164.451.002 → 8.090.786.864.568 a 19,2 MHz), di cui **406 s fermo**:
+  il battito salta da 310 s a 716 s, il callback dell'audio nullo ha un massimo
+  di 403.756 ms, nessuna lettura nel mezzo. Il processo non è stato eseguito
+  (sospensione). Nessun tasto premuto prima di 722,7 s: **probabile
+  auto-sleep dopo ~5 minuti senza input**. Tempo attivo ≈ **356 s**. Dal run
+  19 `appletSetAutoSleepDisabled(true)` all'avvio (cvar
+  `nx_disable_auto_sleep`, da verificare). Dopo la ripresa il gioco riparte
+  (VdSwap risale fino a 60/s).
+- **Il punto del run 17 è superato:** 0 `C0000011`, 0 righe `host read
+  failed`, nessun `XamShowDirtyDiscErrorUI`. `cache:\anim.img` creato a ~100 s
+  (disposition 5, accesso `0xC0100080`, lettura e scrittura) e riaperto a
+  ~225 s con lo stesso accesso, letto senza errori; poi `weapons.img` e
+  `icons.img` copiati e riaperti; `cache1:\componentpeds.img` creato a ~232 s,
+  scritture finite fra 746 e 756 s. La correzione O_RDWR di 06 §23 regge
+  (una prova).
+- **Fin dove arriva:** le stesse 117 export del run 17 (nessuna nuova), 30
+  XThread, aperture fino alla numero 1247; 14.350 `NtReadFile` (356,1 MB) al
+  battito dei 756 s, 14.624 completamenti asincroni (363 MB) all'uscita;
+  5.207 scritture (170,2 MB) nella cache. Il sequenziatore è spento dai 120 s
+  come nel run 17.
+
+| Finestra (s) | VdSwap/s | letture / 10 s | MB/s | scritture / 10 s | callback audio/s |
+|---|---|---|---|---|---|
+| 20–120 | 32–60 | 250–750 | 0,14–1,7 | 0 | 187,5 |
+| 130–160 | 58–60 | 400–570 | 1,0–1,5 | 0–1 | 51–113 |
+| 170–230 | 25–45 | 300–460 | 1,0–1,3 | 200–350 | 62–79 |
+| 240–310 | 13–30 | 290–380 | 0,9–1,2 | 260–345 | 62–75 |
+| 716–746 (dopo la ripresa) | 23–43 | 270–450 | 0,9–1,3 | 160–270 | 63–79 |
+| 746–756 | 60 | 588 | 1,48 | 0 | 84 |
+
+Il gioco legge ancora a 1,5 MB/s alla fine e torna a 60 VdSwap/s quando la
+copia nella cache finisce. Senza GPU non si vede in che schermata sia.
+
+### A.3 Caricamento: I/O o CPU
+
+- **Dimensioni delle letture** (14.624 completamenti): < 4 KB 14 %, 4–16 KB
+  21 %, 16–32 KB 5 %, **esattamente 32 KB 60 %**, oltre 32 KB 0,4 % (7 letture
+  da 1 MB o più). Media 25 KB.
+- **Latenza** (dal battito; la distribuzione per fasce c'è dal run 19): media
+  0,4–1,9 ms, massimo ≤ 40 ms (198 ms solo nella prima finestra). **Tempo in
+  lettura ≤ 0,9 s ogni 10 s**: la SD non è il limite delle letture.
+- **Scritture** (la copia in `cache:`): 32 KB alla volta, **11–20 ms l'una**
+  (2,3 MB/s), 2,4–5,7 s ogni 10 s sul thread guest che copia. Fino al run 18
+  una mutex globale serializzava `pread`/`pwrite` di tutti i file (emulati con
+  `lseek` + `read`/`write`): una lettura asincrona poteva aspettare dietro una
+  scrittura di 14 ms. Dal run 19 una mutex per descrittore (da verificare).
+- **Log:** ogni lettura asincrona scriveva una riga `[AsyncIO] complete` nel
+  log durevole (apri, scrivi, `fsync`, chiudi) **dal worker delle letture**,
+  subito dopo la lettura: 14.624 scritture sulla SD in serie con le letture.
+  Il costo di una riga non è misurato nel run 18 (il run 19 lo scrive nella
+  riga `log:` del battito).
+- **CPU:** non misurata per thread nel run 18. Indizi: dai 130 s le export
+  salgono a ~500.000/s (a 300 s: `KeRaiseIrqlToDpcLevel` 16,0 M,
+  `KeAcquireSpinLockAtRaisedIrql` e `KeReleaseSpinLockFromRaisedIrql` 15,7 M,
+  `KfLowerIrql` 15,6 M, `RtlEnter/LeaveCriticalSection` 11,1 M); il thread
+  guest id 18 da solo ne fa ~200.000/s (14,4 M a 180 s, 38,8 M a 300 s).
+- **Conclusione provvisoria:** il caricamento **non è limitato dalla lettura
+  dalla SD**. È limitato dal costo per richiesta sul worker unico delle letture
+  (il log durevole per riga: da verificare con la riga `log:`), dalla copia in
+  `cache:` (scritture lente e, fino al run 18, la mutex globale) e
+  probabilmente dalla CPU dei thread guest dai 130 s (da verificare con la
+  riga `cpu`). Il run 19 separa le tre cose.
+
+### A.4 Benchmark della SD (smoke, run 19)
+
+Passo 6b dello smoke (`tools/switch-smoke/sd_bench.cpp`, cvar
+`nx_smoke_sd_bench`): `xbox360/audio/sfx/speech.rpf` (784 MiB, se manca
+`common.rpf`), letture sequenziali da 1 MiB e casuali da 64 KiB, 1 e 3 thread,
+10 s ciascuna, con open/lseek/read come le letture del gioco; poi 5 s di
+scritture da 32 KiB in coda a un file nuovo (il modello della copia in
+`cache:`), cancellato alla fine. Righe: MB/s, operazioni, latenza mediana,
+p95 e massima.
+
+### A.5 Audio nullo
+
+- Il worker (host, id 3, `F8000018`) a 180, 300 e 716 s è sempre `IN
+  KeWaitForMultipleObjects` con LR guest `82169BA8`, dentro il callback
+  `82172BE8` (pila guest non risalibile oltre l'LR: il worker è un thread host
+  con contesto guest).
+- Il thread guest **id 18** (`F8000CF0`) lavora nella stessa zona di codice
+  (`KeWaitForSingleObject` a LR `82169458`,
+  `XAudioGetVoiceCategoryVolumeChangeMask` a LR `82169C98`, poi `KfLowerIrql`
+  a `8216DB9C`/`82178ED0`): è il thread del motore audio del gioco, quello che
+  dovrebbe segnalare gli oggetti attesi dal callback. Dai 130 s fa ~200.000
+  export al secondo (spin lock e IRQL).
+- Callback: 187,5/s fino a 120 s (atteso 48000/256), poi 51–113/s e 62–84/s
+  fino alla fine, durata media 12–16 ms contro un periodo di 5,33 ms; resta a
+  84/s anche a 756 s, quando VdSwap è di nuovo a 60.
+- **Sintomo, non causa:** il gioco non si ferma (nel run 18 nessuno stop) e il
+  calo comincia quando il motore audio comincia a mixare suoni veri (130 s,
+  dopo il sequenziatore); il callback aspetta il thread 18, che è carico. Il
+  run 19 dà il suo tempo di CPU (riga `cpu`) per dire se è la CPU.
+
+### C. Controlli dalla guida di sa2-nx (porting-guide §7.4)
+
+1. **Handle dei thread:** i thread host del runtime fanno `pthread_join`
+   (che chiude l'handle) solo in `post_execution`, cioè dopo un'attesa riuscita
+   sul thread; un thread finito su cui nessuno aspetta tiene handle e pila. Dal
+   run 19 la riga `threads:` del battito: thread di Horizon contro il limite
+   della risorsa del processo, e creati / finiti / joinati / abbandonati del
+   runtime. Nel run 18 gli XThread erano 30 fino alla fine (nessuna crescita).
+2. **Letture corte:** `PosixFileHandle::Read` faceva **una sola** `read`; una
+   lettura corta (non a fine file) arrivava al gioco come corta. Dal run 19
+   `Read` e `Write` ripetono fino alla lunghezza chiesta; contatore nella riga
+   `file reads in the window`.
+3. **`thread_local`:** su devkitA64 ogni accesso è una chiamata a
+   `__aarch64_read_tp` (`mrs tpidrro_el0; ldr [x0, #504]; ret`), 121 punti
+   nell'ELF del run 18. Nel codice generato e in `GuestToHost`: **nessuno**.
+   Nel percorso di ogni export: `ExportEnter` ed `ExportLeave` (uno
+   ciascuno), più `ThreadState::Get` (21 chiamanti, fra cui
+   `KeRaiseIrqlToDpcLevel`, `KfLowerIrql` e gli spin lock: proprio le export
+   più chiamate) e `XThread::GetCurrentThread` (46). Nel gestore dei fault:
+   solo `seh_active()`. Il tracciamento costa per export due chiamate di
+   funzione, due letture TLS, un `fetch_add` LL/SC su un contatore condiviso
+   fra i thread, una lettura di `cntpct_el0` e cinque store. Dal run 19: la
+   riga `export trace` all'avvio misura i ns per chiamata e il costo di una
+   lettura `thread_local`; cvar **`nx_trace_exports`** (vera) per spegnerlo
+   nelle build di misura (resta l'hook d'ingresso, che serve all'uscita D).
+4. **Log:** scrittore asincrono, default dal run 19; `nx_log_durable = true`
+   per la diagnosi dei crash (09-rules §11).
+
+### F. Primo renderer: preparazione del run 19
+
+Le quattro scelte di §24 restano (conferma provvisoria): backend creato da
+switch-game senza caricatore di plugin; thread dell'interfaccia = ciclo
+principale; con `nx_gpu = vulkan` la console si chiude; finestra fissa
+1280×720 (in dock resta 720p). In più, con `nx_gpu = vulkan`:
+`MESA_SHADER_CACHE_DISABLE=true` e la transfer memory di nvdrv dalla cvar
+`nx_nvmap_mb` (0 = gli 8 MiB di libnx; nfsmw-nx: `0x235C`
+SharedMemoryTooSmall quando finisce).
+
+Battito con Vulkan: riga `vulkan:` con present (al secondo, tempo medio di
+fotogramma), draw (`IssueDraw`), submit, fallimenti di submit e present con
+l'ultimo codice (e una riga d'errore per ciascuno dei primi 32), memoria
+Vulkan per heap (`VK_EXT_memory_budget`, se c'è); dopo 20 s senza present
+un'istantanea dei thread. Per la memoria (il guasto da provare per primo):
+riga `host memory:` (memoria del processo e heap di newlib, con i picchi) e il
+picco del pool guest, già nella riga del battito.
+
+### Run 19: cosa guardare (`out/console-runs/run19-build/`)
+
+- **Prima prova:** `switch-game.nro` (senza Vulkan, `nx_gpu = null`) e
+  `switch-smoke.nro`. Poi, a parte, `switch-game-vulkan.nro` rinominato
+  `switch-game.nro`, con `nx_gpu = "vulkan"` in `sdmc:/switch/theft4/game.toml`.
+- **Battito:** `cpu` (chi consuma, guest contro host), `log:` (costo delle
+  scritture sulla SD, ora una al secondo), `file reads in the window`
+  (distribuzione di latenza e dimensione, letture corte), `threads:` (handle),
+  `host memory:`. Confronto con il run 18: MB/s delle letture e momento in cui
+  il sequenziatore si spegne (120 s nel run 18).
+- **Avvio:** `export trace: N ns per traced call`, `auto-sleep: … -> 0x0`,
+  `log: buffered`.
+- **Uscita:** 12 passi con `+N ms`, `game-crash.log` vuoto.
+- **Smoke:** righe del passo 6b (tetto della SD).
+- **Vulkan:** `vulkan:` con present > 0, oppure gli errori e l'istantanea dopo
+  20 s; `host memory:` e il pool guest prima del fallimento, se c'è.

@@ -529,3 +529,95 @@ configurazione di `Boost` resta quella del sistema.
 | Boost GPU 460,8 MHz in portatile | non misurato nelle note (GPU da 307,2 a 460,8 MHz) | sì | con la GPU vera |
 | Qualsiasi cartella della SD | comodità | sì | quando si vuole (piccolo) |
 | Nessun log per default, `config.toml` completo | comodità | sì | per una release |
+
+## 13. masseffect-nx e sa2-nx: compilatore (LTO, PGO, ordine, -O2/-O3) e renderer (letti il 2026-10-09)
+
+Fonti: `masseffect-nx/docs/{optimization-paths,performance-history,measuring,
+audio-and-video,known-issues}.md` (nebadasSwifty), `sa2-nx/docs/porting-guide.md`
+§9 (ChanseyIsTheBest), §12 qui sopra per Unleashed. Solo documenti; niente è
+stato attivato da noi.
+
+### Cosa dichiara ciascuno
+
+| Leva | Mass Effect (masseffect-nx) | Sonic Adventure 2 (sa2-nx) | Sonic Unleashed (unleashed-nx) |
+|---|---|---|---|
+| LTO | **nessun guadagno** (t122: 226 core-ms per fotogramma contro 218–226 senza; build molto più lunghe, 16 GB) | usata (`-flto=N`, partizione bilanciata, `-ffp-contract=off -fno-strict-aliasing` ripetuti al link; xxHash rotto sotto LTO senza `XXH_FORCE_MEMORY_ACCESS=0`) | usata nel round 9 |
+| PGO | **nessun guadagno** (t160 19,6 FPS contro 18,7–18,9, ma la coppia della stessa sessione t161/t162 dà 16,7/16,6) | **circa +15 %** da una sessione sulla console (il giocatore singolo non scende più sotto 60); flusso `-fprofile-info-section` + `__gcov_info_to_gcda`, `-fprofile-correction`, `-fprofile-partial-training`, profilo spedito in `pgo/` | usata (round 9: 44,0 FPS con PGO + LTO + `-O2` + `-fipa-pta`) |
+| Ordine delle funzioni calde | **nessun guadagno** (t158: 18,7 contro 18,9), tenuto | usato (`hot_functions.ld`, `KEEP(*(.crt0))` primo) | — |
+| `-O2`/`-O3`/`-Os` | `-O3`; `-Os` peggio (t234: 21,8 contro 24,9 FPS) | `-O3` | `-O2` (motivo: `-O3` gonfia il codice, l'A57 ha 48 KB di cache istruzioni; con PGO GCC riaccende `-O3` dove serve); nessun numero isolato |
+| Cosa ha pagato davvero | togliere `volatile` dagli accessi guest (t153: **+15–20 %**), argomenti in registro (−2 ms sul thread principale, poi nessun guadagno sopra le altre), risoluzione 960×540 | registri come locali, niente store dell'LR, mosse float senza cambio di modo FPCR (20–26 % dei campioni del thread di gioco dopo un `msr fpcr`), chiamate dirette, niente `volatile` | §12 |
+
+La lezione di Mass Effect (optimization-paths §2): con 7 milioni di righe
+generate e le funzioni calde già chiamate direttamente, al compilatore resta
+poco da vedere fra i file; i guadagni sono venuti dal cambiare **che cosa fa**
+il codice generato, non dalle opzioni del compilatore. Le due osservazioni non
+si contraddicono per forza: SA2 è più piccolo e limitato da un thread per
+fotogramma, dove il layout del codice caldo pesa di più (ipotesi, non
+misurata da nessuno dei due).
+
+Altro di masseffect-nx utile per noi: la regola "misurare solo sulla console,
+ai clock di serie, una variabile per run dietro una cvar, mai fidarsi di un
+intervallo da 10 s (rumore ≈ 3 FPS), confrontare due build nella stessa
+sessione in core-ms per fotogramma" (measuring.md); "non leggere mai
+`cntvct_el0`, usare `armGetSystemTick`"; il gioco è limitato dalla CPU (tre
+core saturi, ~290 %) e i 30 FPS non sono raggiunti (~25, known-issues §1); il
+quarto core e il boost ufficiale della CPU (che porta la GPU a 76,8 MHz) sono
+esclusi; audio: il mixer del gioco ricompilato in 5.1 da 256 campioni a
+48 kHz, ridotto a stereo su `audout`, XMA con FFmpeg su un thread sopra quelli
+del gioco, versioni NEON del mixer esatte ma spente (nessun guadagno).
+
+### Come misurarli su GTA IV (proposta, niente attivato)
+
+Prerequisiti: la GPU vera (o almeno una scena stabile e ripetibile), la riga
+`cpu` del battito (run 19) e, per le opzioni del compilatore, spegnere il
+tracciamento delle export (`nx_trace_exports = false`) perché il suo costo non
+copra le differenze.
+
+1. **Una scena fissa:** stesso salvataggio, nessun input per 60 s (o un
+   percorso registrato), clock di serie, 3 intervalli da 10 s per build,
+   due build nella stessa sessione. Metrica: core-ms per fotogramma dei
+   thread guest più carichi (riga `cpu` × 10 s / fotogrammi), non gli FPS.
+2. **Prima ciò che ha pagato altrove** (codice generato): accessi guest senza
+   `volatile` (+15–20 % su ME), registri come locali, mosse float senza FPCR.
+3. **`-O2` contro `-O3` solo sul codice generato** (cvar di build come
+   `SWITCH_RECOMP_O2` di Unleashed): misura diretta del peso della cache
+   istruzioni.
+4. **LTO** sul codice generato più l'app (attenzione a xxHash e a
+   `-ffp-contract=off` al link).
+5. **PGO** col metodo di sa2-nx (contatori in sezione, salvati ogni 2 minuti e
+   all'uscita, `-fprofile-correction`); nessuna modifica di codice fra la
+   build strumentata e quella d'uso.
+6. **Ordine delle funzioni calde** solo dopo PGO (con PGO GCC separa già
+   caldo e freddo).
+
+Regole d'arresto di Mass Effect: sotto 1,0× si torna indietro, fra 1,0 e
+1,2× si tiene solo se semplifica, sopra 1,2× si spedisce.
+
+### Renderer: masseffect-nx (`app/src/native`) e nfsmw-nx (`app/src`)
+
+Lettura dei nomi dei file e dei documenti, non del codice. Tutti e due
+sostituiscono il processore di comandi `xenos` di ReXGlue con un renderer
+nativo scritto per il gioco, che legge il PM4 (e poi, in sa2-nx, direttamente
+le chiamate D3D) e registra Vulkan su NVK.
+
+- **Generale** (si ritrova in tutti e due e non dipende dal gioco): decodifica
+  dei pacchetti PM4 e delle sequenze di registri (`me_pm4_runs.h`), tabelle dei
+  record di draw e degli oggetti (`me_record_table.h`, `me_object_table.h`),
+  identità e libreria degli shader (`me_shader_identity.h`,
+  `nfsmw_shader_library.cpp`, `nfsmw_nativo_shaders.cpp`), pool di texture e
+  destinazioni di render (`nfsmw_nativo_texturas_pool.cpp`,
+  `nfsmw_nativo_destinos.cpp`), EDRAM a riquadri con conversioni in compute o
+  fragment, attesa dell'anello (`me_ring_wait.cpp`, `nfsmw_espera_anillo.cpp`),
+  ambiente di Mesa (`nfsmw_entorno_mesa.cpp`), PGO (`me_pgo.cpp`,
+  `nfsmw_pgo.cpp`), watchdog.
+- **Specifico del gioco:** gli hook sul D3D del titolo
+  (`me_d3d_trace_all.inc`, `nfsmw_d3d_trace.cpp`), stime e liste per shader
+  e draw (`me_native_draw_extent_estimator.h`, `me_native_ps_no_kill.h`),
+  scenario, viste e materiali di NFSMW (`nfsmw_escenario_*`,
+  `nfsmw_eview_nativo.cpp`, `nfsmw_material_nativo.cpp`), tagli di gara e
+  ombre (`nfsmw_recortes_carrera.cpp`, `nfsmw_recorte_sombras.cpp`), PhysX,
+  folle e minigiochi di ME.
+- Per Theft4: il renderer nativo di GTA IV esiste già (`gta4_native`, 67 mila
+  righe nel nostro SDK, 12 §1); quello che si può prendere da loro è la parte
+  generale (la decodifica PM4 veloce, la libreria degli shader, l'ambiente
+  di Mesa), non i renderer.
