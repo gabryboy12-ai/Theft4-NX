@@ -143,7 +143,8 @@ perdere per strada correzioni verificate.
 (ognuno con una cvar e una misura sulla console):
 
 1. letture: asset pack o almeno la cache di lettura (il caricamento del run 18
-   legge 25 KB alla volta), 2–3 g;
+   legge 25 KB alla volta), 2–3 g — **superato dal run 19: vedi §9, il pack
+   non serve per GTA IV**;
 2. reaper degli handle, se il contatore del run 19 mostra handle che restano
    aperti, 0,5 g;
 3. profiler con campioni di pila (`switch_perf.cpp`), quando c'è la GPU vera,
@@ -247,3 +248,30 @@ Cosa servirebbe per accettare la PAL 0.0.8.6 sul nostro disco europeo:
 Finché switch-game gira sulla base europea senza patch (06 §2, opzione C),
 la PAL 0.0.8.6 non serve; diventa necessaria solo per usare gli hook di
 Theft4 sul disco europeo.
+
+**Aggiornamento 2026-10-09:** c'è solo il disco europeo, nessuna TU e nessun
+disco USA. Si lavora sulla base europea 0.0.0.6 senza TU (06 §26 C.1): questa
+sezione resta come riferimento, non come lavoro da fare.
+
+## 9. I pezzi da portare uno a uno, per valore e costo (dopo il run 19)
+
+Ordine deciso dai numeri del run 19 (06 §26): il caricamento è limitato dalla
+copia nella cache e dalle scritture sulla SD, non dalle letture né dagli
+handle. Nessuno è implementato.
+
+| # | Pezzo | Cosa risolve | File toccati | Rischio | Verifica |
+|---|---|---|---|---|---|
+| 1 | Profiler con campioni di pila (`switch_perf.cpp` di sa2-nx, parte CPU) | dice *dove* spendono id 18, 19, 6 (oggi solo quanto) | `tools/switch-game/main.cpp` (thread di campionamento, già c'è la pausa per le istantanee), `tools/switch-game/where.py` | basso: pausa di un thread per volta, come le istantanee | smoke (thread noti che girano in funzioni note) e poi gioco: le funzioni calde di id 18/19 devono stare in `8216xxxx` |
+| 2 | Attese che dormono (porting-guide §9.5) | `KeDelayExecutionThread` sotto 1 ms che diventa un yield (06 §26 B.3) | `src/system/xthread.cpp` (`Delay`) | medio: cambia i tempi dei thread del gioco (LibertyRecompAndroid: una corsa del gioco è comparsa cambiandoli) | contatori del run 20 prima; poi A/B sulla console con la CPU di id 19 e VdSwap/s; il PC per l'ordine delle export |
+| 3 | Audio vero (`switch_audio_system.cpp`, `audout`) | il gioco ha già il suo mixer (id 18); oggi i frame vanno persi | `src/audio/switch/*`, `tools/switch-game/main.cpp` | medio: sincronizzazione del callback | smoke (tono) e gioco (callback/s a 187,5) |
+| 4 | Input con Joy-Con e più giocatori | comodità | `src/input/switch/*` o `tools/switch-game/nx_input.cpp` | basso | gioco (pulsanti nel log) |
+| 5 | SaltyNX/dock/display, sysclk/apm | 720p in dock, clock | `src/ui/switch_*.cpp` | basso | gioco con la GPU vera |
+| 6 | Correzioni upstream v0.9.0 → v0.10.0 (filesystem, audio, eccezioni) | allineamento; tre sono già fatte a modo nostro | file diversi per commit | basso, uno per uno | confronto delle export col PC (`pc-eu-base`) |
+| 7 | Reaper degli handle | non serve oggi: `threads: Horizon 33 of 96`, nessuna crescita in 640 s | `src/core/threading_switch.cpp` | — | il contatore resta nel battito; si porta se cresce |
+| 8 | Asset pack (`pack_storage_switch.cpp`) | **non serve per GTA IV**: il pack risolve il costo di aprire migliaia di file piccoli. GTA IV apre ~330 percorsi in tutto, quasi tutti `.rpf`/`.img` grandi, e legge 32 KB alla volta a 1–4 ms; la SD dà 86 MB/s sequenziale e 54 MB/s casuale, il gioco ne usa il 2–4 %. Dal pack resterebbe utile solo il ciclo sulle letture corte, che c'è già (run 19: 0 letture corte) | — | — | — |
+
+Fuori dalla tabella perché non è un pezzo di sa2-nx: la **copia nella cache**
+(06 §26 B.4). Prima `nx_mount_cache = false` (run 20); se il gioco salta la
+copia e VdSwap resta a 60, non serve altro; se invece il gioco la vuole, la
+strada è scrivere meglio (blocchi più grandi raccolti per handle prima della
+scrittura sulla SD), da progettare dopo quella prova.

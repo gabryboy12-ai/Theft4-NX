@@ -172,7 +172,7 @@ thread del gioco; passo 6 dello smoke con la cvar `nx_smoke_pause_test`), mai
 sul percorso d'uscita. Il `--wrap=svcExitProcess` resta come traccia di una
 chiamata da libnx. Da qui la chiusura non è più una priorità.
 
-## 10. Uscita del gioco: modo D (una sola prova pulita, da riconfermare nei prossimi run)
+## 10. Uscita del gioco: modo D (tre prove pulite consecutive)
 
 Run 18 (`out/console-runs/run18/`, commit `58b4efc`), `+` tenuto 1 s dopo
 ~762 s dall'avvio del thread guest: `game-exit.log` ha tutti i 12 passi, in
@@ -200,10 +200,17 @@ tracce delle export, con i doppioni) mentre il passo 9 conta i 31 distinti; la
 riga `exit: 5 host XThreads running:` aveva i nomi vuoti
 (`XObject::name()` è vuoto per i thread; dal run 19 `XThread::thread_name()`).
 
-**Regola:** il modo D resta il default di switch-game; il modo A
-(`exit(0)` con i thread vivi) aveva crashato dopo `_exit` nel run 17. Una
-sola uscita pulita non basta: ogni run successivo deve riportare i 12 passi e
-`game-crash.log` vuoto prima di considerarla stabile.
+**Run 19:** tutti e due gli avvii del gioco (GPU nulla; il secondo con il NRO
+che contiene Vulkan, ma Vulkan non attivo, 06 §26) hanno i 12 passi con i
+tempi (`_exit` a +3,77 e +3,79 s) e `game-crash.log` vuoto. Lo smoke del run
+19 esce pulito anche lui, ma con il modo A (il suo default), quindi non conta
+per D.
+
+**Regola:** il modo D è il default di switch-game e si considera stabile:
+**tre uscite pulite consecutive del gioco** (run 18; run 19 due volte). Si
+torna a "da riconfermare" solo se ricompare un crash all'uscita. Il modo A
+(`exit(0)` con i thread vivi) aveva crashato dopo `_exit` nel run 17 e resta
+solo come variante.
 
 ## 11. Log: niente scrittura sulla SD nel thread che logga (run 19)
 

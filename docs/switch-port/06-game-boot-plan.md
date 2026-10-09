@@ -2006,3 +2006,230 @@ picco del pool guest, già nella riga del battito.
 - **Smoke:** righe del passo 6b (tetto della SD).
 - **Vulkan:** `vulkan:` con present > 0, oppure gli errori e l'istantanea dopo
   20 s; `host memory:` e il pool guest prima del fallimento, se c'è.
+
+## 26. Run 19: Vulkan non è partito; il caricamento è la copia nella cache (2026-10-09)
+
+`out/console-runs/run19/`, NRO di `run19-build` (commit `b04a53a`). Tre
+avvii, nessun crash: smoke; gioco senza Vulkan (`game.prev.log`, 640 s);
+gioco con `switch-game-vulkan.nro` (`game.log`, 520 s).
+
+### A. Vulkan: il backend non è stato usato
+
+- `game.log` è davvero del NRO con Vulkan (blocco di codice `0x2da5000`, come
+  l'ELF Vulkan; quello senza è `0x2622000`), ma la seconda riga è `Config file
+  not found: sdmc:/switch/theft4/game.toml` e poi `graphics: null GPU`:
+  `nx_gpu` è rimasto `null`. Le note del run 18 dicevano `switch-game.toml`,
+  il codice leggeva solo `game.toml`. **Nessun present, nessun draw, nessun
+  VkResult, nessun dato di memoria Vulkan: A.1–A.4 non hanno risposta da
+  questo run.** Il secondo avvio vale come secondo avvio con la GPU nulla e la
+  cache già in parte piena (B.4).
+- Run 20: si leggono tutti e due i nomi (`game.toml`, poi `switch-game.toml`),
+  con una riga `[game] config …: found, loaded / not found` per ciascuno e
+  `nx_gpu = …` nella riga dei cvar; nel NRO con Vulkan, se `nx_gpu` non è
+  `vulkan`, una riga lo dice. Contenuto del file:
+  ```toml
+  nx_gpu = "vulkan"
+  nx_vk_dump_frames = true
+  ```
+- **Cattura dei fotogrammi** (A.2, da verificare): a 20, 40, 60, 120 e 240 s
+  `CaptureGuestOutput` del presenter (l'uscita del gioco prima della scala) e
+  una riga `frame at N s: guest output WxH, X% of pixels not black, mean,
+  max`, sempre; con `nx_vk_dump_frames = true` anche
+  `sdmc:/switch/theft4/frames/frame-NNNs.ppm` (solo sulla SD). La riga dice già
+  se è stato disegnato qualcosa senza copiare i file.
+- A.3 (confronto con il PC nello stesso punto) e A.4 (lentezza di Vulkan) si
+  fanno sul run 20.
+
+### B.1 Caricamento: run 18 contro run 19
+
+| | Run 18 | Run 19 (1° avvio) | Run 19 (2° avvio) |
+|---|---|---|---|
+| Sequenziatore spento | 120 s | **60 s** | **60 s** |
+| Primi `maps\east\bronx_*` | ~40 s (run 17) | fra 20 e 30 s | fra 20 e 30 s |
+| MB/s letti durante la copia | 0,9–1,5 | 1,7–2,5 | 1,7–2,9 |
+| Latenza media lettura (32 KB) | 1,5–1,9 ms | 1,5–1,9 ms | 1,5–2,0 ms |
+| VdSwap/s fino alla copia | 60 | 60 (fino a 70 s) | 60 (fino a 80 s) |
+| VdSwap/s durante la copia | 13–45 | 45 → 28 → **9** (640 s) | 30 → 8 → **6** (520 s) |
+| Scritture nella cache | 5.207 (170 MB) | 31.470 (1.030 MB) | 25.225 (826 MB) |
+
+CPU per thread (riga `cpu`, 100 % = un core; la Switch ne dà 3 al gioco):
+
+| Fase | Guest | Host | Thread più carichi |
+|---|---|---|---|
+| 10–50 s (sequenziatore) | 115–200 % | 2 % | id 14 al 100 % (in coda al sequenziatore), id 6 (Main XThread) fino all'86 %, UI 11–23 % |
+| 60–80 s | 230–270 % | 6–15 % | id 14 98 %, id 18 (motore audio) 40–63 %, id 7 25–38 % |
+| copia (90 s → fine) | 200–225 % | 15–29 % | id 18 54–69 %, id 6 25–57 %, id 19 23–37 %, id 11/12/13 ~25 % ciascuno, id 2 (XMA, host) 13–17 % |
+
+**Quale sospetto del run 18 spiega il run 19:**
+
+1. **Il log durevole per riga: sì.** È l'unica modifica che tocca la fase
+   prima della copia, e il sequenziatore passa da 120 a 60 s. Il run 19 scrive
+   750–790 righe ogni 10 s; con il log a buffer la loro scrittura costa
+   150–430 ms per finestra (picchi di 1,4–1,6 s ogni 60 s, quando esce il
+   riepilogo delle export) su un thread a parte invece che sui thread che
+   loggano.
+2. **La mutex unica: no, non misurabile.** Latenza delle letture uguale prima
+   e dopo (1,5–1,9 ms per 32 KB anche con la mutex per file): le letture
+   competono con le scritture sulla SD, non sulla mutex.
+3. **Le ~500.000 export/s: costo piccolo, misurato.** Media del run 412.000/s;
+   150 ns per export tracciata (riga `export trace`, un thread senza
+   contesa) → ~62 ms/s, il 6 % di un core su tutto il processo. Per thread
+   (istantanee 300–540 s): id 19 205.000/s (≈ 31 ms/s, **~10 % della sua
+   CPU**), id 18 178.000/s (≈ 27 ms/s, ~5 %), Main XThread id 6 12.500/s
+   (< 1 %). Vedi B.2.
+
+**Il collo di bottiglia ora è la copia nella cache.** Il gioco copia `.img`
+da `game:` a `cache:`/`cache1:` per tutta la sessione: ~600 scritture da 32 KB
+ogni 10 s, 14 ms l'una (thread guest **id 21**, un'istantanea `IN NtWriteFile
+for 1.3 s`), cioè ~2 MB/s; il file è dimensionato prima
+(`NtSetInformationFile`, 47 chiamate). VdSwap scende in parallelo da 60 a
+6–9/s; nel run 18, a copia finita, era tornato a 60. Il gioco **non** è
+limitato dalla CPU totale (≈ 2,2–2,5 core su 3) né dalle letture.
+
+### B.2 Tracciamento delle export
+
+Acceso in tutti e due gli avvii (`tracing on (cvar nx_trace_exports)`
+all'avvio; dal run 20 anche in ogni riga `heartbeat`). La misura "acceso
+contro spento nello stesso punto" non c'è ancora: va fatta nel run 20 con due
+avvii identici, il secondo con `nx_trace_exports = false`, confrontando la
+riga `cpu` di id 18 e 19 fra 120 e 300 s. Dalla stima di B.1 il costo supera
+il 5 % della CPU dei due thread più chiamanti (id 19, id 18) ma non del Main
+XThread; **proposta: spento per default nelle build di misura** dopo la
+conferma del run 20 (il default resta acceso nelle build di diagnosi, perché
+le istantanee "IN <export>" dipendono dal tracciamento).
+
+### B.3 Export più chiamate e chi le chiama
+
+A 600 s: `KeRaiseIrqlToDpcLevel` 44,7 M, `KeAcquireSpinLockAtRaisedIrql` e
+`KeReleaseSpinLockFromRaisedIrql` 44,0 M, `KfLowerIrql` 43,9 M,
+`RtlEnter/LeaveCriticalSection` 30,1 M, `KeQueryPerformanceFrequency` 2,7 M,
+`KeDelayExecutionThread` 2,2 M, `KeTlsGetValue` 2,0 M,
+`NtWaitForSingleObjectEx` 1,5 M. Le quattro della prima riga hanno lo stesso
+conteggio: sono sezioni protette da spin lock (alza IRQL, prendi, lascia,
+abbassa), non giri a vuoto su un lock conteso. Le fanno soprattutto id 19
+(LR `8216BF28`, sleep a `829A9624`) e id 18 (LR `8216DB9C`/`82178ED0`), tutti
+e due nella zona `8216xxxx` del motore audio.
+
+Il run 19 non sapeva quale LR chiama ogni export (solo l'ultimo per thread).
+Run 20: ogni 256ª export di ogni thread registra l'LR guest nell'export
+(8 posti), e ogni minuto una riga `export rates` con le 20 export più chiamate
+**al secondo** nella finestra e i loro chiamanti con la quota dei campioni.
+
+**Attese attive:** `KeDelayExecutionThread` (≈ 3.700/s) passa per
+`XThread::Delay`, che tronca un intervallo relativo sotto 1 ms a 0 ms e allora
+fa solo un yield: uno `Sleep` breve del gioco diventa un giro a vuoto. Dal run
+20 la riga `KeDelayExecutionThread since start` conta gli intervalli (zero,
+sotto 1 ms, 1–9 ms, ≥ 10 ms, assoluti). Se i "sotto 1 ms" sono la maggioranza,
+la correzione (dormire i microsecondi chiesti, come la guida di sa2-nx §9.5:
+attese che dormono) è il passo successivo; non è fatta.
+
+### B.4 Cache al secondo avvio
+
+La copia **non è saltata e non è rifatta da capo**: il gioco ricrea
+`cache:\valid.txt` e `cache1:\valid.txt` a ogni avvio (disposition 5), riusa
+i file già completi (50 aperture in sola lettura al secondo avvio) e ricrea
+gli altri (30 creazioni contro 52 del primo). Al secondo avvio ha scritto
+ancora 826 MB in 520 s. Il sequenziatore si spegne a 60 s in tutti e due gli
+avvii: la cache non accorcia l'avvio, accorcia solo il resto della copia.
+Run 20: cvar `nx_mount_cache` (vera); con `false` il gioco non trova
+`cache:`/`cache1:`: da provare per vedere se salta la copia e se VdSwap resta
+a 60 (sulla Switch sorgente e cache sono la stessa SD).
+
+### B.5 Benchmark della SD (smoke)
+
+| Prova | MB/s | Latenza mediana | p95 | Massima |
+|---|---|---|---|---|
+| Sequenziale 1 MiB, 1 thread | 85,9 | 12,15 ms | 12,43 ms | 14,97 ms |
+| Sequenziale 1 MiB, 3 thread | 86,3 | 12,10 ms | 12,37 ms | 14,31 ms |
+| Casuale 64 KiB, 1 thread | 53,6 | 1,20 ms | 1,36 ms | 2,19 ms |
+| Casuale 64 KiB, 3 thread | **16,5** | 1,21 ms | 33,85 ms | 67,69 ms |
+| Scritture da 32 KiB in coda a un file nuovo | **0,2** | 142 ms | 220 ms | 220 ms |
+
+Il gioco legge ~2 MB/s: il **2–4 % del tetto** della SD (86 MB/s sequenziale,
+54 MB/s casuale da 64 KiB). Tre thread sullo stesso file casuale rendono meno
+di uno (la SD o fsdev serializzano: niente letture parallele sullo stesso
+file). Le scritture che allungano il file costano 142 ms l'una: il gioco, che
+dimensiona prima il file, paga "solo" 14 ms, ma è ancora 7 volte il costo di
+una lettura da 32 KB.
+
+### B.6 Spegnimento automatico
+
+`appletSetAutoSleepDisabled(true) -> 0x0` in tutti e due gli avvii e il
+battito non salta (640 e 520 s continui, nessun buco). Funziona (due prove).
+
+### Altro dal run 19
+
+- **Handle:** `threads: Horizon 33 of 96`, host creati 31, joinati 1
+  (30 vivi, sono i thread del runtime): nessuna perdita.
+- **Letture:** tutte da 32 KB, 1–4 ms; nessuna lettura o scrittura corta.
+- **Memoria:** processo 3185 di 3189 MiB (l'heap preso all'avvio), heap di
+  newlib 1.453 MiB in uso, pool guest 266 blocchi su 384 (532 MiB): fermi dai
+  60 s.
+- **Thread UI 11–23 % di un core:** `ConsoleRefresh` chiamava `consoleUpdate`
+  a ogni giro (16 ms). Dal run 20 solo quando stderr ha scritto qualcosa
+  (le righe `[game]` aggiornano già da sé). Da verificare.
+- **Uscita D** pulita in tutti e due gli avvii del gioco (lo smoke esce con il
+  modo A, il suo default), 12 passi con i tempi: I/O fermo a +1,56–1,58 s (il
+  riepilogo delle export prima costa ~1,4 s), join 2 s, `_exit` a +3,8 s.
+
+### C.1 Piano: solo edizione europea, base 0.0.0.6 senza TU
+
+Non c'è altro: disco europeo, nessuna TU, nessun disco USA.
+
+- **Cosa funziona già:** il codice generato dalla base europea
+  (`config-eu-base`, §2 strada C), il kernel, l'avvio fino alla città
+  (sequenziatore, file `bronx`, copia nella cache), input, uscita. Nessun hook
+  di Theft4 è attivo in switch-game.
+- **Hook di `gta4-recomp/src`** (scritti per la v8 USA, 2.364 indirizzi):
+  - *necessari per giocare*: nessuno di sicuro. Il gioco su 360 gira senza;
+    i candidati sono quelli che sostituiscono un servizio della 360 che sul
+    nostro runtime non c'è o va diverso: `gta4_lzx_hooks` (decompressione,
+    12 indirizzi), `gta4_input_hooks` (record del pad, 105: noi passiamo già
+    il pad come XInput, quindi solo se l'input dà problemi),
+    `gta4_presentation_hooks`/`gta4_native_hooks` (solo per il renderer
+    nativo, sotto);
+  - *ottimizzazioni o comodità*: `gta4_population_hooks` (densità: è la leva
+    CPU di LibertyRecompAndroid, 12 §7), `gta4_aspect_hooks`,
+    `gta4_frame_limiter`, `gta4_loading_parallax_fix`, `gta4_quicksave_hooks`,
+    `gta4_frontend_hooks`;
+  - *solo per il PC o diagnostica*: mouse/tastiera, gyro, touch,
+    multiplayer a 64 (1.046 indirizzi), online, trace (`*_trace*`), DLC.
+- **Differenze della base senza TU:** il repository non le documenta. Note
+  certe: niente contenuti scaricabili (gli Episodi richiedono la TU), niente
+  correzioni del multigiocatore della TU; per il resto vanno ricavate con il
+  confronto delle funzioni fra la base e la v8 (stesse firme, corpo diverso)
+  quando servono. Il gioco in solitario dal disco è il caso d'uso.
+- **Ritrovare gli indirizzi sulla base europea** (per i pochi hook utili): per
+  ogni funzione agganciata nella v8, prendere la sequenza delle istruzioni
+  (togliendo gli spiazzamenti assoluti) e cercarla nella base; il nostro
+  codice generato `generated/eu-base` ha già i confini delle funzioni. Uno
+  script (stile `tools/compare_export_traces.py`) che produce la tabella
+  v8 → EU con il grado di somiglianza; accettare solo corrispondenze uniche,
+  verificare le altre a mano.
+- **Renderer PM4 di nfsmw-nx con pochi hook:** il loro renderer legge il
+  flusso PM4 (come il nostro processore `xenos`) e usa pochi hook per sapere
+  dal D3D del gioco *quali* shader sono creati e *quale* draw sta passando
+  (`nfsmw_shader_hooks.cpp`, `nfsmw_nativo_ganchos.cpp`). Per GTA IV europeo
+  servono gli stessi due punti, ritrovati con il confronto di sequenze:
+  creazione degli shader (le funzioni del D3D che ricevono il microcodice
+  Xenos: le chiamate a `MmAllocatePhysicalMemoryEx` vicine e il formato del
+  microcodice le rendono riconoscibili) e invio dei draw. `gta4_native_hooks`
+  di Theft4 ne usa 135 distinti sulla v8: per il primo passo bastano
+  quelli della creazione degli shader e del draw. Prima però va visto se il
+  processore `xenos` (run 20) disegna: se sì, il renderer nativo è
+  un'ottimizzazione e non una condizione.
+
+### Run 20: cosa guardare (`out/console-runs/run20-build/`)
+
+- **Vulkan prima di tutto:** `switch-game-vulkan.nro` rinominato
+  `switch-game.nro`, `game.toml` (o `switch-game.toml`) con `nx_gpu =
+  "vulkan"` e `nx_vk_dump_frames = true`. Righe: `config …: found`,
+  `graphics: ReXGlue's Vulkan backend`, `vulkan:` nel battito, `frame at N s`,
+  errori `vkQueueSubmit`/`vkQueuePresentKHR`, `host memory:`.
+- **Senza Vulkan, tre avvii** (stesso `switch-game.nro`), uno per variante in
+  `game.toml`: (1) niente; (2) `nx_trace_exports = false`; (3)
+  `nx_mount_cache = false`. Confronto: VdSwap/s, `cpu` di id 6, 18, 19, 21,
+  sequenziatore, scritture.
+- **Battito:** `export rates` (le 20 export al secondo con i chiamanti),
+  `KeDelayExecutionThread since start`, `tracing on/OFF`, `cpu` della UI
+  (attesa sotto il 5 %).
