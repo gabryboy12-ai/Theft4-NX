@@ -29,6 +29,7 @@
 #include <glslang/Public/ShaderLang.h>
 #include <rex/assert.h>
 #include <rex/cvar.h>
+#include <rex/graphics/nx_gpu_counters.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -4106,6 +4107,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   ++frame_flow_draw_calls_;
+  rex::graphics::nx_gpu_counters().draws.fetch_add(1, std::memory_order_relaxed);
   const RegisterFile& regs = *register_file_;
   (void)index_buffer_info;
   auto draw_fail = [&](const char* stage) {
@@ -6116,6 +6118,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
+    }
+    if (rex::graphics::NxGpuCountSubmit(int32_t(submit_result))) {
+      REXGPU_ERROR("vkQueueSubmit returned {}", int32_t(submit_result));
     }
     if (theft4_gpu_timing_enabled_) {
       theft4_gpu_timing_submit_ns_ += Theft4GpuTimingNowNs() - theft4_submit_start_ns;

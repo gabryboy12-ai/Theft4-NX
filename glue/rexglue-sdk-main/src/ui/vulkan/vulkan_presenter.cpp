@@ -29,6 +29,7 @@
 
 #include <rex/assert.h>
 #include <rex/chrono/clock.h>
+#include <rex/graphics/nx_gpu_counters.h>
 #include <rex/cvar.h>
 #include <rex/diagnostics/policy.h>
 #include <rex/diagnostics/gpu_flight_recorder.h>
@@ -2972,6 +2973,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                          current_paint_submission_index, tv_trace_provenance.submitted_frame,
                          swapchain_image_index, uint64_t(uintptr_t(present_semaphore)),
                          int32_t(submit_result));
+      if (rex::graphics::NxGpuCountSubmit(int32_t(submit_result))) {
+        REXLOG_ERROR("VulkanPresenter: paint vkQueueSubmit returned {}", int32_t(submit_result));
+      }
       if (submit_result < VK_SUCCESS) {
         gpu_flight::Fail("present.submit", int32_t(submit_result),
                          uint64_t(uintptr_t(draw_command_buffer)), current_paint_submission_index,
@@ -3083,6 +3087,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
     const VulkanDevice::Queue::Acquisition queue_acquisition =
         vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
+  }
+  if (rex::graphics::NxGpuCountPresent(int32_t(present_result))) {
+    REXLOG_ERROR("VulkanPresenter: vkQueuePresentKHR returned {}", int32_t(present_result));
   }
   gpu_flight::Record("present.queue-end", uint64_t(uintptr_t(paint_context_.swapchain)),
                      current_paint_submission_index, tv_trace_provenance.submitted_frame,
