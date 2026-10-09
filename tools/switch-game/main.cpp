@@ -17,10 +17,13 @@
 // (missing_imports.cpp, generated at build time). The thread that reached it
 // is parked; press + to exit.
 //
-// Logging works as in switch-smoke: every line is appended to game.log through
-// its own descriptor, fsync'd and closed before the next operation, and the
-// SDK logger writes through the same path, so after a crash the last line is
-// the last operation attempted. An unhandled fault is also written to
+// Logging (run 19): lines go to a buffer that a writer thread appends to
+// game.log once a second (one open, write, fsync, close), and every exit
+// step, termination, stop and fault writes the buffer at once. Run 18 wrote
+// each line as switch-smoke does (open, write, fsync, close on the thread
+// that logs): the async read worker paid that for every "[AsyncIO] complete"
+// line. cvar nx_log_durable = true brings that mode back for crash hunting:
+// after a crash the last line is the last operation attempted. An unhandled fault is also written to
 // game-crash.log (registers, PC and LR as offsets from the module base);
 // the runtime then ends it in svcBreak on the faulting thread's own stack, so
 // Atmosphere writes its crash report (exception_handler_switch.cpp).
@@ -69,7 +72,10 @@
 #include <typeinfo>
 #include <vector>
 
+#include <algorithm>
+
 #include <fcntl.h>
+#include <malloc.h>
 #include <sys/iosupport.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -82,6 +88,7 @@
 #include <rex/diagnostics/missing_function.h>
 #include <rex/diagnostics/policy.h>
 #include <rex/exception_handler.h>
+#include <rex/filesystem.h>
 #include <rex/kernel/init.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
@@ -104,7 +111,9 @@
 #include "nx_input.h"
 
 #if THEFT4_NX_VULKAN
+#include <rex/graphics/nx_gpu_counters.h>
 #include <rex/graphics/vulkan/graphics_system.h>
+#include <rex/ui/vulkan/provider.h>
 #include <rex/ui/window_nx.h>
 #include <rex/ui/windowed_app_context_nx.h>
 #endif
@@ -120,6 +129,21 @@ REXCVAR_DEFINE_STRING(nx_gpu, "null", "Switch",
                       "GPU: null = the null GPU (nx_null_gpu = false: none); vulkan = ReXGlue's "
                       "Vulkan backend on NVK, presenting on the default NWindow with the console "
                       "closed (only in a build with THEFT4_SWITCH_GAME_VULKAN; 06 section 24)");
+REXCVAR_DEFINE_BOOL(nx_log_durable, false, "Switch",
+                    "true: every log line is written to game.log at once (open, write, fsync, "
+                    "close on the thread that logs: slow on the SD, for crash hunting); false: a "
+                    "writer thread appends the lines once a second, and the exit steps, "
+                    "terminations, the stop and faults write them at once (run 19)");
+REXCVAR_DEFINE_BOOL(nx_trace_exports, true, "Switch",
+                    "Trace every export (counts, first calls, the export each thread is inside "
+                    "for the snapshots); false for measurement runs (export_stubs.h)");
+REXCVAR_DEFINE_BOOL(nx_disable_auto_sleep, true, "Switch",
+                    "appletSetAutoSleepDisabled(true) at start: run 18 was suspended for 406 s "
+                    "after about 5 minutes without input (auto-sleep)");
+REXCVAR_DEFINE_INT32(nx_nvmap_mb, 0, "Switch",
+                     "nx_gpu = vulkan: MB of libnx's nvdrv transfer memory "
+                     "(__nx_nv_transfermem_size, bookkeeping of every GPU allocation; libnx 8). 0 = "
+                     "leave libnx's (nfsmw-nx: 0x235C SharedMemoryTooSmall when it runs out)");
 REXCVAR_DEFINE_STRING(nx_exit_mode, "D", "Switch",
                       "Exit at + (hold 1 s): D = file I/O gate closed and drained, null audio "
                       "stopped, every thread told to end and joined (2 s each), then exit(0); "
@@ -153,6 +177,10 @@ int g_crash_fd = -1;
 
 // Start of the NRO image (see switch-smoke/main.cpp, StepModuleBase).
 extern "C" char _start;
+#if THEFT4_NX_VULKAN
+// libnx's weak symbol (nv.o, 8 MiB): read by nvInitialize, i.e. when NVK starts.
+extern "C" u32 __nx_nv_transfermem_size;
+#endif
 
 namespace {
 
@@ -184,11 +212,19 @@ void ConsoleRefresh() {
   }
 }
 
-// ── Durable log (as in switch-smoke) ───────────────────────────────────────
+// ── Log file ───────────────────────────────────────────────────────────────
 
-std::timed_mutex g_log_file_mutex;
+std::timed_mutex g_log_file_mutex;  // the file, and the order of what reaches it
+
+// Cost of the writes to game.log (each one open, write, fsync, close).
+std::atomic<uint64_t> g_log_lines{0}, g_log_file_writes{0}, g_log_file_ns{0},
+    g_log_file_ns_max{0};
 
 void DurableWriteLocked(const char* data, size_t size) {
+  if (size == 0) {
+    return;
+  }
+  const u64 start = armGetSystemTick();
   int fd = open(kLogPath, O_WRONLY | O_APPEND | O_CREAT, 0666);
   if (fd < 0) {
     static bool reported = false;
@@ -204,14 +240,52 @@ void DurableWriteLocked(const char* data, size_t size) {
   (void)write(fd, data, size);
   fsync(fd);
   close(fd);
+  const u64 ns = armTicksToNs(armGetSystemTick() - start);
+  g_log_file_writes.fetch_add(1, std::memory_order_relaxed);
+  g_log_file_ns.fetch_add(ns, std::memory_order_relaxed);
+  if (ns > g_log_file_ns_max.load(std::memory_order_relaxed)) {
+    g_log_file_ns_max.store(ns, std::memory_order_relaxed);  // the heartbeat resets it
+  }
 }
 
-// For stderr, which the fault path of exception_handler_switch.cpp also
-// writes: never wait more than 200 ms for the log (a thread that faulted
-// while writing it must not deadlock the report). false = not written.
+// Buffered mode (nx_log_durable = false): lines wait here for the writer.
+bool g_log_buffered = false;
+std::mutex g_log_buffer_mutex;
+std::string g_log_buffer, g_log_spare;
+constexpr size_t kLogBufferFlushBytes = 4u << 20;  // the logging thread writes it itself
+
+// Writes the buffer to the file; g_log_file_mutex held. With try_only (fault
+// path) a buffer held by another thread is left alone.
+void FlushBufferLocked(bool try_only) {
+  std::unique_lock<std::mutex> lock(g_log_buffer_mutex, std::defer_lock);
+  if (try_only ? !lock.try_lock() : (lock.lock(), false)) {
+    return;
+  }
+  g_log_spare.swap(g_log_buffer);
+  lock.unlock();
+  DurableWriteLocked(g_log_spare.data(), g_log_spare.size());
+  g_log_spare.clear();
+}
+
+void FlushLog() {
+  if (!g_log_buffered) {
+    return;
+  }
+  std::lock_guard<std::timed_mutex> lock(g_log_file_mutex);
+  FlushBufferLocked(false);
+}
+
+// For stderr and the exit steps, which the fault path of
+// exception_handler_switch.cpp also reaches: never wait more than 200 ms for
+// the log (a thread that faulted while writing it must not deadlock the
+// report). The buffer goes first, so the file keeps the order. false = not
+// written.
 bool DurableWriteBounded(const char* data, size_t size) {
   if (!g_log_file_mutex.try_lock_for(std::chrono::milliseconds(200))) {
     return false;
+  }
+  if (g_log_buffered) {
+    FlushBufferLocked(true);
   }
   DurableWriteLocked(data, size);
   g_log_file_mutex.unlock();
@@ -219,8 +293,48 @@ bool DurableWriteBounded(const char* data, size_t size) {
 }
 
 void DurableWrite(const char* data, size_t size) {
+  g_log_lines.fetch_add(1, std::memory_order_relaxed);
+  if (g_log_buffered) {
+    size_t pending;
+    {
+      std::lock_guard<std::mutex> lock(g_log_buffer_mutex);
+      g_log_buffer.append(data, size);
+      pending = g_log_buffer.size();
+    }
+    if (pending >= kLogBufferFlushBytes) {
+      FlushLog();
+    }
+    return;
+  }
   std::lock_guard<std::timed_mutex> lock(g_log_file_mutex);
   DurableWriteLocked(data, size);
+}
+
+// The writer: once a second. Its Horizon handle is in the heartbeat's CPU
+// line.
+Thread g_log_writer;
+std::atomic<bool> g_log_writer_ready{false};
+
+void LogWriterMain(void*) {
+  for (;;) {
+    svcSleepThread(1'000'000'000);
+    FlushLog();
+  }
+}
+
+// Called once, before the runtime starts any thread.
+void StartLogWriter() {
+  if (REXCVAR_GET(nx_log_durable)) {
+    return;
+  }
+  g_log_buffer.reserve(kLogBufferFlushBytes * 2);
+  g_log_spare.reserve(kLogBufferFlushBytes * 2);
+  // Priority 0x2C as the exit worker; any core.
+  if (R_SUCCEEDED(threadCreate(&g_log_writer, LogWriterMain, nullptr, nullptr, 0x10000, 0x2C, -2)) &&
+      R_SUCCEEDED(threadStart(&g_log_writer))) {
+    g_log_buffered = true;
+    g_log_writer_ready = true;
+  }
 }
 
 class DurableSink final : public spdlog::sinks::base_sink<std::mutex> {
@@ -230,7 +344,7 @@ class DurableSink final : public spdlog::sinks::base_sink<std::mutex> {
     formatter_->format(msg, formatted);
     DurableWrite(formatted.data(), formatted.size());
   }
-  void flush_() override {}
+  void flush_() override { FlushLog(); }
 };
 
 void Report(bool error, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -305,6 +419,11 @@ bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
     CrashHex(name, tc->x[i]);
   }
   if (g_crash_fd >= 0) fsync(g_crash_fd);
+  // The lines still in the buffer (nx_log_durable = false), if nobody holds it.
+  if (g_log_buffered && g_log_file_mutex.try_lock()) {
+    FlushBufferLocked(true);
+    g_log_file_mutex.unlock();
+  }
   return false;
 }
 
@@ -316,12 +435,17 @@ bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
 constexpr const char* kExitStepPath = "sdmc:/switch/theft4/game-exit.log";
 char g_exit_mode = 0;
 int g_exit_step = 0;
+u64 g_exit_start_tick = 0;  // when the mode was chosen
 
+// Each step carries its time since the mode was chosen (run 19).
 void ExitStep(const char* what) {
   if (!g_exit_mode) {
     return;
   }
-  const char* line = theft4::nx_exit::Step(g_exit_mode, ++g_exit_step, what);
+  char timed[300];
+  std::snprintf(timed, sizeof(timed), "+%" PRIu64 " ms: %s",
+                armTicksToNs(armGetSystemTick() - g_exit_start_tick) / 1'000'000, what);
+  const char* line = theft4::nx_exit::Step(g_exit_mode, ++g_exit_step, timed);
   char text[300];
   const int n = std::snprintf(text, sizeof(text), "[game] %s", line);
   DurableWriteBounded(text, size_t(n < int(sizeof(text)) ? n : int(sizeof(text)) - 1));
@@ -485,6 +609,13 @@ void StartLogging() {
   rex::cvar::LoadConfig(kConfigPath);
   rex::cvar::FinalizeInit();
   GAME_INFO("cvars from argv, then %s", kConfigPath);
+  StartLogWriter();
+  GAME_INFO("log: %s", g_log_buffered
+                           ? "buffered, written once a second by its own thread and at once on "
+                             "exit steps, terminations, the stop and faults (nx_log_durable = false)"
+                       : REXCVAR_GET(nx_log_durable)
+                           ? "durable, every line written at once (nx_log_durable = true)"
+                           : "durable: the writer thread could not start");
 
   g_crash_fd = open(kCrashPath, O_WRONLY | O_APPEND | O_CREAT, 0666);
   if (g_crash_fd < 0) {
@@ -680,7 +811,7 @@ void LogThreadSnapshot(const char* when) {
   for (size_t i = 0; i < threads.size(); ++i) {
     auto& t = threads[i];
     ThreadRow& row = rows[i];
-    row.name = t->name();
+    row.name = t->thread_name();
     row.handle = t->handle();
     row.thread_id = t->thread_id();
     row.guest = t->is_guest_thread();
@@ -832,6 +963,226 @@ void LogButtonChange(u64 buttons) {
   g_buttons_now = buttons;
 }
 
+// ── CPU time per thread, threads, memory, Vulkan (run 19) ──────────────────
+
+// CPU time of a thread of this process from the kernel (svcGetInfo
+// ThreadTickCount, all cores), in system ticks; 0 if refused.
+u64 ThreadCpuTicks(Handle handle) {
+  u64 ticks = 0;
+  const u32 type = hosversionAtLeast(13, 0, 0) ? InfoType_ThreadTickCount
+                                               : InfoType_ThreadTickCountDeprecated;
+  if (R_FAILED(svcGetInfo(&ticks, type, handle, UINT64_MAX))) {
+    return 0;
+  }
+  return ticks;
+}
+
+struct CpuRow {
+  Handle handle = 0;
+  uint32_t id = 0;  // XThread id; 0 = not an XThread
+  const char* kind = "";
+  u64 ticks = 0;
+  double percent = 0;  // of one core over the window
+};
+
+Handle g_main_thread_handle = 0;
+Handle g_resource_limit = 0;
+
+// One line: every XThread's CPU over the window (100% = one core), the
+// guest and host sums, this UI thread and the log writer, the busiest ten.
+void LogCpu(std::vector<std::pair<Handle, u64>>* last, u64 window_ticks) {
+  std::vector<CpuRow> rows;
+  auto* kernel = rex::system::kernel_state();
+  std::vector<rex::system::object_ref<rex::system::XThread>> threads;
+  if (kernel) {
+    kernel->object_table()->TryGetObjectsByType<rex::system::XThread>(
+        &threads, std::chrono::milliseconds(200));
+  }
+  for (auto& t : threads) {
+    if (auto* host = t->thread()) {
+      CpuRow r;
+      r.handle = host->nx_kernel_handle();
+      r.id = t->thread_id();
+      r.kind = t->is_guest_thread() ? "guest" : "host";
+      rows.push_back(r);
+    }
+  }
+  CpuRow ui;
+  ui.handle = g_main_thread_handle;
+  ui.kind = "ui";
+  rows.push_back(ui);
+  if (g_log_writer_ready) {
+    CpuRow w;
+    w.handle = g_log_writer.handle;
+    w.kind = "log";
+    rows.push_back(w);
+  }
+  std::vector<std::pair<Handle, u64>> now;
+  double guest = 0, host = 0, other = 0;
+  for (CpuRow& r : rows) {
+    r.ticks = ThreadCpuTicks(r.handle);
+    now.emplace_back(r.handle, r.ticks);
+    u64 before = 0;
+    for (const auto& [h, t] : *last) {
+      if (h == r.handle) before = t;
+    }
+    const u64 delta = r.ticks > before ? r.ticks - before : 0;
+    r.percent = window_ticks ? 100.0 * double(delta) / double(window_ticks) : 0;
+    (r.kind[0] == 'g' ? guest : r.kind[0] == 'h' ? host : other) += r.percent;
+  }
+  last->swap(now);
+  std::sort(rows.begin(), rows.end(),
+            [](const CpuRow& a, const CpuRow& b) { return a.percent > b.percent; });
+  std::string top;
+  for (size_t i = 0; i < rows.size() && i < 10; ++i) {
+    char item[48];
+    if (rows[i].id) {
+      std::snprintf(item, sizeof(item), " id %u %s %.1f%%;", rows[i].id, rows[i].kind,
+                    rows[i].percent);
+    } else {
+      std::snprintf(item, sizeof(item), " %s %.1f%%;", rows[i].kind, rows[i].percent);
+    }
+    top += item;
+  }
+  GAME_INFO("cpu (100%% = one core): guest threads %.1f%%, host XThreads %.1f%%, ui + log "
+            "%.1f%%; busiest:%s",
+            guest, host, other, top.c_str());
+}
+
+// Horizon's thread count against the process limit, and the host threads of
+// the runtime (created, finished, joined: joined ones gave their handle back).
+void LogThreadCounts() {
+  s64 current = -1, limit = -1;
+  if (g_resource_limit) {
+    svcGetResourceLimitCurrentValue(&current, g_resource_limit, LimitableResource_Threads);
+    svcGetResourceLimitLimitValue(&limit, g_resource_limit, LimitableResource_Threads);
+  }
+  const auto c = rex::thread::GetNxThreadCounters();
+  GAME_INFO("threads: Horizon %" PRId64 " of %" PRId64 " (resource limit); runtime host threads "
+            "created %" PRIu64 ", finished %" PRIu64 ", joined %" PRIu64 ", abandoned %" PRIu64
+            " (%" PRIu64 " still hold a handle)",
+            current, limit, c.created, c.finished, c.joined, c.abandoned, c.created - c.joined);
+}
+
+// Process memory and the host heap (newlib), with their peaks; the guest
+// pool's peak is on the heartbeat line.
+u64 g_peak_used = 0, g_peak_heap = 0;
+
+void LogHostMemory() {
+  u64 used = 0, total = 0;
+  svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+  svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+  const struct mallinfo mi = mallinfo();
+  g_peak_used = std::max<u64>(g_peak_used, used);
+  g_peak_heap = std::max<u64>(g_peak_heap, u64(mi.uordblks));
+  GAME_INFO("host memory: process %" PRIu64 " of %" PRIu64 " MiB (peak %" PRIu64
+            "), heap arena %zu MiB, in use %zu MiB (peak %" PRIu64 ")",
+            used >> 20, total >> 20, g_peak_used >> 20, size_t(mi.arena) >> 20,
+            size_t(mi.uordblks) >> 20, g_peak_heap >> 20);
+}
+
+// Log cost over the window: lines, writes to game.log and their time.
+void LogLogCost(uint64_t* last_lines, uint64_t* last_writes, uint64_t* last_ns) {
+  const uint64_t lines = g_log_lines.load(std::memory_order_relaxed);
+  const uint64_t writes = g_log_file_writes.load(std::memory_order_relaxed);
+  const uint64_t ns = g_log_file_ns.load(std::memory_order_relaxed);
+  const uint64_t n = writes - *last_writes;
+  GAME_INFO("log: %" PRIu64 " lines, %" PRIu64 " writes to game.log (%.1f ms total, mean %.3f ms, "
+            "max %.3f ms) in the window; %s",
+            lines - *last_lines, n, double(ns - *last_ns) / 1e6,
+            n ? double(ns - *last_ns) / double(n) / 1e6 : 0.0,
+            double(g_log_file_ns_max.exchange(0, std::memory_order_relaxed)) / 1e6,
+            g_log_buffered ? "buffered" : "durable");
+  *last_lines = lines;
+  *last_writes = writes;
+  *last_ns = ns;
+}
+
+void LogThreadSnapshot(const char* when);
+
+#if THEFT4_NX_VULKAN
+// nx_gpu = vulkan: presents, draws and submits of the window, the failures,
+// the Vulkan heaps (VK_EXT_memory_budget); after 20 s without a present, one
+// snapshot of the threads per stall (CheckVulkanStall).
+struct VulkanBeat {
+  uint64_t presents = 0, draws = 0, submits = 0;
+  uint64_t stall_presents = UINT64_MAX;
+  u64 last_present_change = 0;
+  bool stall_reported = false;
+};
+VulkanBeat g_vk_beat;
+
+void LogVulkan(double window_s) {
+  if (!g_vulkan_graphics) {
+    return;
+  }
+  auto& c = rex::graphics::nx_gpu_counters();
+  const uint64_t presents = c.presents.load(std::memory_order_relaxed);
+  const uint64_t draws = c.draws.load(std::memory_order_relaxed);
+  const uint64_t submits = c.submits.load(std::memory_order_relaxed);
+  const uint64_t new_presents = presents - g_vk_beat.presents;
+  std::string heaps = "no VK_EXT_memory_budget";
+  auto* provider = static_cast<rex::ui::vulkan::VulkanProvider*>(g_vulkan_graphics->provider());
+  if (const auto* device = provider ? provider->vulkan_device() : nullptr) {
+    const auto& ifn = device->vulkan_instance()->functions();
+    if (device->extensions().ext_EXT_memory_budget && ifn.vkGetPhysicalDeviceMemoryProperties2) {
+      VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+      budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+      VkPhysicalDeviceMemoryProperties2 properties{};
+      properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+      properties.pNext = &budget;
+      ifn.vkGetPhysicalDeviceMemoryProperties2(device->physical_device(), &properties);
+      heaps.clear();
+      for (uint32_t h = 0; h < properties.memoryProperties.memoryHeapCount; ++h) {
+        char item[96];
+        std::snprintf(item, sizeof(item), "%sheap %u %" PRIu64 " of %" PRIu64 " MiB",
+                      h ? ", " : "", h, uint64_t(budget.heapUsage[h]) >> 20,
+                      uint64_t(budget.heapBudget[h]) >> 20);
+        heaps += item;
+      }
+    }
+  }
+  GAME_INFO("vulkan: %" PRIu64 " presents (%.1f/s, frame %.1f ms), %" PRIu64 " draws (+%" PRIu64
+            "), %" PRIu64 " submits (+%" PRIu64 "); failures: submit %" PRIu64
+            " (last %d), present %" PRIu64 " (last %d); %s",
+            presents, window_s > 0 ? double(new_presents) / window_s : 0.0,
+            new_presents ? window_s * 1000.0 / double(new_presents) : 0.0, draws,
+            draws - g_vk_beat.draws, submits, submits - g_vk_beat.submits,
+            c.submit_failures.load(std::memory_order_relaxed),
+            c.last_submit_failure.load(std::memory_order_relaxed),
+            c.present_failures.load(std::memory_order_relaxed),
+            c.last_present_failure.load(std::memory_order_relaxed), heaps.c_str());
+  g_vk_beat.presents = presents;
+  g_vk_beat.draws = draws;
+  g_vk_beat.submits = submits;
+}
+
+// Every loop of the UI thread (cheap): 20 s without a present -> one
+// snapshot, again only after presents move.
+void CheckVulkanStall() {
+  if (!g_vulkan_graphics) {
+    return;
+  }
+  const u64 now = armGetSystemTick();
+  const uint64_t presents =
+      rex::graphics::nx_gpu_counters().presents.load(std::memory_order_relaxed);
+  if (presents != g_vk_beat.stall_presents) {
+    g_vk_beat.stall_presents = presents;
+    g_vk_beat.last_present_change = now;
+    g_vk_beat.stall_reported = false;
+    return;
+  }
+  if (!g_vk_beat.stall_reported &&
+      armTicksToNs(now - g_vk_beat.last_present_change) >= 20'000'000'000ull) {
+    g_vk_beat.stall_reported = true;
+    char when[80];
+    std::snprintf(when, sizeof(when), "after 20 s without a Vulkan present (%" PRIu64 " so far)",
+                  presents);
+    LogThreadSnapshot(when);
+  }
+}
+#endif  // THEFT4_NX_VULKAN
+
 // Every 10 s: one line; every 60 s: the call count of each export; at 5, 20,
 // 60 s and then every 120 s: the snapshot.
 struct Heartbeat {
@@ -842,9 +1193,13 @@ struct Heartbeat {
   u64 last_line_s = 0;
   rex::audio::NullAudioStats last_audio;
   rex::system::file_io::IoStats last_io;
+  std::vector<std::pair<Handle, u64>> last_cpu;
+  u64 last_line_tick = 0;
+  uint64_t last_log_lines = 0, last_log_writes = 0, last_log_ns = 0;
 
   void Tick() {
-    const u64 seconds = armTicksToNs(armGetSystemTick() - start) / 1'000'000'000ull;
+    const u64 now_tick = armGetSystemTick();
+    const u64 seconds = armTicksToNs(now_tick - start) / 1'000'000'000ull;
     if (seconds >= next_line_s) {
       next_line_s = seconds + 10;
       size_t distinct = 0;
@@ -892,8 +1247,39 @@ struct Heartbeat {
                   double(io.read_ns_max) / 1e6, writes,
                   writes ? double(io.write_ns - last_io.write_ns) / double(writes) / 1e6 : 0.0,
                   double(io.write_ns_max) / 1e6, io.in_flight);
+        // Run 19: how the reads of the window spread, and short transfers.
+        std::string latency, size;
+        static const char* const kLatency[] = {"<0.25", "<0.5", "<1", "<2", "<4",
+                                               "<8",    "<16",  "<32", ">=32"};
+        static const char* const kSize[] = {"<4K", "<16K", "<=32K", "<128K", "<1M", ">=1M"};
+        for (int b = 0; b < rex::system::file_io::kReadLatencyBuckets; ++b) {
+          char item[32];
+          std::snprintf(item, sizeof(item), " %s:%" PRIu64, kLatency[b],
+                        io.read_latency[b] - last_io.read_latency[b]);
+          latency += item;
+        }
+        for (int b = 0; b < rex::system::file_io::kReadSizeBuckets; ++b) {
+          char item[32];
+          std::snprintf(item, sizeof(item), " %s:%" PRIu64, kSize[b],
+                        io.read_size[b] - last_io.read_size[b]);
+          size += item;
+        }
+        uint64_t short_reads = 0, short_writes = 0;
+        rex::filesystem::GetNxShortTransfers(&short_reads, &short_writes);
+        GAME_INFO("file reads in the window: ms%s; bytes%s; short reads %" PRIu64
+                  ", short writes %" PRIu64 " since start",
+                  latency.c_str(), size.c_str(), short_reads, short_writes);
         last_io = io;
       }
+      const u64 window_ticks = last_line_tick ? now_tick - last_line_tick : 0;
+      last_line_tick = now_tick;
+      LogCpu(&last_cpu, window_ticks);
+      LogThreadCounts();
+      LogHostMemory();
+      LogLogCost(&last_log_lines, &last_log_writes, &last_log_ns);
+#if THEFT4_NX_VULKAN
+      LogVulkan(window_s);
+#endif
       GAME_INFO("buttons: %" PRIu64 " changes, now 0x%" PRIx64, g_button_changes,
                 g_buttons_now);
       if (REXCVAR_GET(nx_input)) {
@@ -1045,7 +1431,7 @@ void LogExitState() {
     for (auto& t : g_exit_xthreads) {
       if (!t->is_guest_thread() && t->is_running()) {
         hosts += hosts.empty() ? "" : ", ";
-        hosts += t->name();
+        hosts += t->thread_name();
         ++count;
       }
     }
@@ -1091,6 +1477,7 @@ void StopNullAudioWorker() {
 
 [[noreturn]] void ExitGame(const char* reason) {
   const char mode = theft4::nx_exit::ParseExitMode(REXCVAR_GET(nx_exit_mode).c_str());
+  g_exit_start_tick = armGetSystemTick();
   g_exit_mode = mode;
   char text[200];
   std::snprintf(text, sizeof(text), "chosen (%s): %s", reason,
@@ -1168,6 +1555,22 @@ namespace rex::diagnostics {
 
 namespace {
 
+// A thread_local read as the runtime's hot helpers do it (ThreadState::Get,
+// XThread::GetCurrentThread): a call, then __aarch64_read_tp, which is
+// itself a call on devkitA64.
+thread_local uint32_t t_tls_benchmark = 0;
+
+__attribute__((noinline, noipa)) uint32_t BumpThreadLocal() { return ++t_tls_benchmark; }
+
+double MeasureThreadLocalNs(uint32_t iterations) {
+  const u64 start = armGetSystemTick();
+  for (uint32_t i = 0; i < iterations; ++i) {
+    BumpThreadLocal();
+    asm volatile("" ::: "memory");
+  }
+  return iterations ? double(armTicksToNs(armGetSystemTick() - start)) / double(iterations) : 0.0;
+}
+
 [[noreturn]] void GameMain(int argc, char** argv) {
   rex::cvar::Init(argc, argv);
   consoleInit(nullptr);
@@ -1195,6 +1598,28 @@ namespace {
   if (!CheckGameFiles()) {
     WaitForPlusAndExit(&g_pad);
   }
+  // Run 19: what the heartbeat's thread lines need, auto-sleep, and the cost
+  // of the export trace (C.3 of the run 19 list).
+  g_main_thread_handle = threadGetCurHandle();
+  {
+    u64 limit_handle = 0;
+    if (R_SUCCEEDED(svcGetInfo(&limit_handle, InfoType_ResourceLimit, INVALID_HANDLE, 0))) {
+      g_resource_limit = Handle(limit_handle);
+    }
+  }
+  if (REXCVAR_GET(nx_disable_auto_sleep)) {
+    const Result rc = appletSetAutoSleepDisabled(true);
+    GAME_INFO("auto-sleep: appletSetAutoSleepDisabled(true) -> 0x%X (cvar nx_disable_auto_sleep)",
+              rc);
+  }
+  {
+    const double trace_ns = rex::diagnostics::MeasureExportTraceNs(1'000'000);
+    const double tls_ns = MeasureThreadLocalNs(1'000'000);
+    rex::diagnostics::SetExportTracing(REXCVAR_GET(nx_trace_exports));
+    GAME_INFO("export trace: %.1f ns per traced call (1M calls, this thread, no contention); "
+              "thread_local read through a call %.1f ns; tracing %s (cvar nx_trace_exports)",
+              trace_ns, tls_ns, REXCVAR_GET(nx_trace_exports) ? "on" : "OFF");
+  }
 
   GAME_INFO("about to construct rex::Runtime (game:, d: = %s)", kGameDir);
   const std::filesystem::path root(kRootDir);
@@ -1218,6 +1643,15 @@ namespace {
         g_console_open = false;
       }
     }
+    // Mesa's environment, read when NVK starts (nfsmw-nx does both): no shader
+    // cache on the SD; nvdrv's transfer memory only if nx_nvmap_mb says so.
+    setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
+    if (REXCVAR_GET(nx_nvmap_mb) > 0) {
+      __nx_nv_transfermem_size = uint32_t(REXCVAR_GET(nx_nvmap_mb)) << 20;
+    }
+    GAME_INFO("vulkan: MESA_SHADER_CACHE_DISABLE=true, nvdrv transfer memory %u MiB "
+              "(cvar nx_nvmap_mb, 0 = libnx's)",
+              __nx_nv_transfermem_size >> 20);
     g_ui_context = std::make_unique<rex::ui::NxWindowedAppContext>();
     runtime->set_app_context(g_ui_context.get());
     auto vulkan = std::make_unique<rex::graphics::vulkan::VulkanGraphicsSystem>();
@@ -1327,6 +1761,7 @@ namespace {
   bool seen_running = false;
   Heartbeat heartbeat;
   heartbeat.start = armGetSystemTick();
+  heartbeat.last_line_tick = heartbeat.start;
   // The runtime is never destroyed: ~Runtime unmaps guest memory and tears
   // the kernel down under the guest threads (run 12).
   (void)runtime.release();
@@ -1355,6 +1790,7 @@ namespace {
     }
     heartbeat.Tick();
 #if THEFT4_NX_VULKAN
+    CheckVulkanStall();
     if (g_ui_context) {
       g_ui_context->PumpFromUIThread();  // posted functions, then the paint
     }
