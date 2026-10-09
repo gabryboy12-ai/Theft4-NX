@@ -32,6 +32,10 @@ void RecordExportStubHit(ExportStubSite& site, uint32_t guest_lr);
 // most called first. `when` says at which point ("at the stop", "at exit").
 void LogExportStubSummary(const char* when);
 
+// The `top` exports by calls per second since the previous call (or since
+// start), each with its sampled callers (guest LR and share of the samples).
+void LogExportCallRates(const char* when, double seconds, size_t top);
+
 // ── Implemented exports (REX_EXPORT): Switch, or REX_TRACE_EXPORTS ──────────
 //
 // Run 11 resumed the game's main thread and then logged nothing: implemented
@@ -48,6 +52,11 @@ struct ExportCallSite {
   const char* name;  // "__imp__<Export>"
   std::atomic<uint64_t> calls{0};
   ExportCallSite* next = nullptr;  // list of the exports called, linked on the first call
+  // Run 20: who calls it. Every 256th export call of a thread records its
+  // guest LR here (8 slots, LR and hits; racy by design, diagnostic only).
+  std::atomic<uint32_t> sample_lr[8] = {};
+  std::atomic<uint32_t> sample_hits[8] = {};
+  uint64_t calls_at_last_rates = 0;  // LogExportCallRates only (one caller)
 };
 
 // Per host thread, created on its first export call and never freed. Each

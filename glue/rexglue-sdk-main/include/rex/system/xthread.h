@@ -287,6 +287,17 @@ struct X_KTHREAD {
 };
 static_assert_size(X_KTHREAD, 0xAB0);
 
+// KeDelayExecutionThread intervals since start (switch-game heartbeat, run 20).
+struct DelayCounters {
+  uint64_t zero = 0;             // interval 0
+  uint64_t sub_millisecond = 0;  // relative, under 1 ms: became 0 ms
+  uint64_t short_ms = 0;         // 1-9 ms
+  uint64_t long_ms = 0;          // 10 ms or more
+  uint64_t absolute = 0;         // absolute time (treated as 0)
+  uint64_t alertable = 0;
+};
+DelayCounters GetDelayCounters();
+
 class XThread : public XObject {
  public:
   static const XObject::Type kObjectType = XObject::Type::Thread;

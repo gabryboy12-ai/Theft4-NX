@@ -1094,6 +1094,23 @@ uint32_t XThread::SelfSuspend() {
 }
 #endif
 
+namespace {
+// Single counters shared by the game's threads: relaxed atomics (diagnostic).
+std::atomic<uint64_t> g_delay_zero{0}, g_delay_sub_ms{0}, g_delay_short{0}, g_delay_long{0},
+    g_delay_absolute{0}, g_delay_alertable{0};
+}  // namespace
+
+DelayCounters GetDelayCounters() {
+  DelayCounters d;
+  d.zero = g_delay_zero.load(std::memory_order_relaxed);
+  d.sub_millisecond = g_delay_sub_ms.load(std::memory_order_relaxed);
+  d.short_ms = g_delay_short.load(std::memory_order_relaxed);
+  d.long_ms = g_delay_long.load(std::memory_order_relaxed);
+  d.absolute = g_delay_absolute.load(std::memory_order_relaxed);
+  d.alertable = g_delay_alertable.load(std::memory_order_relaxed);
+  return d;
+}
+
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t interval) {
   int64_t timeout_ticks = interval;
   uint32_t timeout_ms;
@@ -1102,11 +1119,18 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
     // TODO(benvanik): convert time to relative time.
     assert_always();
     timeout_ms = 0;
+    g_delay_absolute.fetch_add(1, std::memory_order_relaxed);
   } else if (timeout_ticks < 0) {
     // Relative time.
     timeout_ms = uint32_t(-timeout_ticks / 10000);  // Ticks -> MS
+    (timeout_ms == 0 ? g_delay_sub_ms : timeout_ms < 10 ? g_delay_short : g_delay_long)
+        .fetch_add(1, std::memory_order_relaxed);
   } else {
     timeout_ms = 0;
+    g_delay_zero.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (alertable) {
+    g_delay_alertable.fetch_add(1, std::memory_order_relaxed);
   }
   timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
   CheckTitleTermination();

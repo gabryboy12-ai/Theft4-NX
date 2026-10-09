@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -131,6 +132,22 @@ void BumpOwn(std::atomic<T>& value) {
 
 static std::atomic<ExportEntryHook> g_export_entry_hook{nullptr};
 
+// Same LR -> its slot; else an empty slot; else the slot picked by the LR.
+static void SampleCaller(ExportCallSite& site, uint32_t guest_lr) {
+  int slot = -1;
+  for (int i = 0; i < 8 && slot < 0; ++i) {
+    const uint32_t lr = site.sample_lr[i].load(std::memory_order_relaxed);
+    if (lr == guest_lr || lr == 0) slot = i;
+  }
+  if (slot < 0) {
+    slot = int((guest_lr >> 2) & 7);
+    site.sample_hits[slot].store(0, std::memory_order_relaxed);
+  }
+  site.sample_lr[slot].store(guest_lr, std::memory_order_relaxed);
+  site.sample_hits[slot].store(site.sample_hits[slot].load(std::memory_order_relaxed) + 1,
+                               std::memory_order_relaxed);
+}
+
 void SetExportEntryHook(ExportEntryHook hook) {
   g_export_entry_hook.store(hook, std::memory_order_release);
 }
@@ -185,6 +202,9 @@ const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr, bool* first) {
   trace->guest_lr.store(guest_lr, std::memory_order_relaxed);
   trace->enter_ticks.store(MonotonicTicks(), std::memory_order_relaxed);
   BumpOwn(trace->calls);
+  if ((trace->calls.load(std::memory_order_relaxed) & 255) == 0) {
+    SampleCaller(site, guest_lr);
+  }
   trace->current.store(site.name, std::memory_order_release);
   return previous;
 }
@@ -251,6 +271,42 @@ void LogExportCallSummary(const char* when) {
   REXKRNL_INFO("exports called {}: {} distinct, {} calls", when, calls.size(), total);
   for (const auto& [name, count] : calls) {
     REXKRNL_INFO("  {:>10}  {}", count, name);
+  }
+}
+
+void LogExportCallRates(const char* when, double seconds, size_t top) {
+  struct Row {
+    ExportCallSite* site;
+    uint64_t delta;
+  };
+  std::vector<Row> rows;
+  {
+    std::lock_guard<std::mutex> lock(g_export_list_mutex);
+    for (ExportCallSite* site = g_export_list; site; site = site->next) {
+      const uint64_t now = site->calls.load(std::memory_order_relaxed);
+      rows.push_back({site, now - site->calls_at_last_rates});
+      site->calls_at_last_rates = now;
+    }
+  }
+  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.delta > b.delta; });
+  uint64_t total = 0;
+  for (const Row& r : rows) total += r.delta;
+  REXKRNL_INFO("export rates {} (last {:.0f} s): {:.0f} calls/s in all", when, seconds,
+               seconds > 0 ? double(total) / seconds : 0.0);
+  for (size_t i = 0; i < rows.size() && i < top; ++i) {
+    ExportCallSite* site = rows[i].site;
+    uint32_t sum = 0;
+    for (int k = 0; k < 8; ++k) sum += site->sample_hits[k].load(std::memory_order_relaxed);
+    std::string callers;
+    for (int k = 0; k < 8; ++k) {
+      const uint32_t lr = site->sample_lr[k].load(std::memory_order_relaxed);
+      const uint32_t hits = site->sample_hits[k].load(std::memory_order_relaxed);
+      if (lr && hits && sum) {
+        callers += fmt::format(" {:08X}:{}%", lr, hits * 100 / sum);
+      }
+    }
+    REXKRNL_INFO("  {:>10.0f}/s  {}  callers{}", seconds > 0 ? double(rows[i].delta) / seconds : 0.0,
+                 ExportName(site->name), callers.empty() ? " (no sample)" : callers);
   }
 }
 
