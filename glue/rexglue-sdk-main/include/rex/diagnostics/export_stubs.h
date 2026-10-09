@@ -78,12 +78,31 @@ void SetExportEntryHook(ExportEntryHook hook);
 
 const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr, bool* first);
 void ExportLeave(const char* previous, ExportCallSite* first_site, uint64_t r3);
+// The entry hook alone (tracing off).
+void RunExportEntryHook();
+
+// Run 19 (09-rules.md, C.3): the trace can be turned off for measurement
+// builds (switch-game cvar nx_trace_exports). Off: no counts, no first-call
+// lines, no "IN <export>" in the snapshots; the entry hook still runs (the
+// exit of mode D needs it). Set it before the guest starts.
+extern bool g_export_tracing;
+void SetExportTracing(bool enabled);
+
+// Nanoseconds per traced call (ExportEnter + ExportLeave on an export already
+// called), measured on the calling thread over `iterations` calls; the site
+// is not registered and the thread's trace is left as it was.
+double MeasureExportTraceNs(uint32_t iterations);
 
 class ExportCallScope {
  public:
   ExportCallScope(ExportCallSite& site, uint32_t guest_lr, const uint64_t* r3)
-      : site_(site), r3_(r3), previous_(ExportEnter(site, guest_lr, &first_)) {}
-  ~ExportCallScope() { ExportLeave(previous_, first_ ? &site_ : nullptr, *r3_); }
+      : site_(site), r3_(r3), traced_(g_export_tracing),
+        previous_(traced_ ? ExportEnter(site, guest_lr, &first_) : (RunExportEntryHook(), nullptr)) {}
+  ~ExportCallScope() {
+    if (traced_) {
+      ExportLeave(previous_, first_ ? &site_ : nullptr, *r3_);
+    }
+  }
   ExportCallScope(const ExportCallScope&) = delete;
   ExportCallScope& operator=(const ExportCallScope&) = delete;
 
@@ -91,6 +110,7 @@ class ExportCallScope {
   ExportCallSite& site_;
   const uint64_t* r3_;
   bool first_ = false;
+  bool traced_;
   const char* previous_;
 };
 

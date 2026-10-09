@@ -135,6 +135,36 @@ void SetExportEntryHook(ExportEntryHook hook) {
   g_export_entry_hook.store(hook, std::memory_order_release);
 }
 
+void RunExportEntryHook() {
+  if (ExportEntryHook hook = g_export_entry_hook.load(std::memory_order_acquire)) {
+    hook();
+  }
+}
+
+bool g_export_tracing = true;
+
+void SetExportTracing(bool enabled) { g_export_tracing = enabled; }
+
+double MeasureExportTraceNs(uint32_t iterations) {
+  static ExportCallSite site{"__imp__ExportTraceBenchmark"};
+  site.calls.store(1, std::memory_order_relaxed);  // not a first call: never listed
+  ExportThreadTrace* trace = ThisThreadTrace();
+  const char* last = trace->last.load(std::memory_order_relaxed);
+  const uint32_t lr = trace->guest_lr.load(std::memory_order_relaxed);
+  const uint64_t calls = trace->calls.load(std::memory_order_relaxed);
+  const uint64_t start = MonotonicTicks();
+  for (uint32_t i = 0; i < iterations; ++i) {
+    bool first = false;
+    const char* previous = ExportEnter(site, 0x82000000u + i, &first);
+    ExportLeave(previous, nullptr, 0);
+  }
+  const double seconds = TicksToSeconds(MonotonicTicks() - start);
+  trace->last.store(last, std::memory_order_relaxed);
+  trace->guest_lr.store(lr, std::memory_order_relaxed);
+  trace->calls.store(calls, std::memory_order_relaxed);
+  return iterations ? seconds * 1e9 / double(iterations) : 0.0;
+}
+
 const char* ExportEnter(ExportCallSite& site, uint32_t guest_lr, bool* first) {
   if (ExportEntryHook hook = g_export_entry_hook.load(std::memory_order_acquire)) {
     hook();

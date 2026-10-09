@@ -334,6 +334,11 @@ class XThread : public XObject {
   uint32_t last_error();
   void set_last_error(uint32_t error_code);
   void set_name(const std::string_view name);
+  // "<name> (<handle>)" from set_name; XObject::name() stays empty for threads.
+  std::string thread_name() {
+    std::lock_guard<std::mutex> lock(thread_lock_);
+    return thread_name_;
+  }
 
   X_STATUS Create();
   X_STATUS Exit(int exit_code);

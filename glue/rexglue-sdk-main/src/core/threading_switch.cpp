@@ -67,6 +67,18 @@ static inline u32 MapToSwitchPriority(int priority) {
 
 namespace rex::thread {
 
+std::atomic<uint64_t> g_nx_threads_created{0}, g_nx_threads_finished{0}, g_nx_threads_joined{0},
+    g_nx_threads_abandoned{0};
+
+NxThreadCounters GetNxThreadCounters() {
+  NxThreadCounters c;
+  c.created = g_nx_threads_created.load(std::memory_order_relaxed);
+  c.finished = g_nx_threads_finished.load(std::memory_order_relaxed);
+  c.joined = g_nx_threads_joined.load(std::memory_order_relaxed);
+  c.abandoned = g_nx_threads_abandoned.load(std::memory_order_relaxed);
+  return c;
+}
+
 #if REX_PLATFORM_ANDROID
 // May be null if no dynamically loaded functions are required.
 static void* android_libc_;
@@ -637,6 +649,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
       pthread_attr_destroy(&attr);
       return false;
     }
+    g_nx_threads_created.fetch_add(1, std::memory_order_relaxed);
     pthread_attr_destroy(&attr);
     return true;
   }
@@ -914,6 +927,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
       cond_.notify_all();
     }
     if (is_current_thread) {
+      g_nx_threads_finished.fetch_add(1, std::memory_order_relaxed);
       pthread_exit(reinterpret_cast<void*>(exit_code));
     } else {
       // Switch / libnx: no pthread_cancel and no async cancellation primitive.
@@ -946,6 +960,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
       // joined without a bound.
       if (!exited) {
         abandoned_ = true;
+        g_nx_threads_abandoned.fetch_add(1, std::memory_order_relaxed);
       }
     }
   }
@@ -973,6 +988,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
   inline void post_execution() override {
     if (thread_ && !abandoned_ && !joined_.exchange(true)) {
       pthread_join(thread_, nullptr);
+      g_nx_threads_joined.fetch_add(1, std::memory_order_relaxed);
     }
     sem_destroy(&suspend_sem_);
   }
@@ -1412,6 +1428,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 
   current_thread_ = nullptr;
   current_thread_condition_ = nullptr;
+  g_nx_threads_finished.fetch_add(1, std::memory_order_relaxed);
   return nullptr;
 }
 

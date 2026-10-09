@@ -94,6 +94,19 @@ uint32_t logical_processor_count();
 void EnableAffinityConfiguration();
 
 #if REX_PLATFORM_NX
+// Host threads of this runtime since start (run 19, 06 section 25): created
+// (pthread_create), finished (start routine returned or pthread_exit), joined
+// (pthread_join, which frees the libnx thread and closes its handle) and
+// abandoned (Terminate timed out: never joined). created - joined threads
+// still hold a Horizon thread handle and their stack.
+struct NxThreadCounters {
+  uint64_t created = 0;
+  uint64_t finished = 0;
+  uint64_t joined = 0;
+  uint64_t abandoned = 0;
+};
+NxThreadCounters GetNxThreadCounters();
+
 // Core split on Switch (docs/switch-port/04-threads-exit.md section 3):
 // guest threads run on cores 0-2, core 3 (when the process has it) is kept
 // for host workers (shader/pipeline compilation, audio decoding, streaming).
