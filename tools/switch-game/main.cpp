@@ -628,6 +628,37 @@ extern "C" {
   LogTermination("svcExitProcess", 0, __builtin_return_address(0));
   __real_svcExitProcess();
 }
+
+// Run 22 (D.2): libnx's own ways out (from any thread, possibly a fault or a
+// heap failure): only the fault-safe crash-log writer (write + fsync on the
+// descriptor opened at start), then the real function.
+[[noreturn]] void __real_fatalThrow(Result err);
+[[noreturn]] void __real_diagAbortWithResult(Result res);
+Result __real_svcBreak(u32 reason, uintptr_t arg1, uintptr_t arg2);
+
+namespace {
+void CrashWriteLibnxExit(const char* what, uint64_t value, const void* caller) {
+  CrashWrite("=== ");
+  CrashWrite(what);
+  CrashWrite(" ===\n");
+  CrashHex("value      ", value);
+  CrashHex("caller - base", reinterpret_cast<u64>(caller) - g_module_base);
+  CrashWriteState("state:");
+}
+}  // namespace
+
+[[noreturn]] void __wrap_fatalThrow(Result err) {
+  CrashWriteLibnxExit("libnx fatalThrow (result)", err, __builtin_return_address(0));
+  __real_fatalThrow(err);
+}
+[[noreturn]] void __wrap_diagAbortWithResult(Result res) {
+  CrashWriteLibnxExit("libnx diagAbortWithResult (result)", res, __builtin_return_address(0));
+  __real_diagAbortWithResult(res);
+}
+Result __wrap_svcBreak(u32 reason, uintptr_t arg1, uintptr_t arg2) {
+  CrashWriteLibnxExit("svcBreak (reason)", reason, __builtin_return_address(0));
+  return __real_svcBreak(reason, arg1, arg2);
+}
 }
 
 namespace {

@@ -123,8 +123,11 @@ if(THEFT4_SWITCH_GAME_VULKAN)
 endif()
 # Every way out of the process goes through main.cpp's __wrap_* first, which
 # logs the code and the caller before the real function runs.
+# Run 22: libnx's fatalThrow, diagAbortWithResult and svcBreak too (crash log
+# with the result and the caller, then the real function).
 target_link_options(switch-game PRIVATE
-    "-Wl,--wrap=exit,--wrap=_exit,--wrap=_Exit,--wrap=abort,--wrap=svcExitProcess")
+    "-Wl,--wrap=exit,--wrap=_exit,--wrap=_Exit,--wrap=abort,--wrap=svcExitProcess"
+    "-Wl,--wrap=fatalThrow,--wrap=diagAbortWithResult,--wrap=svcBreak")
 
 nx_generate_nacp(switch-game.nacp
     NAME "Theft4 switch-game"
