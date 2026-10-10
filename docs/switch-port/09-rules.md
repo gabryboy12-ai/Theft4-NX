@@ -240,3 +240,21 @@ cambiati e il run non vale per le misure.
 crash degli avvii 1 e 2 del run 20 non è spiegato (06 §27 A.2). Per provarla
 si accende in un avvio dedicato, con le cartelle `cache` e `cache1` cancellate
 prima, così i file lasciati dai run precedenti non entrano nella prova.
+
+## 13. Una sola variabile per avvio (run 21)
+
+Ogni avvio di un run di prova differisce dalla base dichiarata per **una
+sola** impostazione (una riga del `.toml`, una cvar, o un fatto fisico come il
+dock), scritta nelle note del run. Il run 21 mescolava nello stesso giro sei
+novità del codice, la GPU passata da 307,2 a 460,8 MHz e, in un avvio, un
+overclock esterno: un crash a 47 s non si poteva attribuire. Ogni novità del
+codice nasce quindi con una cvar che la spegne a runtime (run 22: `nx_apm_clock`,
+`nx_nv_wrap`, `nx_fault_count_handler`, `nx_crash_log_after_setup`,
+`nx_vk_mesa_messenger`, `nx_profile`). Un guasto non deterministico va
+riprodotto sulla base prima di accusare una variabile: un avvio senza crash
+non la assolve.
+
+**Clock:** la riga `clocks (start-up)` dice se `0x92220008` è stata applicata
+(`applied …` o `NOT applied`) e da che valore partiva la GPU; il battito
+scrive i clock ogni 10 s. Un run con `CPU ABOVE 1020 MHz` o `GPU UNDER 100
+MHz` non vale per le misure (§12).

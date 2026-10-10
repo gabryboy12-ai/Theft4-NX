@@ -2524,3 +2524,179 @@ overclock esterno**, console in portatile salvo l'avvio 4.
 Dopo ogni avvio copiare `game.log`, `game-crash.log`, `game-exit.log`, il
 `.toml`, `frames/` e **il contenuto di `sdmc:/atmosphere/crash_reports/`**, e
 annotare cosa mostrava lo schermo alla fine.
+
+### Run 21: risultati (2026-10-10, `out/console-runs/run22/1`–`4`, NRO del commit `a9727e1`)
+
+La cartella del run si chiama `run22/` (sottocartelle 1–4). `frames/` è
+dell'ultimo avvio che ha scritto i PPM.
+
+| | Avvio 1 | Avvio 2 | Avvio 3 | Avvio 4 |
+|---|---|---|---|---|
+| `game.toml` | `nx_gpu = "vulkan"` | + `nx_profile = true` | `nx_gpu`, `nx_mount_cache = true` (cartelle dichiarate cancellate) | `nx_gpu`; Horizon OC attivo |
+| Clock all'avvio | `applied 0x92220008`, GPU 307,2 → 460,8 MHz, memoria 1331,2 ferma, CPU 1020 | uguale | uguale | uguale, poi a 20 s **CPU 1785, GPU 768, memoria 1862,4**, modo `handheld` (configurazione apm sempre `0x92220008`) |
+| Durata | 47,6 s | 938 s (+ alla fine) | 566,8 s | 53,1 s |
+| Fine | **fault**: instruction abort a pc = 0, sp = `0x3fe8000016000016`, lr = base + `0x244cdd8` | `exit(0)` del modo D (12 passi in `game-exit.log`) | **`std::terminate (std::bad_alloc)`** → `abort` → `_exit(1)` | **fault**: pc = 0, sp = `0x13`, stesso lr |
+| `game-crash.log` | record del fault + `state:` | due blocchi `termination: exit(0)`, `_exit(0)` | `termination: abort(0)`, `_exit(1)` | record del fault + `state:` |
+| Heap libero (ultimo battito) | 973 MiB | **20 MiB** | **18 MiB** | 910 MiB |
+| Vulkan (uso / budget) | 652 / 1309 MiB | 1467 / 1480 | 1463 / 1475 | 702 / 1316 |
+| nvmap vivi | 81 (685 MiB) | 846 (1550 MiB) | 641 (1534 MiB) a 550 s | 83 |
+| VkResult ≠ SUCCESS | nessuno | nessuno (submit 0, present 0) | nessuno | nessuno |
+| Messenger di Mesa | nessun messaggio | nessuno | nessuno | nessuno |
+| Altri errori | – | da ~650 s **5877 righe `Failed to allocate 2097152 bytes of Vulkan upload buffer memory`** + `IssueDraw failed`: i draw si perdono, i present si fermano | `memory LOW: 58 MiB` a ~510 s | – |
+
+Avvio 4: stato di carica non registrato (il log non legge l'alimentazione);
+apm dice `handheld` per tutto l'avvio, quindi non in dock. Il cambio dei clock
+è fra 20 e 30 s (battito di 20 s: 1020/460,8/1331,2; di 30 s: 1785/768/1862,4)
+e la riga lo segnala (`CPU ABOVE 1020 MHz`). Escluso dai confronti.
+
+**Prova dei 307 MHz del run 20:** in tutti e quattro gli avvii la riga
+`clocks (start-up)` legge **GPU 307,2 MHz prima della richiesta**: è il clock
+di sistema in portatile, quindi il run 20 (che non chiedeva niente) ha girato
+a 307,2.
+
+#### Cosa spiega i quattro esiti
+
+1. **Avvii 2 e 3: memoria esaurita.** L'heap scende da ~970 MiB liberi a 20 e
+   18 MiB; Vulkan arriva al budget (1467/1480); gli nvmap crescono di continuo
+   (81 → 846). Nel 3 una `new` fallisce (`bad_alloc`, abort registrato);
+   nel 2 falliscono i buffer di upload Vulkan da 2 MiB, i draw vengono scartati
+   e l'immagine si ferma: il "blocco senza crash". La crescita è quella della
+   cache delle texture di ReXGlue fino al suo limite rigido
+   (`texture_cache_memory_limit_hard` = 768 MB, soft 384), sopra i ~650 MiB di
+   partenza (memoria condivisa e EDRAM): 650 + 768 supera quello che resta
+   dopo il pool guest da 768 MiB. Il run 20 (GPU a 307 MHz, meno fotogrammi)
+   ci arrivava più tardi: a 812 s era a 1395/1482. **Da verificare** nel run
+   22 (avvio 7) con il limite rigido a 384 MB.
+2. **Avvii 1 e 4: lo stesso fault nello stesso punto.** lr = base +
+   `0x244cdd8` è `sub_829D3858` subito dopo la chiamata a `sub_829D76F0`:
+   funzioni del D3D del gioco (device in r31, campi +48/+52/+56 = puntatori
+   del command buffer, +14916/+14920) che chiedono altro spazio nel command
+   buffer, e quindi lanciano il ring e aspettano la GPU. Il ritorno va a pc = 0
+   con sp che non è un indirizzo (`0x3fe8000016000016` sembra un dato in
+   virgola mobile; `0x13`): **registri dell'host corrotti, non un puntatore del
+   gioco**. Il run 20 aveva già un fault di questo tipo (avvio 1: pc = sp
+   ≈ `0x6ac97f…` dopo una chiamata in `sub_829B2AB0`) con il codice di
+   allora, senza nessuna novità del run 21: il guasto **esisteva prima**.
+   Stesso punto, tempo diverso (47 e 53 s; gli avvii 2 e 3, stessa build, lo
+   superano): **guasto non deterministico con un punto ricorrente**, non un
+   errore di logica che fallisce sempre. Candidato principale, misurato da
+   masseffect-nx (`docs/platform-notes.md`, "Half of the vector registers are
+   lost"): un thread interrotto dentro il gestore delle eccezioni utente
+   riprende con q0–q7 e q16–q31 vecchi; con la GPU a 460,8 MHz il gioco fa più
+   fotogrammi e più fault di write-watch al secondo (avvio 1: 87–95 ogni
+   10 s; avvio 4 overcloccato: fino a 452), quindi più occasioni. GCC salva a
+   volte registri generali nei registri vettoriali, il che spiegherebbe un
+   x30/sp corrotti. **Regressione del codice del run 21: non dimostrata e poco
+   probabile** (il tipo di fault c'era già); **ambiente**: solo l'avvio 4
+   (overclock). La bisezione del run 22 lo separa.
+3. **Ipotesi "file vecchi della cache": indebolita.** Nell'avvio 3 la cache
+   montata ha aperto 61 file esistenti in sola lettura (anche `cache:\anim.img`
+   #508), quindi le cartelle non erano vuote all'avvio; il gioco ha di nuovo
+   ricreato `cache:\anim.img` con disposition 5 (#1234) mentre #508 era
+   aperto, ha scritto 3911 volte (128 MB) e **non** è crashato in quel punto.
+   Il crash degli avvii 1 e 2 del run 20 è più probabilmente lo stesso fault
+   non deterministico del punto 2.
+4. **Profiler (avvio 2): non è lui il blocco.** Ha campionato fino all'uscita
+   (9.888 campioni ogni 10 s anche dopo 660 s, 0 pause rifiutate); il blocco
+   coincide con gli errori di allocazione Vulkan. I thread id 22 e 23 al 99 %
+   dopo il blocco girano in `sub_829CFE80` (D3D: attesa di spazio nel ring che
+   la GPU non consuma più perché i draw falliscono). Nessun cambio di modo
+   necessario.
+
+#### Dove va il tempo (a regime, ≥ 120 s dopo il primo fotogramma di gioco)
+
+Primo fotogramma di gioco (≥ 3.000 draw) a ~370–400 s; finestre 520–640 s
+(avvio 2) e 520–550 s (avvio 3). Gli avvii 1 e 4 non arrivano in partita.
+
+| | Avvio 2 | Avvio 3 |
+|---|---|---|
+| FPS / ms per fotogramma | 0,5–0,6 / 1.667–2.000 | 0,4–0,5 / 2.000–2.500 |
+| Draw per fotogramma | 4.300–6.100 | 4.600–5.700 |
+| `vkQueueSubmit` | 0,10 ms per chiamata | 0,09–0,10 ms |
+| `vkQueuePresentKHR` | 0,18–0,22 ms | 0,19–0,23 ms |
+| `vkWaitForFences` bloccanti del processore dei comandi | **8,0–9,8 s ogni 10 s** (6 attese da ~1,5 s) | **8,0–8,4 s** |
+| CPU di GPU Commands | 0,9–1,3 s ogni 10 s = **39–43 µs per draw** | 0,8–1,7 s = 44–59 µs per draw |
+| nvdrv (10 s) | ~25 kickoff, ~190 attese di fence per 8,5–8,8 s, ~50 interrogazioni | ~25 kickoff, ~180 attese per 7,6–9,1 s |
+
+**Il limite è la GPU.** Il processore dei comandi passa 8–10 s su 10 fermo
+in `vkWaitForFences`; il profiler lo conferma (GPU Commands: **81,7 % dei
+campioni in `svcWaitSynchronization`**, lr `_waitObjectsImpl`); i thread del
+D3D (id 21, 22) aspettano spazio nel ring (`sub_829CFE80`, `sub_829D7D40`);
+id 19 dorme (73 % in `svcSleepThread`); id 18 (audio) è diviso fra attese e
+NEON. Da 307,2 a 460,8 MHz il fotogramma passa da 2,5 s a 1,7–2,0 s, quasi in
+proporzione al clock: è il tempo di esecuzione della GPU. La CPU per draw è
+scesa da ~98 µs (run 20) a ~40 µs perché il conto del run 20 includeva la
+creazione delle pipeline.
+
+**Pipeline e shader** (ipotesi da verificare): nel run 21 non c'erano
+contatori; dalle righe `Creating graphics pipeline state` dell'avvio 3: 542 in
+tutto, quasi tutte fra 80 e 290 s (16–42 ogni 10 s, caricamento e video), in
+partita 0–13 ogni 10 s. Il processore dei comandi in partita aspetta le
+fence, non le pipeline. Nessuna cache su disco esiste su Switch (né quella
+delle pipeline di ReXGlue, mai inizializzata, né quella di Mesa, spenta). Dal
+run 22 la riga `pipelines:` dà conteggio, tempo in `vkCreateGraphicsPipelines`,
+traduzioni degli shader e la parte sul thread GPU Commands.
+
+#### Le morti senza report di Atmosphère
+
+| Avvio | Che fine | Traccia |
+|---|---|---|
+| 1, 4 | fault non gestito → nostro `svcBreak` | record in `game-crash.log`, righe `[stderr]` |
+| 2 | `exit(0)` del modo D | blocchi `termination` |
+| 3 | `std::bad_alloc` → `abort` → `_exit(1)` | blocchi `termination`, riga `TERMINATION` |
+
+Nessuna fine del run 21 è "senza traccia": tutte e quattro passano dai nostri
+percorsi. Il report manca anche dopo `svcBreak` (1 e 4) e dopo `abort` (3, che
+in newlib finisce in `_exit`, non in un'eccezione: lì nessun report è atteso).
+Percorsi che potrebbero uccidere il processo senza passare da noi, cercati nei
+binari linkati: in libnx chiamano `diagAbortWithResult` applet, init, thread,
+sm, hid, newlib, virtmem, framebuffer, pad, random, usb_comms, dynamic, env,
+default_window; chiamano `svcBreak` diag, mutex, levent, fatal, exception; in
+Mesa (`libvulkan.a`) solo `abort` (vk_device, vk_queue, nvk_mem_stream, dag,
+simulatori MME, xmlconfig, ASTC) e il runtime Rust di NAK (`abort`, `exit`,
+`_exit`), tutti già registrati. Dal run 22 anche `fatalThrow`,
+`diagAbortWithResult` e `svcBreak` scrivono nel crash log valore e chiamante
+(da verificare). **Serve dall'utente:** il codice dell'errore di sistema
+(formato `2XXX-XXXX`, nella schermata o in Impostazioni → Assistenza →
+Cronologia errori) per ogni crash, e se in `sdmc:/atmosphere/` esistono
+`crash_reports/`, `fatal_reports/` o `erpt_reports/` con file di oggi.
+
+### Run 22: bisezione (`out/console-runs/run22-build/`, commit `6bc6c24`)
+
+Base = configurazione dell'avvio 3 del run 20 (Vulkan, cache spenta, nessuna
+novità del run 21): tutte le cvar nuove spente. Ogni avvio differisce dalla
+base per **una sola** riga. File pronti: `game1.toml`–`game7.toml` (da
+copiare come `sdmc:/switch/theft4/game.toml`). Console in portatile, niente
+Horizon OC né altri strumenti, `switch-game-vulkan.nro` rinominato
+`switch-game.nro`. Ogni avvio: fino a 5 minuti dopo "Starting a new game" o
+fino al crash, poi +.
+
+| Avvio | Differenza dalla base | Cosa dice |
+|---|---|---|
+| 1 | nessuna (base) | il fault presto c'è anche senza le novità? |
+| 2 | `nx_apm_clock = true` | GPU a 460,8 |
+| 3 | `nx_crash_log_after_setup = true` | ordine dei gestori |
+| 4 | `nx_fault_count_handler = true` | gestore che conta |
+| 5 | `nx_nv_wrap = true` | contatori nvdrv |
+| 6 | `nx_vk_mesa_messenger = true` | messenger di Mesa |
+| 7 | `texture_cache_memory_limit_hard = 384` | la memoria regge oltre i 10 minuti? |
+
+Base (`game1.toml`):
+
+```toml
+nx_gpu = "vulkan"
+nx_apm_clock = false
+nx_nv_wrap = false
+nx_fault_count_handler = false
+nx_crash_log_after_setup = false
+nx_vk_mesa_messenger = false
+```
+
+Limiti della base: il binario contiene comunque i wrapper link-time (nvdrv
+come passaggio puro, `fatalThrow`/`diagAbortWithResult`/`svcBreak`, solo in
+caso di uscita) e le righe di diagnosi nuove del battito; con
+`nx_crash_log_after_setup = false` ogni fault di write-watch torna nel crash
+log con un `fsync` come nel run 20. Poiché il fault presto è non
+deterministico (2 avvii su 4 nel run 21), un avvio senza crash non assolve
+una variabile: se la base crasha, la causa non è fra le novità; se nessun
+avvio crasha, ripetere la base e il 2.
