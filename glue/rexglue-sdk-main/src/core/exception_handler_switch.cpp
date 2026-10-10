@@ -25,13 +25,18 @@
  * svcBreak(0, 0, 0) (console run 5, "User Break 0x0" after T9's first
  * handled fault). So this file provides the entry itself:
  *
- *   - switch to __nx_exception_stack (safe to share: the claim is held),
- *     save x9-x29, q0-q31, fpsr and fpcr there;
+ *   - save q0-q31, fpsr and fpcr in rex_nx_vector_save with the very first
+ *     instructions (run 23, D.1: a thread preempted while it holds the claim
+ *     may come back with q0-q7 and q16-q31 stale, masseffect-nx
+ *     platform-notes; the less code runs before the save, the smaller the
+ *     window), then switch to __nx_exception_stack (safe to share: the claim
+ *     is held) and save x9-x29 and the frame address there;
  *   - rex_nx_exception_dispatch turns frame + saved registers into a rex::arch
  *     Exception and runs the same handler list as the other platforms
  *     (MMIOHandler::ExceptionCallback etc.), writing modified registers back;
- *   - restore the saved registers and svcReturnFromException(0), which
- *     resumes at the (possibly advanced) pc.
+ *   - restore x9-x29, then q0-q31, fpsr and fpcr as the very last
+ *     instructions, and svcReturnFromException(0), which resumes at the
+ *     (possibly advanced) pc.
  *
  * An unhandled exception must end in Atmosphere's crash report. Returning it
  * to the kernel with svcReturnFromException(0xF801) does not do that:
@@ -66,10 +71,12 @@
 #include <rex/assert.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/platform/nx_fault_record.h>
 #include <rex/platform/seh.h>
 #include <rex/system/mmio_handler.h>
 
 extern "C" {
+#include <switch/arm/counter.h>
 #include <switch/arm/thread_context.h>
 #include <switch/kernel/svc.h>
 #include <switch/types.h>
@@ -98,20 +105,33 @@ struct RexNxFaultInfo {
   u64 type;
 };
 RexNxFaultInfo rex_nx_fault_info;
+
+// q0-q31, fpsr and fpcr of the thread in the entry, saved by its first
+// instructions (before the nested check: a nested fault ends in svcBreak, so
+// overwriting the outer save does not matter). One for the process: the claim
+// lets one thread at a time in.
+struct NxVectorSave {
+  uint8_t v[32][16];  // 0x000
+  uint64_t fpsr;      // 0x200
+  uint64_t fpcr;      // 0x208
+};
+alignas(16) NxVectorSave rex_nx_vector_save;
+
+bool rex_nx_resume_guard = false;
 }
+
+static_assert(offsetof(NxVectorSave, fpsr) == 0x200);
+static_assert(sizeof(NxVectorSave) == 0x210);
 
 // Registers the entry saves on the exception stack; the offsets are used by
 // the assembly below.
 struct NxSavedRegisters {
   uint64_t x9_to_x29[21];  // 0x000
-  uint64_t pad;            // 0x0A8
-  uint8_t v[32][16];       // 0x0B0
-  uint64_t fpsr;           // 0x2B0
-  uint64_t fpcr;           // 0x2B8
+  uint64_t frame;          // 0x0A8: x1 at the entry
 };
-static_assert(offsetof(NxSavedRegisters, v) == 0xB0);
-static_assert(offsetof(NxSavedRegisters, fpsr) == 0x2B0);
-static_assert(sizeof(NxSavedRegisters) == 0x2C0);
+static_assert(sizeof(NxSavedRegisters) == 0xB0);
+static_assert(offsetof(ThreadExceptionFrameA64, sp) == 0x50);
+static_assert(offsetof(ThreadExceptionFrameA64, elr_el1) == 0x58);
 static_assert(sizeof(ThreadExceptionFrameA64) == 0x78);
 
 extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64* frame,
@@ -129,6 +149,30 @@ asm(R"(
     .type   __libnx_exception_entry, %function
     .balign 16
 __libnx_exception_entry:
+    // D.1 (run 23): the vector and FP state first, through x2-x4 only (x0-x8
+    // are in the frame and come back from it).
+    adrp    x2, rex_nx_vector_save
+    add     x2, x2, #:lo12:rex_nx_vector_save
+    stp     q0,  q1,  [x2, #0x000]
+    stp     q2,  q3,  [x2, #0x020]
+    stp     q4,  q5,  [x2, #0x040]
+    stp     q6,  q7,  [x2, #0x060]
+    stp     q8,  q9,  [x2, #0x080]
+    stp     q10, q11, [x2, #0x0a0]
+    stp     q12, q13, [x2, #0x0c0]
+    stp     q14, q15, [x2, #0x0e0]
+    stp     q16, q17, [x2, #0x100]
+    stp     q18, q19, [x2, #0x120]
+    stp     q20, q21, [x2, #0x140]
+    stp     q22, q23, [x2, #0x160]
+    stp     q24, q25, [x2, #0x180]
+    stp     q26, q27, [x2, #0x1a0]
+    stp     q28, q29, [x2, #0x1c0]
+    stp     q30, q31, [x2, #0x1e0]
+    mrs     x3, fpsr
+    mrs     x4, fpcr
+    str     x3, [x2, #0x200]
+    str     x4, [x2, #0x208]
     adrp    x2, rex_nx_exception_depth
     ldr     w3, [x2, #:lo12:rex_nx_exception_depth]
     cbnz    w3, 2f               // a fault inside the handler: see below
@@ -140,7 +184,7 @@ __libnx_exception_entry:
     ldr     x3, [x3, #:lo12:__nx_exception_stack_size]
     add     x2, x2, x3
     and     x2, x2, #0xfffffffffffffff0
-    sub     x2, x2, #0x2c0
+    sub     x2, x2, #0xb0
     mov     sp, x2
     stp     x9,  x10, [sp, #0x00]
     stp     x11, x12, [sp, #0x10]
@@ -152,51 +196,11 @@ __libnx_exception_entry:
     stp     x23, x24, [sp, #0x70]
     stp     x25, x26, [sp, #0x80]
     stp     x27, x28, [sp, #0x90]
-    str     x29,      [sp, #0xa0]
-    stp     q0,  q1,  [sp, #0xb0]
-    stp     q2,  q3,  [sp, #0xd0]
-    stp     q4,  q5,  [sp, #0xf0]
-    stp     q6,  q7,  [sp, #0x110]
-    stp     q8,  q9,  [sp, #0x130]
-    stp     q10, q11, [sp, #0x150]
-    stp     q12, q13, [sp, #0x170]
-    stp     q14, q15, [sp, #0x190]
-    stp     q16, q17, [sp, #0x1b0]
-    stp     q18, q19, [sp, #0x1d0]
-    stp     q20, q21, [sp, #0x1f0]
-    stp     q22, q23, [sp, #0x210]
-    stp     q24, q25, [sp, #0x230]
-    stp     q26, q27, [sp, #0x250]
-    stp     q28, q29, [sp, #0x270]
-    stp     q30, q31, [sp, #0x290]
-    mrs     x3, fpsr
-    mrs     x4, fpcr
-    add     x5, sp, #0x2b0
-    stp     x3, x4, [x5]
+    stp     x29, x1,  [sp, #0xa0]
     mov     x2, sp
     mov     x29, xzr
     bl      rex_nx_exception_dispatch
     and     w6, w0, #0xff        // bool: only the low byte is defined
-    add     x5, sp, #0x2b0
-    ldp     x3, x4, [x5]
-    msr     fpsr, x3
-    msr     fpcr, x4
-    ldp     q0,  q1,  [sp, #0xb0]
-    ldp     q2,  q3,  [sp, #0xd0]
-    ldp     q4,  q5,  [sp, #0xf0]
-    ldp     q6,  q7,  [sp, #0x110]
-    ldp     q8,  q9,  [sp, #0x130]
-    ldp     q10, q11, [sp, #0x150]
-    ldp     q12, q13, [sp, #0x170]
-    ldp     q14, q15, [sp, #0x190]
-    ldp     q16, q17, [sp, #0x1b0]
-    ldp     q18, q19, [sp, #0x1d0]
-    ldp     q20, q21, [sp, #0x1f0]
-    ldp     q22, q23, [sp, #0x210]
-    ldp     q24, q25, [sp, #0x230]
-    ldp     q26, q27, [sp, #0x250]
-    ldp     q28, q29, [sp, #0x270]
-    ldp     q30, q31, [sp, #0x290]
     ldp     x9,  x10, [sp, #0x00]
     ldp     x11, x12, [sp, #0x10]
     ldp     x13, x14, [sp, #0x20]
@@ -213,6 +217,29 @@ __libnx_exception_entry:
     mov     w0, #0xf801
     cmp     w6, #0
     csel    w0, w0, wzr, eq
+    // D.1: the vector and FP state last, right before the return.
+    adrp    x2, rex_nx_vector_save
+    add     x2, x2, #:lo12:rex_nx_vector_save
+    ldr     x3, [x2, #0x200]
+    ldr     x4, [x2, #0x208]
+    msr     fpsr, x3
+    msr     fpcr, x4
+    ldp     q0,  q1,  [x2, #0x000]
+    ldp     q2,  q3,  [x2, #0x020]
+    ldp     q4,  q5,  [x2, #0x040]
+    ldp     q6,  q7,  [x2, #0x060]
+    ldp     q8,  q9,  [x2, #0x080]
+    ldp     q10, q11, [x2, #0x0a0]
+    ldp     q12, q13, [x2, #0x0c0]
+    ldp     q14, q15, [x2, #0x0e0]
+    ldp     q16, q17, [x2, #0x100]
+    ldp     q18, q19, [x2, #0x120]
+    ldp     q20, q21, [x2, #0x140]
+    ldp     q22, q23, [x2, #0x160]
+    ldp     q24, q25, [x2, #0x180]
+    ldp     q26, q27, [x2, #0x1a0]
+    ldp     q28, q29, [x2, #0x1c0]
+    ldp     q30, q31, [x2, #0x1e0]
     svc     0x28
     b       .
 2:
@@ -289,10 +316,10 @@ void FillThreadContext(HostThreadContext& tc, const ThreadExceptionFrameA64* fra
   tc.sp = frame->sp;
   tc.pc = frame->elr_el1;
   tc.pstate = frame->pstate;
-  tc.fpsr = static_cast<uint32_t>(saved->fpsr);
-  tc.fpcr = static_cast<uint32_t>(saved->fpcr);
+  tc.fpsr = static_cast<uint32_t>(rex_nx_vector_save.fpsr);
+  tc.fpcr = static_cast<uint32_t>(rex_nx_vector_save.fpcr);
   for (uint32_t i = 0; i < 32; ++i) {
-    std::memcpy(&tc.v[i], saved->v[i], sizeof(tc.v[i]));
+    std::memcpy(&tc.v[i], rex_nx_vector_save.v[i], sizeof(tc.v[i]));
   }
 }
 
@@ -314,10 +341,16 @@ void StoreThreadContext(const HostThreadContext& tc, const Exception& ex,
   uint32_t modified_v = ex.modified_v_registers();
   while (rex::bit_scan_forward(modified_v, &idx)) {
     modified_v &= ~(UINT32_C(1) << idx);
-    std::memcpy(saved->v[idx], &tc.v[idx], sizeof(saved->v[idx]));
+    std::memcpy(rex_nx_vector_save.v[idx], &tc.v[idx], sizeof(rex_nx_vector_save.v[idx]));
   }
-  frame->sp = tc.sp;
-  frame->elr_el1 = tc.pc;  // resume PC (a handler may advance past the instruction)
+  // Resume sp and pc (a handler may advance pc past the instruction). Two
+  // 64-bit stores through general registers: run 22's build copied the pair
+  // with one q31 load and store (rex_nx_exception_dispatch+0x1030), and every
+  // early crash resumed with exactly this pair wrong.
+  const uint64_t sp = *reinterpret_cast<const volatile uint64_t*>(&tc.sp);
+  const uint64_t pc = *reinterpret_cast<const volatile uint64_t*>(&tc.pc);
+  *reinterpret_cast<volatile uint64_t*>(&frame->sp) = sp;
+  *reinterpret_cast<volatile uint64_t*>(&frame->elr_el1) = pc;
 }
 
 // --------------------------------------------------------------------------
@@ -400,6 +433,46 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
 
 }  // namespace rex::arch
 
+// ── Resume records (run 23, D.2) ─────────────────────────────────────────────
+// Every access goes through volatile 64-bit loads and stores, so that none of
+// these values sits in a vector register in the fault path.
+static thread_local RexNxThreadFaults t_nx_faults;
+static RexNxResumeStats g_nx_resume_stats;
+
+static inline uint64_t Load64(const uint64_t& v) {
+  return *static_cast<const volatile uint64_t*>(&v);
+}
+static inline void Store64(uint64_t& v, uint64_t value) {
+  *static_cast<volatile uint64_t*>(&v) = value;
+}
+
+// kind 1: the context's sp/pc changed while the handlers ran; kind 2: the
+// frame read back differs from what was written.
+static void NoteResumeEvent(uint64_t kind, RexNxThreadFaults& rec, uint64_t seen_sp,
+                            uint64_t seen_pc) {
+  RexNxResumeStats& s = g_nx_resume_stats;
+  if (kind == 1) {
+    Store64(rec.context_changed, Load64(rec.context_changed) + 1);
+    Store64(s.context_changed, Load64(s.context_changed) + 1);
+  } else {
+    Store64(rec.frame_wrong, Load64(rec.frame_wrong) + 1);
+    Store64(s.frame_wrong, Load64(s.frame_wrong) + 1);
+  }
+  if (Load64(s.first_kind) == 0) {
+    u64 id = 0;
+    svcGetThreadId(&id, CUR_THREAD_HANDLE);
+    Store64(s.first_thread_id, id);
+    Store64(s.first_entry_sp, Load64(rec.entry_sp));
+    Store64(s.first_entry_pc, Load64(rec.entry_pc));
+    Store64(s.first_seen_sp, seen_sp);
+    Store64(s.first_seen_pc, seen_pc);
+    Store64(s.first_kind, kind);
+  }
+}
+
+extern "C" const RexNxThreadFaults* rex_nx_thread_faults() { return &t_nx_faults; }
+extern "C" const RexNxResumeStats* rex_nx_resume_stats() { return &g_nx_resume_stats; }
+
 // Unhandled: record the fault, then resume the thread with its own registers
 // at rex_nx_unhandled_break (svcBreak), LR = faulting PC for the report.
 static void ResumeAtUnhandledBreak(uint32_t type, ThreadExceptionFrameA64* frame) {
@@ -436,6 +509,13 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
     return true;
   }
 
+  // The frame as it came in (D.2: the crash log shows the last one).
+  RexNxThreadFaults& rec = t_nx_faults;
+  Store64(rec.entry_pc, Load64(frame->elr_el1));
+  Store64(rec.entry_sp, Load64(frame->sp));
+  Store64(rec.entry_lr, Load64(frame->lr));
+  Store64(rec.frame_address, reinterpret_cast<uint64_t>(frame));
+
   HostThreadContext thread_context{};
   FillThreadContext(thread_context, frame, saved);
 
@@ -447,7 +527,36 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
 
   for (size_t i = 0; i < kMaxHandlerCount && g_handlers[i].first; ++i) {
     if (g_handlers[i].first(&ex, g_handlers[i].second)) {
+      // No handler moves sp; the MMIO handler may step pc past the
+      // instruction it emulated (+4). Anything else changed in the copy.
+      const uint64_t entry_sp = Load64(rec.entry_sp);
+      const uint64_t entry_pc = Load64(rec.entry_pc);
+      const uint64_t tc_sp = Load64(thread_context.sp);
+      const uint64_t tc_pc = Load64(thread_context.pc);
+      const bool tc_pc_ok = tc_pc == entry_pc || tc_pc == entry_pc + 4;
+      if (tc_sp != entry_sp || !tc_pc_ok) {
+        NoteResumeEvent(1, rec, tc_sp, tc_pc);
+      }
       StoreThreadContext(thread_context, ex, frame, saved);
+      // What svcReturnFromException will load.
+      uint64_t out_sp = Load64(frame->sp);
+      uint64_t out_pc = Load64(frame->elr_el1);
+      if (out_sp != tc_sp || out_pc != tc_pc) {
+        NoteResumeEvent(2, rec, out_sp, out_pc);
+      }
+      if (rex_nx_resume_guard &&
+          (out_sp != entry_sp || (out_pc != entry_pc && out_pc != entry_pc + 4))) {
+        out_sp = entry_sp;
+        out_pc = tc_pc_ok ? tc_pc : entry_pc;
+        Store64(frame->sp, out_sp);
+        Store64(frame->elr_el1, out_pc);
+        Store64(g_nx_resume_stats.repaired, Load64(g_nx_resume_stats.repaired) + 1);
+      }
+      Store64(rec.resume_sp, out_sp);
+      Store64(rec.resume_pc, out_pc);
+      Store64(rec.handled, Load64(rec.handled) + 1);
+      Store64(rec.last_tick, armGetSystemTick());
+      Store64(g_nx_resume_stats.handled, Load64(g_nx_resume_stats.handled) + 1);
       return true;
     }
   }
