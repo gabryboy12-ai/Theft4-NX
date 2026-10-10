@@ -107,6 +107,7 @@
 #include <spdlog/sinks/base_sink.h>
 
 #include "gta4_init.h"
+#include "nx_clocks.h"
 #include "nx_exit.h"
 #include "nx_input.h"
 #include "nx_profiler.h"
@@ -153,6 +154,11 @@ REXCVAR_DEFINE_BOOL(nx_mount_cache, true, "Switch",
                     "Mount cache: and cache1: on the SD (run 12). false: the game finds no "
                     "utility drive; to see whether it then skips copying ~2 GB into it (run 19: "
                     "the copy runs at 2 MB/s for the whole session, on every boot)");
+REXCVAR_DEFINE_BOOL(nx_apm_clock, true, "Switch",
+                    "In handheld mode request Horizon's standard configuration 0x92220008 (GPU "
+                    "460.8 MHz, memory 1331.2, CPU 1020) through apm, at start and on every "
+                    "dock/handheld change; docked is left alone. No boost, no overclock; the "
+                    "clocks read back are in the heartbeat (nx_clocks.h)");
 REXCVAR_DEFINE_BOOL(nx_profile, false, "Switch",
                     "Sample the busy threads once a millisecond (pause, read pc/lr/frames, "
                     "resume) and log a histogram every 10 s; where.py --profile sums it per "
@@ -1454,6 +1460,9 @@ struct Heartbeat {
                 a.mapped_blocks, a.peak_mapped_blocks, a.pool_blocks);
       LogDelayCounts();
       LogClock();
+      // Run 21 (C): the clocks as the console runs them now.
+      const std::string clocks = theft4::nx_clocks::Describe(theft4::nx_clocks::Read());
+      GAME_INFO("clocks: %s", clocks.c_str());
       LogNullGpu();
       LogBootSequencer();
       const double window_s = double(seconds - last_line_s);
@@ -1817,6 +1826,14 @@ double MeasureThreadLocalNs(uint32_t iterations) {
   return iterations ? double(armTicksToNs(armGetSystemTick() - start)) / double(iterations) : 0.0;
 }
 
+void ClockLog(bool error, const char* text) {
+  if (error) {
+    GAME_ERROR("%s", text);
+  } else {
+    GAME_INFO("%s", text);
+  }
+}
+
 void ProfileLog(const char* text) { GAME_INFO("%s", text); }
 
 [[noreturn]] void GameMain(int argc, char** argv) {
@@ -1832,6 +1849,7 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   StartLogging();
   CaptureTerminations();
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
+  theft4::nx_clocks::Start(REXCVAR_GET(nx_apm_clock), ClockLog);
   if (REXCVAR_GET(nx_profile)) {
     theft4::nx_profiler::Start(g_module_base, g_module_text_size, ProfileLog);
     GAME_INFO("profile: %s (cvar nx_profile): busy threads sampled once a millisecond",
