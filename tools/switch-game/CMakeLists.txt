@@ -60,7 +60,7 @@ add_custom_command(
     VERBATIM
 )
 
-add_executable(switch-game main.cpp nx_input.cpp nx_clocks.cpp nx_profiler.cpp
+add_executable(switch-game main.cpp nx_input.cpp nx_clocks.cpp nx_profiler.cpp nx_threads.cpp
     "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
     "${MISSING_IMPORTS_CPP}" ${GENERATED_SOURCES})
 target_compile_features(switch-game PRIVATE cxx_std_23)
@@ -128,6 +128,10 @@ endif()
 target_link_options(switch-game PRIVATE
     "-Wl,--wrap=exit,--wrap=_exit,--wrap=_Exit,--wrap=abort,--wrap=svcExitProcess"
     "-Wl,--wrap=fatalThrow,--wrap=diagAbortWithResult,--wrap=svcBreak")
+# Run 23: every thread through nx_threads.cpp (stack range, stack watch, start
+# routine of a pthread; libnx's newlib glue creates pthreads with threadCreate).
+target_link_options(switch-game PRIVATE
+    "-Wl,--wrap=threadCreate,--wrap=threadClose,--wrap=pthread_create")
 
 nx_generate_nacp(switch-game.nacp
     NAME "Theft4 switch-game"

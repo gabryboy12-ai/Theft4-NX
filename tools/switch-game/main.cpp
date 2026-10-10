@@ -92,6 +92,7 @@
 #include <rex/kernel/init.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/platform/nx_fault_record.h>
 #include <rex/runtime.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
@@ -111,6 +112,7 @@
 #include "nx_exit.h"
 #include "nx_input.h"
 #include "nx_profiler.h"
+#include "nx_threads.h"
 
 #if THEFT4_NX_VULKAN
 #include <rex/graphics/nx_gpu_counters.h>
@@ -176,6 +178,13 @@ REXCVAR_DEFINE_BOOL(nx_crash_log_after_setup, true, "Switch",
                     "Install the crash-log handler again after Runtime::Setup, so it sees only "
                     "unhandled faults (run 21). false: as in run 20, it stays first and writes "
                     "(with an fsync) every handled write-watch fault too");
+REXCVAR_DEFINE_BOOL(nx_stack_watch, true, "Switch",
+                    "Fill every new thread's stack with a pattern before it starts and log "
+                    "each stack's size and deepest use every minute (run 23, C.3)");
+REXCVAR_DEFINE_BOOL(nx_resume_guard, false, "Switch",
+                    "After a handled fault, if the sp or pc about to be resumed is not the one "
+                    "the fault came in with, put the entry values back (counted in the "
+                    "'resume:' line). false: counted and recorded only (run 23)");
 REXCVAR_DEFINE_INT32(nx_mem_warn_mib, 64, "Switch",
                      "Heartbeat: an ERROR line, written at once, when the host heap can give "
                      "less than this many MiB (free in newlib's arena plus what sbrk can "
@@ -531,6 +540,77 @@ bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
     FlushBufferLocked(true);
     g_log_file_mutex.unlock();
   }
+  return false;
+}
+
+void CrashYesNo(const char* label, bool yes) {
+  CrashWrite(label);
+  CrashWrite(yes ? "yes\n" : "NO\n");
+}
+
+// Run 23 (D.2): installed last, after the MMIO handler and the crash log, so
+// it runs only for a fault nobody handled. The thread (name, id, stack range,
+// whether sp and x29 are in it), the last fault the entry resumed on this
+// thread (the sp and pc it came in with and the ones it went back with), the
+// process-wide resume counters, every other thread's pc, lr and sp; then
+// fsync, before the dispatcher sends the thread to svcBreak.
+bool CrashFinalHandler(rex::arch::Exception* ex, void* /*data*/) {
+  const auto* tc = ex->thread_context();
+  const RexNxThreadFaults* rec = rex_nx_thread_faults();
+  u64 id = 0;
+  svcGetThreadId(&id, CUR_THREAD_HANDLE);
+  theft4::nx_threads::Info info;
+  theft4::nx_threads::FindById(id, &info);
+  CrashWrite("=== unhandled fault: thread, stack, last resume ===\n");
+  CrashDec("thread id ", id);
+  CrashWrite("thread name ");
+  CrashWrite(!info.found ? "(not in the thread table)" : info.name[0] ? info.name : "?");
+  CrashWrite("\n");
+  if (info.start) {
+    CrashHex("thread start - base", info.start - g_module_base);
+  }
+  uint64_t lo = info.stack_lo, hi = info.stack_hi;
+  if (!info.found) {
+    // The block of the last good sp, else of x29.
+    theft4::nx_threads::QueryBlock(rec->handled ? rec->resume_sp : tc->x[29], &lo, &hi);
+    CrashWrite("stack range from svcQueryMemory (thread not in the table)\n");
+  }
+  CrashHex("stack lo   ", lo);
+  CrashHex("stack hi   ", hi);
+  CrashHex("sp         ", tc->sp);
+  CrashYesNo("sp inside the stack: ", tc->sp >= lo && tc->sp <= hi);
+  CrashYesNo("x29 inside the stack: ", tc->x[29] >= lo && tc->x[29] <= hi);
+  CrashDec("faults resumed on this thread ", rec->handled);
+  if (rec->handled) {
+    CrashDec("ms since the last one ", armTicksToNs(armGetSystemTick() - rec->last_tick) / 1'000'000);
+    CrashHex("last fault: pc - base   ", rec->entry_pc - g_module_base);
+    CrashHex("last fault: sp (known)  ", rec->entry_sp);
+    CrashHex("last fault: lr          ", rec->entry_lr);
+    CrashHex("resumed with pc - base  ", rec->resume_pc - g_module_base);
+    CrashHex("resumed with sp         ", rec->resume_sp);
+    CrashHex("kernel frame at         ", rec->frame_address);
+    CrashYesNo("this fault's pc is the resumed pc: ", ex->pc() == rec->resume_pc);
+    CrashYesNo("this fault's sp is the resumed sp: ", tc->sp == rec->resume_sp);
+  }
+  CrashDec("this thread: context changed in the handler ", rec->context_changed);
+  CrashDec("this thread: frame read back wrong ", rec->frame_wrong);
+  const RexNxResumeStats* s = rex_nx_resume_stats();
+  CrashDec("process: faults resumed ", s->handled);
+  CrashDec("process: context changed in the handler ", s->context_changed);
+  CrashDec("process: frame read back wrong ", s->frame_wrong);
+  CrashDec("process: repaired (nx_resume_guard) ", s->repaired);
+  if (s->first_kind) {
+    CrashDec("first event kind (1 context, 2 frame) ", s->first_kind);
+    CrashDec("first event thread id ", s->first_thread_id);
+    CrashHex("first event entry sp ", s->first_entry_sp);
+    CrashHex("first event entry pc ", s->first_entry_pc);
+    CrashHex("first event seen sp  ", s->first_seen_sp);
+    CrashHex("first event seen pc  ", s->first_seen_pc);
+  }
+  CrashWrite("all other threads (paused one at a time, then resumed):\n");
+  theft4::nx_threads::WriteAllThreads(CrashWrite, id);
+  CrashWrite("=== end of the unhandled fault ===\n");
+  if (g_crash_fd >= 0) fsync(g_crash_fd);
   return false;
 }
 
@@ -1165,6 +1245,7 @@ void LogCpu(std::vector<std::pair<Handle, u64>>* last, u64 window_ticks) {
       r.id = t->thread_id();
       r.kind = t->is_guest_thread() ? "guest" : "host";
       r.name = t->thread_name();
+      theft4::nx_threads::SetName(r.handle, r.name.c_str());  // run 23: stacks, crash log
       rows.push_back(r);
     }
   }
@@ -1176,6 +1257,7 @@ void LogCpu(std::vector<std::pair<Handle, u64>>* last, u64 window_ticks) {
     CpuRow w;
     w.handle = g_log_writer.handle;
     w.kind = "log";
+    theft4::nx_threads::SetName(w.handle, "log writer");
     rows.push_back(w);
   }
   std::vector<std::pair<Handle, u64>> now;
@@ -1696,6 +1778,14 @@ struct Heartbeat {
                   " in the window (handled ones are the Vulkan write watch on guest memory)",
                   faults, faults - last_faults);
         last_faults = faults;
+        // Run 23 (D.2): the faults the exception entry resumed, and whether
+        // the sp / pc it resumed with ever differed from the ones it got.
+        const RexNxResumeStats* r = rex_nx_resume_stats();
+        GAME_INFO("resume: %" PRIu64 " faults resumed since start; sp/pc changed in the handler "
+                  "%" PRIu64 ", frame read back wrong %" PRIu64 ", repaired %" PRIu64
+                  " (nx_resume_guard %d)",
+                  r->handled, r->context_changed, r->frame_wrong, r->repaired,
+                  int(rex_nx_resume_guard));
       }
       LogNullGpu();
       LogBootSequencer();
@@ -1790,6 +1880,8 @@ struct Heartbeat {
       rex::diagnostics::LogExportCallSummary(when);
       rex::diagnostics::LogExportCallRates(when, double(seconds - last_rates_s), 20);
       last_rates_s = seconds;
+      // Run 23 (C.3): size and deepest use of every thread's stack.
+      theft4::nx_threads::LogStacks([](const char* text) { GAME_INFO("%s", text); });
     }
     if (seconds >= next_snapshot_s) {
       next_snapshot_s = next_snapshot_s < 20 ? 20 : next_snapshot_s < 60 ? 60 : seconds + 120;
@@ -2077,6 +2169,9 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
 
 [[noreturn]] void GameMain(int argc, char** argv) {
   rex::cvar::Init(argc, argv);
+  // Run 23 (C.3): before the threads of the log and the runtime exist.
+  theft4::nx_threads::Start(REXCVAR_GET(nx_stack_watch), reinterpret_cast<u64>(&_start));
+  rex_nx_resume_guard = REXCVAR_GET(nx_resume_guard);
   consoleInit(nullptr);
   g_console_open = true;  // still single-threaded
   padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -2100,6 +2195,10 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
             int(REXCVAR_GET(nx_apm_clock)), int(REXCVAR_GET(nx_nv_wrap)),
             int(REXCVAR_GET(nx_fault_count_handler)), int(REXCVAR_GET(nx_crash_log_after_setup)),
             int(REXCVAR_GET(nx_profile)), int(REXCVAR_GET(nx_mount_cache)));
+  GAME_INFO("run 23 pieces: vector registers saved first in the exception entry (always), "
+            "crash record with threads and stacks (always), nx_stack_watch %d, "
+            "nx_resume_guard %d",
+            int(REXCVAR_GET(nx_stack_watch)), int(REXCVAR_GET(nx_resume_guard)));
   theft4::nx_clocks::Start(REXCVAR_GET(nx_apm_clock), ClockLog);
   if (REXCVAR_GET(nx_profile)) {
     theft4::nx_profiler::Start(g_module_base, g_module_text_size, ProfileLog);
@@ -2241,6 +2340,8 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
     rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
   }
+  // Run 23 (D.2): last of all, only for the faults nobody handled.
+  rex::arch::ExceptionHandler::Install(CrashFinalHandler, nullptr);
 #if THEFT4_NX_VULKAN
   if (g_vulkan_graphics) {
     // As ReXApp does: the window, then the presenter Setup made on this thread.
