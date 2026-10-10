@@ -27,6 +27,7 @@
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/sampler_info.h>
 #include <rex/hash.h>
+#include <rex/graphics/nx_gpu_counters.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -290,6 +291,7 @@ void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect)
 }
 
 void CommandProcessor::WorkerThreadMain() {
+  rex::graphics::nx_gpu_on_command_thread = true;
   if (!SetupContext()) {
     rex::FatalError("Unable to setup command processor internal state");
     return;

@@ -50,6 +50,7 @@
 #include <rex/math.h>
 #include <rex/types.h>
 #include <rex/ui/vulkan/util.h>
+#include <rex/graphics/nx_gpu_counters.h>
 
 REXCVAR_DEFINE_INT32(
     vulkan_pipeline_creation_threads, -1, "GPU/Vulkan",
@@ -1329,11 +1330,18 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
 
   // Perform translation.
   // If this fails the shader will be marked as invalid and ignored later.
+  const uint64_t nx_translate_start_ns = rex::graphics::NxGpuNowNs();
   if (!translator.TranslateAnalyzedShader(translation)) {
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;
   }
-  if (translation.GetOrCreateShaderModule() == VK_NULL_HANDLE) {
+  const bool nx_module_created = translation.GetOrCreateShaderModule() != VK_NULL_HANDLE;
+  {
+    auto& c = rex::graphics::nx_gpu_counters();
+    rex::graphics::NxGpuAddCall(c.shaders, c.shader_ns, c.shaders_cp, c.shader_ns_cp,
+                                nx_translate_start_ns);
+  }
+  if (!nx_module_created) {
     return false;
   }
 
@@ -3585,8 +3593,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
+  const uint64_t nx_create_start_ns = rex::graphics::NxGpuNowNs();
   VkResult create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
                                                          &pipeline_create_info, nullptr, &pipeline);
+  {
+    auto& c = rex::graphics::nx_gpu_counters();
+    rex::graphics::NxGpuAddCall(c.pipelines, c.pipeline_ns, c.pipelines_cp, c.pipeline_ns_cp,
+                                nx_create_start_ns);
+  }
   if (create_result != VK_SUCCESS) {
     uint64_t ps_hash = creation_arguments.pixel_shader
                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()

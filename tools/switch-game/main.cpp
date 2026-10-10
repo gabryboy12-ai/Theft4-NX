@@ -1295,6 +1295,8 @@ struct VulkanBeat {
   uint64_t submit_ns = 0, present_ns = 0, fence_waits = 0, fence_wait_ns = 0;
   uint64_t nv_kickoffs = 0, nv_waits = 0, nv_wait_ns = 0, nv_queries = 0;
   uint64_t submit_failures = 0, present_failures = 0;
+  uint64_t pipelines = 0, pipeline_ns = 0, pipelines_cp = 0, pipeline_ns_cp = 0;
+  uint64_t shaders = 0, shader_ns = 0, shaders_cp = 0, shader_ns_cp = 0;
   uint64_t stall_presents = UINT64_MAX;
   u64 last_present_change = 0;
   bool stall_reported = false;
@@ -1453,6 +1455,42 @@ void LogVulkan(double window_s) {
                 g_nv.maps_closed.load(std::memory_order_relaxed),
             g_nv.map_bytes.load(std::memory_order_relaxed) >> 20,
             g_nv.maps_created.load(std::memory_order_relaxed));
+  // Run 22 (C.2): pipeline creation and shader translation in the window. No
+  // pipeline or shader storage on disk exists on Switch (Runtime never calls
+  // InitializeShaderStorage there; Mesa's cache is off): every one is new.
+  {
+    const uint64_t pipelines = c.pipelines.load(std::memory_order_relaxed);
+    const uint64_t pipeline_ns = c.pipeline_ns.load(std::memory_order_relaxed);
+    const uint64_t pipelines_cp = c.pipelines_cp.load(std::memory_order_relaxed);
+    const uint64_t pipeline_ns_cp = c.pipeline_ns_cp.load(std::memory_order_relaxed);
+    const uint64_t shaders = c.shaders.load(std::memory_order_relaxed);
+    const uint64_t shader_ns = c.shader_ns.load(std::memory_order_relaxed);
+    const uint64_t shaders_cp = c.shaders_cp.load(std::memory_order_relaxed);
+    const uint64_t shader_ns_cp = c.shader_ns_cp.load(std::memory_order_relaxed);
+    const uint64_t np = pipelines - g_vk_beat.pipelines, ns_ = shaders - g_vk_beat.shaders;
+    GAME_INFO("pipelines: %" PRIu64 " created in the window (%.1f/s, %.0f ms in "
+              "vkCreateGraphicsPipelines, %.1f ms each), of which %" PRIu64 " on GPU Commands "
+              "(%.0f ms); shaders: %" PRIu64 " translated (%.0f ms, %.1f ms each), %" PRIu64
+              " on GPU Commands (%.0f ms); since start %" PRIu64 " pipelines, %" PRIu64
+              " shaders; disk storage: none on Switch",
+              np, window_s > 0 ? double(np) / window_s : 0.0,
+              double(pipeline_ns - g_vk_beat.pipeline_ns) * ms,
+              np ? double(pipeline_ns - g_vk_beat.pipeline_ns) * ms / double(np) : 0.0,
+              pipelines_cp - g_vk_beat.pipelines_cp,
+              double(pipeline_ns_cp - g_vk_beat.pipeline_ns_cp) * ms, ns_,
+              double(shader_ns - g_vk_beat.shader_ns) * ms,
+              ns_ ? double(shader_ns - g_vk_beat.shader_ns) * ms / double(ns_) : 0.0,
+              shaders_cp - g_vk_beat.shaders_cp,
+              double(shader_ns_cp - g_vk_beat.shader_ns_cp) * ms, pipelines, shaders);
+    g_vk_beat.pipelines = pipelines;
+    g_vk_beat.pipeline_ns = pipeline_ns;
+    g_vk_beat.pipelines_cp = pipelines_cp;
+    g_vk_beat.pipeline_ns_cp = pipeline_ns_cp;
+    g_vk_beat.shaders = shaders;
+    g_vk_beat.shader_ns = shader_ns;
+    g_vk_beat.shaders_cp = shaders_cp;
+    g_vk_beat.shader_ns_cp = shader_ns_cp;
+  }
   // D.2: a new submit or present failure that means memory or the device goes
   // to the crash log with the reason and this heartbeat; the game goes on (a
   // lost device ends in rex::FatalError, which the termination path logs).
