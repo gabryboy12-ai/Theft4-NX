@@ -163,6 +163,10 @@ REXCVAR_DEFINE_BOOL(nx_profile, false, "Switch",
                     "Sample the busy threads once a millisecond (pause, read pc/lr/frames, "
                     "resume) and log a histogram every 10 s; where.py --profile sums it per "
                     "function (nx_profiler.h). Costs a few % of one core");
+REXCVAR_DEFINE_INT32(nx_mem_warn_mib, 64, "Switch",
+                     "Heartbeat: an ERROR line, written at once, when the host heap can give "
+                     "less than this many MiB (free in newlib's arena plus what sbrk can "
+                     "still add)");
 REXCVAR_DEFINE_STRING(nx_exit_mode, "D", "Switch",
                       "Exit at + (hold 1 s): D = file I/O gate closed and drained, null audio "
                       "stopped, every thread told to end and joined (2 s each), then exit(0); "
@@ -198,6 +202,8 @@ int g_crash_fd = -1;
 
 // Start of the NRO image (see switch-smoke/main.cpp, StepModuleBase).
 extern "C" char _start;
+// End of newlib's heap (libsysbase's sbrk grows towards it; libnx sets it).
+extern "C" char* fake_heap_end;
 #if THEFT4_NX_VULKAN
 // libnx's weak symbol (nv.o, 8 MiB): read by nvInitialize, i.e. when NVK starts.
 extern "C" u32 __nx_nv_transfermem_size;
@@ -423,9 +429,71 @@ void CrashHex(const char* label, uint64_t value) {
   CrashWrite(buf);
 }
 
-// Installed last: runs only for access violations no runtime handler claimed
-// (MMIO, physical write watch). Records the fault; returning false leaves it
-// unhandled, and the runtime ends it in svcBreak (Atmosphere crash report).
+void CrashDec(const char* label, uint64_t value) {
+  char digits[24];
+  int n = 0;
+  do {
+    digits[n++] = char('0' + value % 10);
+    value /= 10;
+  } while (value && n < 20);
+  char buf[96];
+  size_t w = 0;
+  for (const char* p = label; *p && w < 60; ++p) buf[w++] = *p;
+  while (n) buf[w++] = digits[--n];
+  buf[w++] = '\n';
+  buf[w] = 0;
+  CrashWrite(buf);
+}
+
+u64 g_start_tick = 0;
+// Free host heap at the last heartbeat, in bytes (LogHostMemory).
+std::atomic<uint64_t> g_heap_headroom{0};
+
+// The last heartbeat's memory and Vulkan lines, for the crash log (D.2, D.3).
+// Two buffers: the heartbeat writes the idle one, then publishes it.
+char g_last_beat[2][1024];
+std::atomic<int> g_last_beat_index{0};
+
+void SetLastBeat(const std::string& text) {
+  const int next = 1 - g_last_beat_index.load(std::memory_order_relaxed);
+  std::snprintf(g_last_beat[next], sizeof(g_last_beat[next]), "%s", text.c_str());
+  g_last_beat_index.store(next, std::memory_order_release);
+}
+
+// Fault-handler safe: time since start, process memory now, heap headroom at
+// the last heartbeat and that heartbeat's lines, then fsync (D.3).
+void CrashWriteState(const char* why) {
+  u64 used = 0, total = 0;
+  svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+  svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+  CrashWrite(why);
+  CrashWrite("\n");
+  CrashDec("uptime ms ", armTicksToNs(armGetSystemTick() - g_start_tick) / 1'000'000);
+  CrashDec("process MiB used ", used >> 20);
+  CrashDec("process MiB total ", total >> 20);
+  CrashDec("heap MiB free at the last heartbeat ",
+           g_heap_headroom.load(std::memory_order_relaxed) >> 20);
+  CrashWrite("last heartbeat:\n");
+  CrashWrite(g_last_beat[g_last_beat_index.load(std::memory_order_acquire)]);
+  CrashWrite("\n");
+  if (g_crash_fd >= 0) fsync(g_crash_fd);
+}
+
+// Run 21: every access violation, handled or not (the Vulkan backend's write
+// watch on guest memory takes one per watched page the guest writes). Installed
+// first; never claims the fault.
+std::atomic<uint64_t> g_faults{0};
+bool FaultCountHandler(rex::arch::Exception*, void*) {
+  g_faults.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
+
+// Runs only for access violations no runtime handler claimed (MMIO, physical
+// write watch): installed before Runtime::Setup, it is installed again after
+// it so that it comes after the MMIO handler (run 20 logged every handled
+// write-watch fault here, 2282 in run 20's third boot, each with an fsync).
+// Records the fault; returning false leaves it unhandled, and the runtime ends
+// it in svcBreak (Atmosphere crash report).
 bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
   const auto* tc = ex->thread_context();
   CrashWrite("=== unhandled access violation ===\n");
@@ -444,7 +512,7 @@ bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
     name[2] = char('0' + i % 10);
     CrashHex(name, tc->x[i]);
   }
-  if (g_crash_fd >= 0) fsync(g_crash_fd);
+  CrashWriteState("state:");
   // The lines still in the buffer (nx_log_durable = false), if nobody holds it.
   if (g_log_buffered && g_log_file_mutex.try_lock()) {
     FlushBufferLocked(true);
@@ -495,6 +563,12 @@ thread_local bool t_in_termination_log = false;
 
 void LogTermination(const char* what, int code, const void* caller) {
   ExitStep(what);
+  {
+    // D.3: before anything that can fail, a durable line in the crash log.
+    char why[96];
+    std::snprintf(why, sizeof(why), "=== termination: %s(%d) ===", what, code);
+    CrashWriteState(why);
+  }
   if (t_in_termination_log || !g_logging_ready) {
     return;
   }
@@ -986,7 +1060,6 @@ void LogNullGpu() {
 
 // Every change of the buttons held (Switch HidNpadButton mask), with its time
 // since the start: the log says what was pressed and when (run 15 could not).
-u64 g_start_tick = 0;
 u64 g_buttons_now = 0;
 u64 g_button_changes = 0;
 
@@ -1129,7 +1202,13 @@ void LogThreadCounts() {
 // Process memory and the host heap (newlib), with their peaks; the guest
 // pool's peak is on the heartbeat line.
 u64 g_peak_used = 0, g_peak_heap = 0;
+std::string g_beat_memory, g_beat_vulkan;  // for the crash log (SetLastBeat)
+bool g_memory_low = false;
 
+// Run 21 (D.1): the process's memory from the kernel says little (libnx takes
+// the whole heap at start: 3185 of 3189 MiB in every run). What can still be
+// allocated is newlib's: the free blocks of its arena plus what sbrk can add
+// up to fake_heap_end. Vulkan memory and the guest pool come from there too.
 void LogHostMemory() {
   u64 used = 0, total = 0;
   svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
@@ -1137,10 +1216,31 @@ void LogHostMemory() {
   const struct mallinfo mi = mallinfo();
   g_peak_used = std::max<u64>(g_peak_used, used);
   g_peak_heap = std::max<u64>(g_peak_heap, u64(mi.uordblks));
-  GAME_INFO("host memory: process %" PRIu64 " of %" PRIu64 " MiB (peak %" PRIu64
-            "), heap arena %zu MiB, in use %zu MiB (peak %" PRIu64 ")",
-            used >> 20, total >> 20, g_peak_used >> 20, size_t(mi.arena) >> 20,
-            size_t(mi.uordblks) >> 20, g_peak_heap >> 20);
+  const char* top = static_cast<const char*>(sbrk(0));
+  const uint64_t sbrk_left =
+      fake_heap_end && top && fake_heap_end > top ? uint64_t(fake_heap_end - top) : 0;
+  const uint64_t headroom = sbrk_left + uint64_t(mi.fordblks);
+  g_heap_headroom.store(headroom, std::memory_order_relaxed);
+  char line[320];
+  std::snprintf(line, sizeof(line),
+                "host memory: process %" PRIu64 " of %" PRIu64 " MiB (peak %" PRIu64
+                "), heap arena %zu MiB, in use %zu MiB (peak %" PRIu64
+                "); free: %zu MiB in the arena + %" PRIu64 " MiB sbrk can add = %" PRIu64
+                " MiB headroom",
+                used >> 20, total >> 20, g_peak_used >> 20, size_t(mi.arena) >> 20,
+                size_t(mi.uordblks) >> 20, g_peak_heap >> 20, size_t(mi.fordblks) >> 20,
+                sbrk_left >> 20, headroom >> 20);
+  GAME_INFO("%s", line);
+  g_beat_memory = line;
+  const uint64_t warn = uint64_t(std::max(0, REXCVAR_GET(nx_mem_warn_mib))) << 20;
+  if (headroom < warn && !g_memory_low) {
+    g_memory_low = true;
+    GAME_ERROR("memory LOW: %" PRIu64 " MiB of host heap left (under nx_mem_warn_mib = %d)",
+               headroom >> 20, REXCVAR_GET(nx_mem_warn_mib));
+    FlushLog();  // at once, not at the next writer pass
+  } else if (headroom >= warn + (16u << 20)) {
+    g_memory_low = false;
+  }
 }
 
 // Log cost over the window: lines, writes to game.log and their time.
@@ -1181,6 +1281,7 @@ struct VulkanBeat {
   uint64_t presents = 0, draws = 0, submits = 0;
   uint64_t submit_ns = 0, present_ns = 0, fence_waits = 0, fence_wait_ns = 0;
   uint64_t nv_kickoffs = 0, nv_waits = 0, nv_wait_ns = 0, nv_queries = 0;
+  uint64_t submit_failures = 0, present_failures = 0;
   uint64_t stall_presents = UINT64_MAX;
   u64 last_present_change = 0;
   bool stall_reported = false;
@@ -1198,6 +1299,15 @@ struct NvCalls {
 };
 NvCalls g_nv;
 
+// VkResults that mean memory or the device: a crash-log entry (D.2).
+const char* VkFailureName(int32_t result) {
+  switch (result) {
+    case -1: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case -2: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case -4: return "VK_ERROR_DEVICE_LOST";
+    default: return nullptr;
+  }
+}
 
 }  // namespace
 
@@ -1277,16 +1387,20 @@ void LogVulkan(double window_s) {
       }
     }
   }
-  GAME_INFO("vulkan: %" PRIu64 " presents (%.1f/s, frame %.1f ms), %" PRIu64 " draws (+%" PRIu64
-            "), %" PRIu64 " submits (+%" PRIu64 "); failures: submit %" PRIu64
-            " (last %d), present %" PRIu64 " (last %d); %s",
-            presents, window_s > 0 ? double(new_presents) / window_s : 0.0,
-            new_presents ? window_s * 1000.0 / double(new_presents) : 0.0, draws,
-            draws - g_vk_beat.draws, submits, submits - g_vk_beat.submits,
-            c.submit_failures.load(std::memory_order_relaxed),
-            c.last_submit_failure.load(std::memory_order_relaxed),
-            c.present_failures.load(std::memory_order_relaxed),
-            c.last_present_failure.load(std::memory_order_relaxed), heaps.c_str());
+  char line[512];
+  std::snprintf(line, sizeof(line),
+                "vulkan: %" PRIu64 " presents (%.1f/s, frame %.1f ms), %" PRIu64
+                " draws (+%" PRIu64 "), %" PRIu64 " submits (+%" PRIu64 "); failures: submit %" PRIu64
+                " (last %d), present %" PRIu64 " (last %d); %s",
+                presents, window_s > 0 ? double(new_presents) / window_s : 0.0,
+                new_presents ? window_s * 1000.0 / double(new_presents) : 0.0, draws,
+                draws - g_vk_beat.draws, submits, submits - g_vk_beat.submits,
+                c.submit_failures.load(std::memory_order_relaxed),
+                c.last_submit_failure.load(std::memory_order_relaxed),
+                c.present_failures.load(std::memory_order_relaxed),
+                c.last_present_failure.load(std::memory_order_relaxed), heaps.c_str());
+  GAME_INFO("%s", line);
+  g_beat_vulkan = line;
   // Run 21 (B.1): where the command processor's and the presenter's time goes.
   const uint64_t new_draws = draws - g_vk_beat.draws;
   const uint64_t new_submits = submits - g_vk_beat.submits;
@@ -1319,6 +1433,29 @@ void LogVulkan(double window_s) {
                 g_nv.maps_closed.load(std::memory_order_relaxed),
             g_nv.map_bytes.load(std::memory_order_relaxed) >> 20,
             g_nv.maps_created.load(std::memory_order_relaxed));
+  // D.2: a new submit or present failure that means memory or the device goes
+  // to the crash log with the reason and this heartbeat; the game goes on (a
+  // lost device ends in rex::FatalError, which the termination path logs).
+  const uint64_t submit_failures = c.submit_failures.load(std::memory_order_relaxed);
+  const uint64_t present_failures = c.present_failures.load(std::memory_order_relaxed);
+  const int32_t failures[2] = {submit_failures != g_vk_beat.submit_failures
+                                   ? c.last_submit_failure.load(std::memory_order_relaxed)
+                                   : 0,
+                               present_failures != g_vk_beat.present_failures
+                                   ? c.last_present_failure.load(std::memory_order_relaxed)
+                                   : 0};
+  for (const int32_t result : failures) {
+    if (const char* name = VkFailureName(result)) {
+      GAME_ERROR("vulkan: %s (%d): written to %s with this heartbeat", name, result, kCrashPath);
+      SetLastBeat(g_beat_memory + "\n" + g_beat_vulkan);
+      char why[96];
+      std::snprintf(why, sizeof(why), "=== vulkan failure: %s (%d) ===", name, result);
+      CrashWriteState(why);
+      FlushLog();
+    }
+  }
+  g_vk_beat.submit_failures = submit_failures;
+  g_vk_beat.present_failures = present_failures;
   g_vk_beat.presents = presents;
   g_vk_beat.draws = draws;
   g_vk_beat.submits = submits;
@@ -1444,6 +1581,7 @@ struct Heartbeat {
   u64 last_line_tick = 0;
   u64 last_rates_s = 0;
   uint64_t last_log_lines = 0, last_log_writes = 0, last_log_ns = 0;
+  uint64_t last_faults = 0;
 
   void Tick() {
     const u64 now_tick = armGetSystemTick();
@@ -1463,6 +1601,13 @@ struct Heartbeat {
       // Run 21 (C): the clocks as the console runs them now.
       const std::string clocks = theft4::nx_clocks::Describe(theft4::nx_clocks::Read());
       GAME_INFO("clocks: %s", clocks.c_str());
+      {
+        const uint64_t faults = g_faults.load(std::memory_order_relaxed);
+        GAME_INFO("faults: %" PRIu64 " access violations since start, %" PRIu64
+                  " in the window (handled ones are the Vulkan write watch on guest memory)",
+                  faults, faults - last_faults);
+        last_faults = faults;
+      }
       LogNullGpu();
       LogBootSequencer();
       const double window_s = double(seconds - last_line_s);
@@ -1533,6 +1678,11 @@ struct Heartbeat {
 #if THEFT4_NX_VULKAN
       LogVulkan(window_s);
 #endif
+      {
+        char when[64];
+        std::snprintf(when, sizeof(when), "heartbeat %" PRIu64 " s; clocks ", seconds);
+        SetLastBeat(when + clocks + "\n" + g_beat_memory + "\n" + g_beat_vulkan);
+      }
       GAME_INFO("buttons: %" PRIu64 " changes, now 0x%" PRIx64, g_button_changes,
                 g_buttons_now);
       if (REXCVAR_GET(nx_input)) {
@@ -1848,6 +1998,7 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
 
   StartLogging();
   CaptureTerminations();
+  rex::arch::ExceptionHandler::Install(FaultCountHandler, nullptr);
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
   theft4::nx_clocks::Start(REXCVAR_GET(nx_apm_clock), ClockLog);
   if (REXCVAR_GET(nx_profile)) {
@@ -1984,6 +2135,10 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     WaitForPlusAndExit(&g_pad);
   }
   LogArena("after Setup");
+  // Setup installed the MMIO handler (and the write watch); the crash log goes
+  // after it again, so that it sees only the faults nobody handled.
+  rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
+  rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
 #if THEFT4_NX_VULKAN
   if (g_vulkan_graphics) {
     // As ReXApp does: the window, then the presenter Setup made on this thread.

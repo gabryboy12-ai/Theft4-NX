@@ -543,17 +543,27 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
 
   // Create the debug messenger if requested and available.
 
-  if ((rex::diagnostics::IsEnabled(rex::diagnostics::Category::kVulkan) ||
+  // On Switch, Mesa release builds give their errors (NVK's "channel N lost",
+  // allocation failures) only to a debug utils messenger: one for errors is
+  // always created there (as plume does; switch-game run 21, D.2).
+#if REX_PLATFORM_NX
+  constexpr bool kNxErrorMessenger = true;
+#else
+  constexpr bool kNxErrorMessenger = false;
+#endif
+  const bool debug_messages_requested =
+      (rex::diagnostics::IsEnabled(rex::diagnostics::Category::kVulkan) ||
        rex::diagnostics::gpu_flight::IsEnabled()) &&
-      vulkan_instance->extensions_.ext_EXT_debug_utils &&
-      REXCVAR_GET(vulkan_log_debug_messages)) {
+      REXCVAR_GET(vulkan_log_debug_messages);
+  if ((debug_messages_requested || kNxErrorMessenger) &&
+      vulkan_instance->extensions_.ext_EXT_debug_utils) {
     VkDebugUtilsMessengerCreateInfoEXT debug_utils_messenger_create_info = {
         VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
-    if (rex::diagnostics::gpu_flight::IsEnabled()) {
+    if (rex::diagnostics::gpu_flight::IsEnabled() || kNxErrorMessenger) {
       debug_utils_messenger_create_info.messageSeverity |=
           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
     }
-    auto gpu_logger = rex::GetLogger(rex::log::gpu());
+    auto gpu_logger = debug_messages_requested ? rex::GetLogger(rex::log::gpu()) : nullptr;
     if (gpu_logger) {
       if (gpu_logger->should_log(spdlog::level::debug)) {
         debug_utils_messenger_create_info.messageSeverity |=
