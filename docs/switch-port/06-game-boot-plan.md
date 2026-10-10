@@ -2700,3 +2700,262 @@ log con un `fsync` come nel run 20. Poiché il fault presto è non
 deterministico (2 avvii su 4 nel run 21), un avvio senza crash non assolve
 una variabile: se la base crasha, la causa non è fra le novità; se nessun
 avvio crasha, ripetere la base e il 2.
+
+### Run 22: risultati (2026-10-10, `out/console-runs/run22/1`–`7`, NRO del commit `6bc6c24`)
+
+Sette avvii, uno per variabile. Schermo: errore generico del sistema ("Il
+software è stato chiuso a causa di un errore") in tutti e sette; nessun report
+di Atmosphère (non si cerca più: si lavora solo con `game-crash.log`).
+`nx_mount_cache` spento in tutti (riga `run 21 pieces … nx_mount_cache 0`).
+`game-exit.log` vuoto in tutti: nessuna uscita è passata da `exit`/`abort`.
+Le cartelle dei log del run 20 e del run 21 non ci sono più (le sottocartelle
+`run22/1`–`4` del run 21 sono state riusate): per quei run valgono i valori
+scritti sopra.
+
+#### A.1 Avvio per avvio
+
+| Avvio | Differenza dalla base | Durata | Fine | Heap libero / Vulkan (ultimo battito) | Ultimo record di `game-crash.log` |
+|---|---|---|---|---|---|
+| 1 | nessuna | 155,6 s | **nessun record della morte** | 915 MiB / 700 di 1317 | fault di write-watch gestito (+0x244e614) |
+| 2 | `nx_apm_clock` | 195,1 s | nessun record della morte | 912 / 700 di 1315 | gestito (+0x2458dd4) |
+| 3 | `nx_crash_log_after_setup` | 58,5 s | **fault**: instruction abort (esr `0x82000005`), pc = 0, sp = `0x13` | 973 / 652 di 1309 | il fault: lr = +0x244e368, x29 = `0x67d818d5d0` |
+| 4 | `nx_fault_count_handler` | 57,2 s | **fault**: PC non allineato (esr `0x8a000000`), pc = far = `0x6acab702`, sp = `0x6acab6ca` | 976 / 650 di 1309 | il fault; il precedente (359 ms prima) è un gestito a +0x244e614 con sp `0x57c3e9b5f0` |
+| 5 | `nx_nv_wrap` | 122,3 s | **fault**: PC non allineato, pc = `0x6acab7e2`, sp = `0x6acab769` | 925 / 700 di 1324 | precedente (310 ms prima): gestito a +0x244e614, sp `0x1b5aba45d0` |
+| 6 | `nx_vk_mesa_messenger` | 186,9 s | **fault**: instruction abort, pc = 0, sp = `0x3638613335303030` (i byte sono il testo ASCII `00053a86`) | 912 / 700 di 1315 | precedente (311 ms prima): gestito a +0x244e970, sp `0x19d3b125d0` |
+| 7 | `texture_cache_memory_limit_hard = 384` | 338,5 s | nessun record della morte | **194** / **1369 di 1499**, present 0/s (video) | gestito (+0x244a0e0) |
+
+Il record non ha l'id del thread (aggiunto ora, D.2); il thread si riconosce
+dallo sp: in ogni avvio i fault vengono da due stack (avvio 1: `0x22659b…` 388
+record, `0x226b19…` 48), e x29 dei record fatali è lo sp del primo. È un thread
+guest: registri con indirizzi guest (`0x7030f…` stack guest, `0x4006…`,
+`0xbf…` memoria fisica guest), codice del gioco.
+
+**Frequenza dei fault di write-watch:** negli avvii che scrivono ogni fault
+(tutti tranne il 3) **circa 3 al secondo, a intervalli regolari di 300–360
+ms**; il contatore dell'avvio 4 dice lo stesso (26–32 ogni 10 s). Non è la
+frequenza del gioco: è il tetto messo dal record con `fsync` (~300 ms) scritto
+**dentro** il gestore, con la claim del kernel tenuta. Il thread che fa il
+fault passa quindi quasi tutto il suo tempo nel gestore delle eccezioni, e gli
+altri thread che fanno un fault aspettano nel kernel. Avvio 3 (record solo per
+i fault non gestiti): frequenza ignota, ma il gioco va il doppio più veloce
+(289 present a 50 s contro 150 dell'avvio 4).
+
+#### A.2 Il fault ricorrente
+
+Il fault gestito è nel gioco, `sub_829D3858` (+0x244e614: `str w1, [x2, w8,
+uxtw]`, una scrittura su memoria guest sorvegliata; +0x244e970 è nella stessa
+funzione). **lr = +0x244e368 non dice che il crash viene da `sub_829D76F0`**: è
+l'indirizzo di ritorno rimasto in x30 dalla `bl sub_829D76F0` di +0x244e364,
+già tornata; da lì la funzione prosegue e fa la scrittura che va in fault.
+
+| Crash | sp nello stack del thread? | pc, lr, x29 | Chi porta a pc sbagliato | Fault al secondo |
+|---|---|---|---|---|
+| run 20 avvio 1 | no: `0x6ac97f5d` | pc = far = `0x6ac97ff4` no; lr nel gioco (`sub_829B2AB0`) sì | – (record precedente non più disponibile) | 1 ogni ~300 ms (fsync per fault) |
+| run 21 avvio 1 | no: `0x3fe8000016000016` | pc = 0 no; lr = +0x244cdd8 (stesso punto, binario del run 21) sì | – (solo i fault non gestiti nel log) | 87–95 ogni 10 s |
+| run 21 avvio 4 | no: `0x13` | pc = 0; lr come sopra | – | fino a 452 ogni 10 s (overclock) |
+| run 22 avvio 3 | no: `0x13` | pc = 0; lr +0x244e368 sì; x29 sì | x5, x20, x24… uguali al motivo dei gestiti a +0x244e614 | ignota (nessun record dei gestiti) |
+| run 22 avvio 4 | no: `0x6acab6ca` | pc = `0x6acab702` no; lr, x29 sì | **nessuna istruzione eseguita**: x0–x30 identici al gestito precedente | ~3/s |
+| run 22 avvio 5 | no: `0x6acab769` | pc = `0x6acab7e2` no; lr, x29 sì | come sopra | ~3/s |
+| run 22 avvio 6 | no: testo `00053a86` | pc = 0; lr, x29 sì | come sopra | ~3/s |
+
+Nei tre casi confrontabili (4, 5, 6) il record fatale ha **x0–x30 identici,
+registro per registro, a quelli del fault gestito precedente** sullo stesso
+thread, 310–360 ms prima: il thread è stato ripreso e non ha eseguito nessuna
+istruzione. Sbagliati sono **solo sp e pc**, cioè proprio i due valori che il
+kernel ricarica dal frame dell'eccezione (`ThreadExceptionFrameA64`, +0x50 e
++0x58) in `svcReturnFromException`; x0–x8 e lr, che vengono dallo stesso
+frame, sono giusti. Nel binario del run 22 il dispatcher scriveva quei due
+valori **con un solo registro vettoriale**:
+
+```
+rex_nx_exception_dispatch+0x1028:  add  x0, sp, #0x1e8     // &thread_context.sp (sp, pc)
+rex_nx_exception_dispatch+0x102c:  ldr  q31, [x0]
+rex_nx_exception_dispatch+0x1030:  str  q31, [x20, #80]   // frame->sp, frame->elr_el1
+```
+
+e i valori trovati sembrano il contenuto di un registro vettoriale di altro
+codice: coppie di numeri a 32 bit vicini (`0x6acab6ca`/`0x6acab702`, già visti
+nel run 20 come `0x6ac97f5d`/`0x6ac97ff4`), testo ASCII, piccoli interi.
+
+#### A.3 La matrice
+
+Gli avvii 1, 2, 5 e 6 equivalgono alla base: **4 su 4 morti fra 122 e 195 s**
+(due con il record del pc sbagliato, due senza record). Quindi la base crasha
+e nessuna delle cinque novità è necessaria al crash. Gli avvii 3 e 4 muoiono
+prima (57–58 s, durante le immagini iniziali):
+
+- **3** sposta il record dopo il gestore MMIO: i fault gestiti non passano più
+  dal record con `fsync`, il tempo nel gestore per fault scende da ~300 ms a
+  qualche decina di µs, il gioco va il doppio più veloce e fa più fault al
+  secondo (non contati);
+- **4** aggiunge solo un contatore atomico in testa alla lista dei gestori; il
+  record con `fsync` per ogni fault resta come nella base. Il percorso dei
+  fault è di fatto quello della base.
+
+Con un campione per avvio **non si può dire niente su nessuna variabile**: lo
+stesso crash arriva a 57 s con una modifica che non cambia il percorso (4) e a
+122–195 s nella base; la dispersione dei tempi è quella di un guasto casuale.
+Il run 23 ripete la base per stimare la frequenza.
+
+#### A.4 Le tre cause
+
+- **(a) Registri corrotti nel percorso delle eccezioni: sostenuta dai log.**
+  Ogni record fatale è la ripresa di un fault gestito con tutti i registri
+  generali giusti tranne la coppia sp/pc, scritta nel frame con un solo
+  registro vettoriale (`q31`), e i valori sbagliati hanno l'aspetto di dati.
+  Due varianti che questi log non separano: (a1) `q31` cambia fra la `ldr` e
+  la `str` (il thread nel gestore perde q0–q7 e q16–q31 se viene interrotto,
+  masseffect-nx; finestra di un'istruzione, improbabile a ogni fault ma non
+  impossibile); (a2) la copia in memoria (`thread_context.sp/pc`, sullo stack
+  delle eccezioni) viene sovrascritta nei ~300 ms in cui il thread resta nel
+  gestore. Il run 23 le separa (D.2).
+- **(b) Overflow dello stack di un thread host (Vulkan/Mesa/NAK): nessun
+  indizio.** Il thread che muore è un thread guest; il suo sp prima del fault
+  sta fermo nello stesso KiB per minuti (`…5d0`, `…5f0`, `…3f0`); gli stack
+  host degli XThread sono da 16 MiB; nessun fault ha far vicino a sp; i thread
+  di Mesa e NAK non compaiono mai come thread del fault. Misurato comunque dal
+  run 23 (C.3).
+- **(c) Chiamata indiretta attraverso una voce nulla della tabella delle
+  funzioni: contraddetta.** Una `blr` a 0 lascia sp valido e lr subito dopo la
+  `blr`; qui sp è sbagliato, lr è il ritorno di una `bl` diretta, negli avvii 4
+  e 5 il pc non è 0 (è dispari) e fra il fault gestito e il crash non è stata
+  eseguita nessuna istruzione.
+
+**Le morti senza record (1, 2, 7).** L'ultimo record è un fault gestito,
+scritto prima che il gestore MMIO lo trattasse; della morte nessuna traccia:
+né record di fault, né `termination`, né il wrapper di `svcBreak`, né righe
+`[stderr]`. È compatibile con un fault **dentro** il gestore: a memoria (da
+verificare sul codice di Mesosphere) `KProcess::EnterUserException` rifiuta il
+thread che tiene già la claim, quindi un secondo fault sullo stesso thread non
+arriva al nostro ingresso (il ramo `rex_nx_exception_nested` non girerebbe
+mai) e il kernel chiude il processo. Lo stesso meccanismo di (a) colpirebbe in
+quel caso un puntatore del gestore invece della coppia sp/pc. Ipotesi. Avvio 7:
+in più la memoria era quasi finita (heap 194 MiB, in uso 2919 MiB contro ~2200
+degli altri a 150–190 s; Vulkan 1369/1499): il limite rigido a 384 MB non ha
+fermato la crescita, ma con un solo avvio e senza record la causa della morte
+resta aperta.
+
+#### C. T10 esteso e misura degli stack (da eseguire)
+
+- **T10** (switch-smoke, `probes.cpp`): prima della scrittura che va in fault
+  ogni thread carica valori unici per thread e giro in x0–x30, sp, nzcv,
+  fpcr, fpsr, tpidr_el0 e v0–v31; dopo la ripresa li salva tutti e li
+  confronta. Il pc di ripresa si controlla con il record per thread
+  dell'ingresso (`rex_nx_thread_faults`): un fault per scrittura, preso e
+  ripreso all'indirizzo della `str`. Fase A: 3 thread × 10.000 fault, uno
+  per core (come prima). Fase B: gli stessi 3 thread per 20 s con un thread
+  che tiene occupati q0–q31 e li controlla e uno che scende di 1500 frame e
+  li verifica al ritorno; i due girano una priorità sopra, dormono 30–40 µs
+  fra un giro e l'altro e cambiano core, quindi interrompono i thread dei
+  fault anche dentro il gestore. Riga finale per tipo di registro; un thread
+  ripreso con pc/sp sbagliati non fa cadere lo smoke (un gestore lo conta e
+  lo rimanda alla fine del giro). Il T10 di prima non vedeva il problema per
+  costruzione: un thread per core e nessuna interruzione, e i registri
+  controllati erano solo x0–x28 e q8–q15, quelli che il kernel salva comunque.
+- **Stack** (switch-game, `nx_threads.cpp`, cvar `nx_stack_watch`, accesa):
+  wrap di `threadCreate`, `threadClose` e `pthread_create`, quindi tutti i
+  thread, anche quelli di Mesa e del runtime Rust di NAK (passano da
+  `pthread_create` di newlib, che usa `threadCreate`). Lo stack di ogni thread
+  nuovo (`[stack_mirror, stack_mirror + stack_sz)`, sopra la cima libnx mette
+  TLS e reent) viene riempito con un motivo prima della partenza, quello del
+  thread principale sotto lo sp all'avvio; ogni minuto una riga per thread
+  `stack id … 'nome': size … KiB, deepest use … KiB (…%)` (con `NEAR FULL` dal
+  75 %, `FULL` se il motivo è sparito fino in fondo) e la routine di partenza
+  dei pthread (`start +0x…`, per addr2line), più una riga `stacks:`.
+
+Risultati: dal run 23.
+
+#### D. Correzioni (da verificare)
+
+1. **Vettori salvati per primi** (`__libnx_exception_entry`): q0–q31, fpsr e
+   fpcr salvati in `rex_nx_vector_save` con le primissime istruzioni (prima
+   del controllo dell'annidamento e del cambio di stack) e ripristinati come
+   ultime, subito prima di `svc 0x28`.
+2. **sp e pc del frame scritti con registri generali.** Effetto collaterale
+   del codice di D.2: GCC ha smesso da sé di copiare la coppia con `q31`; la
+   scrittura è stata resa esplicita (due store a 64 bit da registri generali)
+   perché non dipenda dal compilatore. Non si spegne a runtime, come D.1: il
+   run 23 prova **D.1 e D.2 insieme**; se il crash sparisce, per separarle
+   servirà una build con una delle due tolta.
+3. **Record del crash** (`CrashFinalHandler`, installato per ultimo dopo
+   Runtime::Setup, quindi solo per i fault che nessuno gestisce): nome e id
+   del thread, intervallo del suo stack, se sp e x29 ci stanno dentro,
+   l'ultimo fault ripreso su quel thread (sp, pc e lr con cui era arrivato,
+   sp e pc con cui è stato ripreso, indirizzo del frame, ms trascorsi),
+   i contatori di processo e un'istantanea di tutti gli altri thread (nome,
+   pc, lr, sp, routine di partenza: ognuno messo in pausa un attimo, letto e
+   ripreso prima di scrivere), poi `fsync`, prima di `svcBreak`.
+4. **Record di ripresa** (`rex/platform/nx_fault_record.h`): a ogni fault
+   gestito l'ingresso confronta sp e pc della copia con quelli arrivati dal
+   kernel (contatore `context changed`, variante a2) e rilegge il frame dopo
+   averlo scritto (contatore `frame wrong`, variante a1); battito: riga
+   `resume:`. Tutto con load/store a 64 bit volatili, mai in registri
+   vettoriali. `nx_resume_guard` (spenta) rimetterebbe nel frame sp e pc di
+   ingresso: pronta per un run successivo, non usata nel 23.
+5. **Stack dei thread:** nessun overflow nei log, quindi nessuna modifica
+   (D.3 non applicata; non esiste ancora una cvar `nx_host_stack_kib`).
+
+Disassemblato della build nuova: l'ingresso comincia con `stp q0, q1, [x2]`
+dopo due istruzioni (`adrp`/`add`) e finisce con `ldp q30, q31` e `svc 0x28`;
+nel dispatcher tutte le scritture a `[frame, #80]`/`[frame, #88]` sono `str x`.
+
+### Run 23: frequenza del crash con le correzioni (`out/console-runs/run23-build/`)
+
+NRO e ELF del commit indicato in `COMMIT`. `switch-game.nro` è la build
+Vulkan; `switch-smoke.nro` è lo smoke con il T10 esteso. Console in
+portatile, **niente Horizon OC, sys-clk né altri strumenti**, cache spenta.
+
+**Prima i cinque avvii del gioco, tutti uguali** (`game.toml` della cartella,
+copiato come `sdmc:/switch/theft4/game.toml`; è la base del run 22 con le due
+cvar nuove scritte esplicitamente):
+
+```toml
+nx_gpu = "vulkan"
+nx_apm_clock = false
+nx_nv_wrap = false
+nx_fault_count_handler = false
+nx_crash_log_after_setup = false
+nx_vk_mesa_messenger = false
+nx_mount_cache = false
+nx_stack_watch = true
+nx_resume_guard = false
+```
+
+Per ogni avvio 1–5:
+
+1. Prima dell'avvio cancellare da `sdmc:/switch/theft4/` i file
+   `game.log`, `game-crash.log` e `game-exit.log` dell'avvio precedente
+   (dopo averli copiati).
+2. Avviare `switch-game.nro`, non toccare niente fino a "Starting a new
+   game", poi lasciare girare **5 minuti** o fino al crash.
+3. Se dopo 5 minuti non è crashato: + (uscita del modo D).
+4. Annotare: ora di avvio, cosa mostrava lo schermo alla fine (errore del
+   sistema, immagine ferma, ritorno al menu), e il tempo approssimativo del
+   crash.
+5. Copiare `game.log`, `game-crash.log`, `game-exit.log` e `game.toml` in
+   `out/console-runs/run23/N/`.
+
+Confronto: run 22, avvii 1, 2, 5 e 6 (base): 4 su 4 morti fra 122 e 195 s.
+Con 5 avvii: 0 crash in 5 avvii sarebbe un segnale forte (con la frequenza di
+prima la probabilità di 5 avvii puliti di fila è bassa); 1–2 crash in 5 un
+miglioramento possibile ma non dimostrato; 4–5 nessun effetto. In ogni caso
+il record nuovo dice dove si rompe la coppia sp/pc.
+
+**Poi lo smoke, una volta** (`switch-smoke.nro` con lo `smoke.toml` della
+cartella, che spegne il passo Vulkan e il benchmark della SD): avviarlo,
+aspettare la riga `PROBES DONE` (T10 dura circa 30 s più la fase A), poi +;
+copiare `smoke.log` in `out/console-runs/run23/smoke/`.
+
+Cosa guardare:
+
+- `game-crash.log`: il blocco `=== unhandled fault: thread, stack, last
+  resume ===`. `this fault's pc is the resumed pc: yes` con `resumed with pc`
+  sbagliato = il frame era già sbagliato quando l'abbiamo scritto;
+  `resumed with` giusto ma il pc del fault diverso = la coppia è cambiata
+  dopo la nostra scrittura (kernel o frame sovrascritto); i contatori
+  `context changed` / `frame read back wrong` dicono quale delle due varianti.
+- `game.log`: righe `resume:` (ogni 10 s) e `stack id …`/`stacks:` (ogni
+  minuto).
+- `smoke.log`: `T10 phase A RESULT` / `T10 phase B RESULT discrepancies by
+  register …`: qualunque valore diverso da 0 dice quale registro il percorso
+  delle eccezioni non restituisce.

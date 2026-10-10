@@ -86,7 +86,7 @@ gioco (round 9, "Statistics without atomic read-modify-writes").
 
 | Percorso | Contatori | Scrittori | Stato |
 |---|---|---|---|
-| Fault (`exception_handler_switch.cpp`) | `rex_nx_exception_depth` | il thread nel gestore (il kernel serializza, T10: mai 2 insieme) | intero semplice, `ldr`/`str` in asm: ok |
+| Fault (`exception_handler_switch.cpp`) | `rex_nx_exception_depth`; dal run 23 `RexNxResumeStats` e il record per thread `RexNxThreadFaults` | il thread nel gestore (il kernel serializza, T10: mai 2 insieme); il record è `thread_local` | interi semplici, load/store volatili a 64 bit (mai in registri vettoriali, §14): ok |
 | Commit memoria (`memory_switch.cpp`) | `GuestArenaStats` (blocchi, pagine, map/unmap, tick) | sotto `g_arena.mutex` | interi semplici: ok. `g_trace_sink` è un puntatore atomico letto per chiamata (load, non RMW) |
 | Stub (`export_stubs.cpp`) | `ExportStubSite::hits` | **ogni** thread che chiama lo stub | multi-scrittore: `fetch_add` relaxed giustificato |
 | Export implementate (nuovo, run 12) | `ExportCallSite::calls` | ogni thread | multi-scrittore: `fetch_add` relaxed |
@@ -95,8 +95,8 @@ gioco (round 9, "Statistics without atomic read-modify-writes").
 
 Quindi **sui percorsi caldi non c'erano contatori atomici a thread singolo**.
 Le uniche RMW a thread singolo sono nel codice di prova di switch-smoke (T10:
-`bad_reads[i]` e `slots[i].calls`, ciascuno di un solo thread): codice di
-misura, lasciato.
+`slots[i].calls`, di un solo thread; i conteggi per registro sono interi
+semplici del thread stesso): codice di misura, lasciato.
 
 ## 5. `static_assert(std::has_unique_object_representations_v<T>)` su chiavi hash e confronti byte per byte
 
@@ -258,3 +258,36 @@ non la assolve.
 (`applied …` o `NOT applied`) e da che valore partiva la GPU; il battito
 scrive i clock ogni 10 s. Un run con `CPU ABOVE 1020 MHz` o `GPU UNDER 100
 MHz` non vale per le misure (§12).
+
+## 14. Il percorso delle eccezioni restituisce ogni registro; T10 li controlla tutti (run 23)
+
+Un fault ripreso deve tornare con **tutti** i registri come prima: x0–x30,
+sp, pc, nzcv, fpcr, fpsr, tpidr_el0 e v0–v31. Nel run 22 ogni crash presto era
+la ripresa di un fault di write-watch con x0–x30 giusti e **solo sp e pc
+sbagliati**: la coppia che il dispatcher copiava nel frame del kernel con un
+solo registro vettoriale (`q31`). Il T10 di prima controllava x0–x28 e
+q8–q15, cioè proprio i registri che il kernel salva in ogni caso, e girava con
+un thread per core senza interruzioni: non poteva vederlo.
+
+Regole:
+
+- **Nel percorso delle eccezioni nessun valore da cui dipende la ripresa passa
+  per un registro vettoriale.** Un thread interrotto mentre tiene la claim può
+  tornare con q0–q7 e q16–q31 vecchi (masseffect-nx, platform-notes). sp e pc
+  del frame si scrivono con due store a 64 bit da registri generali (volatili,
+  così il compilatore non li fonde in una `str q`); i record di ripresa idem.
+  Dopo ogni modifica al gestore si controlla nel disassemblato che le scritture
+  a `[frame, #0x50]` e `[frame, #0x58]` siano `str x`.
+- L'ingresso salva q0–q31, fpsr e fpcr **con le prime istruzioni** e li
+  ripristina **per ultimi**, subito prima di `svc 0x28`.
+- **T10 copre** (switch-smoke, `probes.cpp`): x0–x30 (x29 porta l'indirizzo
+  della scrittura), sp (punta all'area dei risultati), nzcv, fpcr (bit 22–25),
+  fpsr (flag cumulativi e QC), tpidr_el0, v0–v31 (metà bassa con l'etichetta
+  del thread, metà alta il complemento), e il pc: un fault per scrittura,
+  preso e ripreso all'indirizzo della `str` (record per thread
+  `rex_nx_thread_faults`). Fase A senza disturbo, fase B per 20 s con un
+  thread vettoriale e uno a chiamate profonde a priorità più alta che
+  interrompono i thread dei fault anche dentro il gestore. Esito per tipo di
+  registro; deve essere 0 ovunque.
+- Una prova sul percorso delle eccezioni che non interrompe mai il thread nel
+  gestore non prova la ripresa: la fase B è obbligatoria.
