@@ -5,8 +5,10 @@ This branch (`switch-port`) ports the Theft4 runtime to the Nintendo Switch as
 directly. There is no emulator in between, and the ahead-of-time recompiled
 game code is meant to run on the Switch's ARM64 cores like it does on iOS.
 
-**No game files are included in this repository. The game does not run on
-Switch yet.** To use this project you need your own legally obtained copy of
+**No game files are included in this repository. The game is not playable on
+Switch yet** (October 2026: it reaches gameplay with ReXGlue's emulated GPU on
+Vulkan at about 0.4 frames per second, see
+[06 §27](docs/switch-port/06-game-boot-plan.md)). To use this project you need your own legally obtained copy of
 Grand Theft Auto IV for Xbox 360. Nothing here downloads, contains or
 reconstructs game data, keys or console firmware.
 
@@ -22,7 +24,7 @@ Italian.
 | Guest memory | Design A: one address-space reservation, no aliased views, guest→host translation through a 256-entry table, 2 MiB blocks committed on demand. See [03](docs/switch-port/03-memory.md). The permission bug found in console run 4 is fixed and waits for the next run |
 | Threads | Core masks honoured, processor count from the process core mask, Xbox 360 CPUs mapped to cores 0–2 with core 3 kept for host workers, clean exit (timer thread stopped). See [04](docs/switch-port/04-threads-exit.md) |
 | Exceptions / MMIO | libnx exception handler wired to the runtime's handlers. Unrecognised MMIO in the 0x7F window has a proposed fix that is not implemented yet ([03 §12](docs/switch-port/03-memory.md)) |
-| Graphics, audio, input, game boot | Not started on Switch |
+| Game boot | European base executable boots to gameplay (console run 20): null audio, the Switch controller as the 360 pad, ReXGlue's Vulkan backend on NVK at ~0.4 FPS |
 
 ## Building
 
@@ -81,6 +83,20 @@ own game payload in `tools/local_game_payload/`. That directory is ignored by
 git and must never be committed. The port has not been validated through
 these presets yet.
 
+## Testing on the console
+
+- **No external overclocking** (sys-clk, overlays, any tool that changes the
+  clocks) during test runs. The game NRO requests Horizon's standard handheld
+  configuration itself (GPU 460.8 MHz, memory 1331.2 MHz, CPU 1020 MHz, cvar
+  `nx_apm_clock`) and logs the clocks it reads back every 10 s. An external
+  tool changes them behind the log's back: the measurements stop meaning
+  anything, and the CPU boost mode drops the GPU to 76.8 MHz. Run 20's longest
+  session crashed right after such a change.
+- The utility-drive cache (`cache:`, `cache1:`) is off by default
+  (`nx_mount_cache = false`): on the Switch it copies ~1 GB from the SD to the
+  same SD, and the two run-20 sessions that used it crashed. Keep it off until
+  that crash is explained.
+
 ## Documents
 
 - [01 – First build](docs/switch-port/01-first-build.md): toolchain, SDK configuration for GCC/Switch, first compile.
@@ -97,6 +113,7 @@ these presets yet.
 - **[Theft4](https://github.com/KoreanSeats1/Theft4)**: the project this is a fork of (GTA IV AOT recompilation for iOS/iPadOS).
 - **[LibertyRecomp](https://github.com/OZORDI/LibertyRecomp)**: the recompilation and runtime work Theft4 is built on.
 - **[ReXGlue SDK](https://github.com/rexglue/rexglue-sdk)**: the Xbox 360 recompilation SDK and runtime (derived from Xenia) that this port targets.
+- **sa2-nx / nfsmw-nx shared SDK** (BSD-3-Clause, Copyright (c) 2026 Tom Clay): the stack-sampling profiler (`tools/switch-game/nx_profiler.cpp`) and the apm clock request (`tools/switch-game/nx_clocks.cpp`) follow its `switch_perf.cpp` and `switch_apm.cpp`.
 - **devkitPro / libnx** and **Atmosphère** (whose open kernel source explains Horizon's behaviour in the memory notes).
 
 Grand Theft Auto IV is a trademark of Take-Two Interactive / Rockstar Games.

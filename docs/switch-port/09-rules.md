@@ -223,3 +223,20 @@ d'uscita, le terminazioni, lo stop e i fault scrivono il buffer subito. La
 modalità durevole resta con `nx_log_durable = true` per la diagnosi dei crash.
 Lo stesso vale per `thread_local` (su devkitA64 è una chiamata a
 `__aarch64_read_tp`): fuori dai cicli caldi.
+
+## 12. Nei test: niente overclock esterni; cache spenta (run 20)
+
+**Nessuno strumento esterno che cambi i clock** (sys-clk, overlay, modalità
+boost) durante un run di prova. Motivi: il log non può distinguere un effetto
+del nostro codice da uno del clock; la modalità boost della CPU porta la GPU a
+76,8 MHz; il run 20 non leggeva i clock e il crash dell'avvio 3 è arrivato
+subito dopo un overclock di cui non si conoscono strumento e valori. Dal run 21
+switch-game chiede da sé la configurazione standard in portatile
+(`nx_apm_clock`, GPU 460,8 MHz) e ogni battito scrive i clock letti; una riga
+con GPU sotto 100 MHz o CPU sopra 1020 MHz vuol dire che qualcuno li ha
+cambiati e il run non vale per le misure.
+
+**Cache spenta** (`nx_mount_cache = false`, default dal run 21) finché il
+crash degli avvii 1 e 2 del run 20 non è spiegato (06 §27 A.2). Per provarla
+si accende in un avvio dedicato, con le cartelle `cache` e `cache1` cancellate
+prima, così i file lasciati dai run precedenti non entrano nella prova.

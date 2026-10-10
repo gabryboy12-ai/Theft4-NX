@@ -594,6 +594,16 @@ Decisa dopo 08 (nfsmw-nx) e 10 (UnleashedRecomp-NX).
 
 ### a) Primi fotogrammi con la grafica imitata di ReXGlue su NVK
 
+**Raggiunta il 2026-10-10 (run 20, avvio 3, §27):** `nx_gpu = "vulkan"`,
+`nx_mount_cache = false`, tracciamento delle export acceso, GPU al clock di
+sistema (non letto; probabilmente 307,2 MHz in portatile). Logo, schermate di
+caricamento, "Starting a new game", il video "The Cousins Bellic" e la partita
+con i comandi che rispondono; 812 s senza crash fino a un overclock esterno.
+Misurato: **0,4 FPS in partita** (2,5 s per fotogramma, 5.300–6.800 draw per
+fotogramma), ~98 µs di CPU per draw nel processore dei comandi, che è fermo
+tre quarti del tempo; heap 2984 MiB in uso, Vulkan 1395 di 1482 MiB. Cosa
+serve per (b): §27 F.
+
 La grafica di ReXGlue (plugin `xenos`: emulazione del command processor, EDRAM
 imitata, traduzione degli shader durante il gioco) su NVK, **solo per
 verificare che la logica del gioco giri** fino ai menu e in partita.
@@ -2233,3 +2243,284 @@ Non c'è altro: disco europeo, nessuna TU, nessun disco USA.
 - **Battito:** `export rates` (le 20 export al secondo con i chiamanti),
   `KeDelayExecutionThread since start`, `tracing on/OFF`, `cpu` della UI
   (attesa sotto il 5 %).
+
+## 27. Run 20: il gioco entra in partita con Vulkan (0,4 FPS); crash con la cache; strumenti del run 21 (2026-10-10)
+
+`out/console-runs/run20/`, NRO di `run20-build` (commit `716936b`, Vulkan).
+Tre avvii, file con suffisso 1, 2, 3; `frames/` è dell'avvio 3 (l'unico con
+il fotogramma a 240 s; ogni avvio sovrascrive i PPM).
+
+### A.1 I tre avvii
+
+| | Avvio 1 | Avvio 2 | Avvio 3 |
+|---|---|---|---|
+| File letto | `game.toml` (found, loaded); `switch-game.toml` not found | uguale | uguale |
+| `nx_gpu` | vulkan | vulkan | vulkan |
+| `nx_trace_exports` | true (default) | **false** | true (default) |
+| `nx_mount_cache` | true (default) | true (default) | **false** |
+| `nx_vk_dump_frames` | true | true | true |
+| Durata (ultimo battito) | 150 s (fault subito dopo) | 130 s | 812 s (righe fino a 824 s) |
+| Fine | `[stderr] [rex] Unhandled Switch access violation` pc = far = `0x6ac97ff4`, esr `0x82000005` (instruction abort, lettura) | nessuna riga: il log si ferma fra due `[AsyncIO] complete` | nessuna riga: ultime righe = tasti delle levette a 819–824 s |
+| `TERMINATION` / `std::terminate` | no | no | no |
+| VkResult ≠ VK_SUCCESS | nessuno (submit 0, present 0) | nessuno | nessuno |
+| Pool guest | 266 blocchi, picco 266 di 384 | 266/384 | 266/384 |
+| Heap newlib (arena / in uso) | 2207 / 2203 MiB | 2212 / 2203 MiB | **3018 / 2984 MiB** |
+| Memoria Vulkan (heap 0, uso / budget) | 700 / 1315 MiB | 700 / 1315 MiB | **1395 / 1482 MiB** |
+| Processo (svcGetInfo) | 3185 / 3189 MiB | uguale | uguale (sempre: libnx prende tutto l'heap all'avvio) |
+| Errori nvmap | nessun dato (non contati nel run 20) | – | – |
+| Scritture su file | 12 (11 all'avvio, 1 a ~120 s) | 12 | 22 (tutte all'avvio) |
+| Fault in `game-crash.log` | 358 | 315 | 2282 |
+
+**I 2955 "unhandled access violation" di `game-crash.log` non sono crash.**
+Sono i fault del write-watch del backend Vulkan sulla memoria guest
+(scritture del gioco e di `copy_and_swap` dell'I/O su pagine sorvegliate,
+indirizzo `0xbf…` della memoria fisica guest), gestiti dal gestore MMIO: il
+nostro `CrashLogHandler` era installato **prima** di Runtime::Setup, quindi
+prima del gestore MMIO, e registrava ogni fault (con un `fsync` sulla SD
+ciascuno) prima che il gestore vero lo prendesse. Con la GPU nulla non
+c'erano pagine sorvegliate, per questo non si era mai visto. Corretto (D).
+
+**Avvio 1: il fault vero.** Ultimo record completo: pc = far = `0x6ac97ff4`
+(fuori dal modulo, non mappato), **sp = `0x6ac97f5d`** (non allineato e quasi
+uguale al pc: registri corrotti, non un puntatore sbagliato del gioco),
+lr = base + `0x23cd534` = `sub_829B2AB0` subito dopo la chiamata a
+`sub_829A0E58` (`gta4_recomp.76.cpp:21868`), cioè una funzione che fa
+anch'essa fault di write-watch (31 dei record sono in `sub_829A0E58`). Dopo, un
+altro record si interrompe dopo l'intestazione: il processo si è fermato
+mentre un secondo thread scriveva il suo fault, come succede quando il primo
+arriva a `svcBreak` e il kernel sospende il processo per il report.
+
+### A.2 Perché 1 e 2 crashano e 3 no
+
+**Memoria esaurita: no, per gli avvii 1 e 2.** Nei dati: la copia nella cache
+non è mai partita (12 scritture in tutto, una sola dopo l'avvio), l'heap è a
+2203 MiB su un massimo di circa 3100 (stima: il heap del processo meno codice
+e bss; il run 21 la misura), Vulkan a 700 MiB su 1315 di budget, nessun
+VK_ERROR. L'unico gradino è +50 MiB a 120–130 s, uguale nei due avvii.
+
+**Quello che distingue 1 e 2 da 3 è la cache con i file dei run precedenti.**
+Con la cache montata il gioco apre in lettura le copie lasciate dai run 18–19
+(`cache:\anim.img` #508, `cache1:\props_mp.img`, `level_1.img`, … 50 file) e
+le usa al posto di `game:`. A ~120 s ("Starting a new game", in tutti e due
+gli avvii) riapre `cache:\anim.img` con disposition 5 (**sovrascrive, cioè
+tronca a zero**) per ricopiarlo, mentre l'handle #508 sullo stesso file è
+ancora aperto e lo streaming ci legge. I due crash arrivano 10–30 s dopo,
+nello stesso punto del gioco. Il run 19 (GPU nulla) non è arrivato a questo
+punto con la cache già piena, quindi non lo smentisce. Ipotesi, **da
+verificare** nel run 21: con la cache montata ma le cartelle `cache` e
+`cache1` svuotate prima dell'avvio, il crash non dovrebbe ripetersi; se si
+ripete, la cache in sé (troncamento di un file aperto) è il problema.
+
+**Seconda causa possibile, nota da masseffect-nx** (`docs/performance-history.md`
+§1): quando un thread è dentro il gestore delle eccezioni utente e viene
+interrotto, Horizon salva solo metà dei registri vettoriali; masseffect-nx ha
+misurato il 3,6 % delle letture emulate con registri corrotti. Il nostro
+ingresso salva e ripristina q0–q31 da sé, quindi la finestra è solo fra
+l'ingresso e i salvataggi; ma il run 20 restava nel gestore per un `fsync`
+a ogni fault (2955 volte), allungando di molto ogni passaggio. Un sp non
+allineato nel fault dell'avvio 1 è compatibile con registri corrotti. La
+correzione di D toglie l'`fsync` dai fault gestiti; il run 21 conta i fault
+per finestra.
+
+### A.3 Perché Atmosphère non ha scritto un report
+
+- Avvio 1: il nostro percorso è arrivato fino a `rex_nx_unhandled_break`
+  (riga su stderr scritta per intero, record completo, processo poi sospeso a
+  metà del record di un altro thread): il report di creport dovrebbe esistere.
+  **Da controllare** `sdmc:/atmosphere/crash_reports/` (e `fatal_reports/`)
+  con l'ora 17:36–17:37; il run 11 il report l'aveva prodotto, ma non era
+  stato copiato nella cartella del run, quindi "nessun report" finora vuol
+  dire "nessun file copiato", non "nessun file scritto".
+- Avvii 2 e 3: **nessun fault non gestito, nessuna terminazione**: il processo
+  non è passato né dal gestore dei fault né da exit/abort. Restano: chiuso dal
+  sistema (errore di un servizio, per esempio della GPU), un fault dentro il
+  gestore stesso (scrive una riga solo su stderr, che con la console chiusa
+  non si vede e può perdersi), o un blocco seguito dalla chiusura con HOME.
+  **Serve sapere cosa mostrava lo schermo** (errore del sistema, ritorno al
+  menu, immagine ferma) e se c'è un file in `crash_reports/`.
+- Run 21: ogni uscita (exit, _exit, abort, svcExitProcess, std::terminate),
+  ogni fault non gestito e ogni VK_ERROR di memoria o dispositivo scrive
+  subito in `game-crash.log` tempo, memoria del processo, heap libero e le
+  righe dell'ultimo battito (D).
+
+### A.4 Il crash dell'avvio 3
+
+In partita, non all'uscita: le ultime righe sono movimenti delle levette a
+819–824 s, nessun + (nessun passo in `game-exit3.log`, vuoto). Il run 20 **non
+legge i clock**: dal log non si può dire quando c'è stato l'overclock né a
+quali valori. L'unico indizio: il thread id 18 (motore audio, carico costante)
+resta a 75–76 % fino all'ultimo battito (812 s); con la CPU più veloce
+scenderebbe. Quindi l'overclock è dopo 812 s o non ha toccato la CPU; il crash
+segue entro ~12 s. Non distinguibile da un crash indipendente, ma due fatti
+pesano: 800 s di partita senza crash prima dell'overclock, e la memoria
+**quasi piena** (heap 2984 MiB in uso su ~3100, Vulkan 1395 di 1482 MiB),
+ferma da 520 s. Dal run 21 il battito legge CPU, GPU e memoria (C) e il heap
+libero (D).
+
+### A.5 Fotogrammi
+
+| Tempo | Riga del log (avvii 1 / 2 / 3) | PPM (avvio 3) |
+|---|---|---|
+| 20 s | 9,65 % / 0,00 % / 9,65 % non neri | logo "grand theft auto IV" su nero |
+| 40 s | 92,9 % | schermata di caricamento disegnata (Niko e due uomini fra le casse) |
+| 60 s | 100 % | schermata di caricamento disegnata (quattro uomini al tavolo dei domino) |
+| 120 s | 0,36 % / 0,00 % / 0,36 % | nero con "STARTING A NEW GAME..." in basso a destra |
+| 240 s | – / – / 0,00 % (max 5) | nero (inizio del video "The Cousins Bellic") |
+
+Tutti e cinque sono schermate note del gioco, a 1280×720, cattura 76–668 ms.
+**La fase (a) della strategia grafica (§11) è raggiunta:** logica del gioco
+fino alla partita con la grafica imitata di ReXGlue su NVK.
+
+### B. Dove va il tempo (avvio 3, Vulkan, cache spenta)
+
+| Fase | Present/s | Draw per fotogramma | CPU guest / host | Thread più carichi |
+|---|---|---|---|---|
+| 10 s (logo) | 2,2 | 848 | 68 % / 65 % | GPU Commands 64 % (creazione delle pipeline) |
+| 20–180 s (caricamento) | 1,4–4,8 | 147–176 | 13–142 % / 13–35 % | id 18 fino all'80 %, id 6 fino al 60 % |
+| 190–290 s (video) | 0–0,3 | – | 160–186 % / 22–50 % | id 6 98 %, id 21 90–98 % (decodifica del video) |
+| 300–520 s (partita) | 0,3–0,5 | 4.350–5.900 | 200–213 % / 21–34 % | id 6 **96 %**, id 18 77 %, id 19 19–34 % |
+| 530–812 s (partita) | **0,4** (2,5 s per fotogramma) | 5.300–6.800 | 103–122 % / 36–43 % | id 18 76 %, id 19 22–36 %, GPU Commands 20–25 %, XMA 15–17 % |
+
+Misure, non deduzioni:
+
+- **GPU Commands** (il processore dei comandi di ReXGlue) usa 20–25 % di un
+  core per ~22.500 draw ogni 10 s: **~98 µs di CPU per draw**. Con 5.600 draw
+  per fotogramma sono 0,55 s di CPU per fotogramma: da solo permetterebbe
+  ~1,8 FPS, non 0,4. Il thread passa tre quarti del tempo fermo.
+- Dopo 530 s **nessun thread è saturo** (totale ~1,4 core su 3) e il thread
+  principale è dentro `NtWaitForSingleObjectEx` da 3,2 s nell'istantanea a
+  780 s, come quasi tutti i thread del gioco: aspettano il fotogramma.
+- Il thread id 18 (motore audio, `8216xxxx`) è al 76 %: il callback audio
+  costa **6,7 ms di media** (17,8 max) per 149 callback/s, contro 1,0 ms al
+  menu; 21 risincronizzazioni. Spin lock: 155.000/s di
+  `KeRaiseIrql/KeAcquireSpinLock…`, 1,86 milioni di `KeDelayExecutionThread`
+  da zero dall'avvio (yield). Mangia un core, ma non è il limite del
+  fotogramma.
+- Tracciamento delle export (avvio 1 contro 2, 60–110 s): id 18 8,3–8,5 %
+  contro 7,8–8,0 %, id 19 4,0–4,2 % contro 3,6–4,0 %: ~0,5 punti, coerente con
+  la stima del run 19 (~5 % del thread).
+
+**Conclusione per ora: il limite non è la CPU né l'I/O** (letture 0–0,3 MB/s
+in partita); il processore dei comandi e il gioco aspettano. Resta da sapere
+se aspettano la GPU (esecuzione dei draw, i 42 resolve per fotogramma) o una
+sincronizzazione: il run 20 non misura né le attese sulle fence né il clock
+della GPU. Per questo il run 21 aggiunge:
+
+- riga `vulkan time in the window`: tempo dentro `vkQueueSubmit`,
+  `vkQueuePresentKHR` e le attese bloccanti sulle fence del processore dei
+  comandi (totale e per fotogramma), CPU per draw del thread GPU Commands,
+  draw per fotogramma, chiamate nvdrv di NVK (kickoff, attese e interrogazioni
+  delle fence, nvmap vivi);
+- riga `clocks`: CPU, GPU e memoria lette con clkrst, modo e configurazione
+  apm (C);
+- profiler a campioni (cvar `nx_profile`, spento): un campione al
+  millisecondo di un thread occupato (pausa, contesto, ripresa), istogramma
+  dei pc ogni 10 s come base+offset, `tools/switch-game/where.py --profile`
+  li somma per funzione. Forma minima di `switch_perf.cpp` dell'SDK condiviso
+  (sa2-nx, BSD-3-Clause, crediti nel file).
+
+**Confronto con nfsmw-nx e Mass Effect** (stesso percorso: GPU imitata di
+ReXGlue su NVK). nfsmw-nx: ~80 µs di CPU per draw, 2,0–2,2 FPS in gara, e
+togliere tutto il lavoro della GPU non cambiava niente (limite CPU); ogni
+resolve costava 3–4 ms di GPU. masseffect-nx: menu a 1,5–2,5 FPS, la partita
+mai raggiunta con la GPU imitata; il primo renderer nativo stava a 2003 ms per
+fotogramma, **100 % fermo su `vkWaitForFences`**, con la GPU a 307,2 MHz
+(configurazione mai chiesta) ed early-Z spento. **Coerenti:** i nostri 98 µs
+per draw (nfsmw 80) e 0,4 FPS con 2,5–7 volte i draw di una gara di nfsmw.
+**Diverso da nfsmw:** il nostro processore dei comandi non è saturo, quindi
+il limite è più a valle, come nel primo Mass Effect nativo; la prima cosa da
+escludere è la GPU a 307,2 MHz (il run 20 non chiedeva 460,8). **Anomalo
+nostro:** il callback audio a 6,7 ms (un core) e i fault del write-watch
+passati per un `fsync` ciascuno (corretto).
+
+### C. Clock (da verificare)
+
+`tools/switch-game/nx_clocks.cpp` (da `switch_apm.cpp` di nfsmw-nx,
+BSD-3-Clause): con `nx_apm_clock = true` (default) in portatile si chiede la
+configurazione standard `0x92220008` (GPU 460,8 MHz, memoria 1331,2, CPU
+1020), su un thread all'avvio e di nuovo a ogni passaggio dock/portatile (hook
+`OnPerformanceMode`); in dock non si chiede niente (GPU 768). Il risultato si
+controlla per 1,5 s: se la memoria si muove si torna alla configurazione di
+prima, se la GPU non arriva a 460,8 la riga dice `NOT applied`. Niente modalità
+boost, niente overclock. Ogni battito scrive `clocks: CPU … GPU … memory …;
+handheld/docked, apm configuration 0x…`, con un avviso se la GPU è sotto
+100 MHz (la modalità boost della CPU porta la GPU a 76,8 MHz) o la CPU sopra
+1020 MHz (boost o overclock esterno).
+
+**Nei test non si usano overclock esterni** (sys-clk, overlay e simili): il
+log non saprebbe distinguere un effetto del nostro codice da uno del clock,
+la modalità boost della CPU abbassa la GPU a 76,8 MHz, e il crash dell'avvio 3
+è arrivato subito dopo uno di questi cambi (09 §12).
+
+### D. Memoria e arresti senza traccia (da verificare)
+
+- Battito: `host memory: … free: X MiB in the arena + Y MiB sbrk can add =
+  Z MiB headroom`: quello che newlib può ancora dare (Vulkan e pool guest
+  vengono da lì; il valore del processo è sempre 3185/3189); sotto
+  `nx_mem_warn_mib` (64) una riga `memory LOW` scritta subito. Picco del pool
+  guest nella riga `heartbeat`, memoria Vulkan nella riga `vulkan:`, nvmap vivi
+  e creati nella riga `vulkan time`.
+- `faults: N access violations since start, M in the window`.
+- `CrashLogHandler` installato di nuovo dopo Runtime::Setup: scrive solo i
+  fault che nessuno gestisce.
+- In `game-crash.log`, a ogni fault non gestito, a ogni uscita (exit, _exit,
+  _Exit, abort, svcExitProcess, std::terminate) e a ogni
+  `VK_ERROR_OUT_OF_HOST_MEMORY` / `OUT_OF_DEVICE_MEMORY` / `DEVICE_LOST`:
+  uptime, memoria del processo, heap libero all'ultimo battito e le righe
+  clock/memoria/Vulkan dell'ultimo battito, con `fsync`. Dopo un VK_ERROR di
+  memoria il gioco continua; `DEVICE_LOST` finisce già in `rex::FatalError`
+  (abort, quindi terminazione registrata).
+- Messenger `VK_EXT_debug_utils` solo per gli errori, sempre creato su Switch
+  (`vulkan_instance.cpp`): Mesa in release dà i suoi errori (`nvkmd-switch:
+  channel N lost`, allocazioni fallite) solo lì; finiscono in `game.log`.
+
+### E. Cache
+
+- Con la cache il gioco fa quello che fa una 360 con il disco rigido: copia i
+  file di streaming (`.img`) da `game:` a `cache:`/`cache1:` (~1 GB, run 19)
+  e poi legge le copie. Senza (`nx_mount_cache = false`) i `NtCreateFile`
+  su `cache:\valid.txt` falliscono (`C000000F`) e il gioco legge tutto da
+  `game:`, come una 360 senza disco rigido: avvio 3, 22 scritture (tutte
+  all'avvio, 0,0 MB), nessuna copia.
+- Tempi: identici fino a 120 s (logo a 20 s, schermate a 40 e 60 s, "Starting
+  a new game" a 120 s in tutti e tre gli avvii); l'avvio 3 è poi entrato in
+  partita (~300 s), gli altri due no.
+- **Default ora `false`** (cvar, commit `a9727e1`). Cosa si perde: niente
+  sulla Switch. Sulla 360 la copia serve perché il disco rigido è più veloce
+  del DVD; qui sorgente e cache sono la stessa SD (86 MB/s sequenziale), e la
+  copia occupava la SD per tutta la sessione con scritture da 14 ms l'una. Il secondo avvio non è più rapido nemmeno con la cache (06 §26
+  B.4: il sequenziatore si spegne a 60 s in tutti e due gli avvii).
+
+### F. Fase (b) della strategia grafica
+
+Cosa serve per il tracciamento del D3D dell'eseguibile europeo (§11 b):
+gli indirizzi delle funzioni D3D (creazione di shader, texture, render target,
+`SetRenderState`, draw, `Resolve`, `Present`) ritrovati dalla v8 USA con il
+confronto di sequenze (§26 C.1), un wrapper per funzione con una riga per
+chiamata, e la conferma "chiamata vista con argomenti plausibili".
+
+**Passo piccolo e sicuro da fare adesso: il censimento** (sa2-nx,
+`docs/api-renderer.md` §1): contare per ogni funzione del range D3D le
+chiamate e i word PM4 scritti da ogni chiamata esterna (puntatore di
+scrittura del device prima e dopo). Non sostituisce niente, dice quante
+funzioni D3D il gioco chiama davvero e quante scrivono PM4 per fotogramma
+(SA2: 109 chiamate, 14 scrivono PM4). Trappola nota: il "range D3D" contiene
+anche XAPI (heap, attese); va trovato il vero inizio. Non fatto in questo
+giro.
+
+### Run 21: cosa guardare (`out/console-runs/run21-build/`)
+
+NRO del commit `a9727e1`: `switch-game.nro` (GPU nulla) e
+`switch-game-vulkan.nro` (da rinominare `switch-game.nro`). **Nessun
+overclock esterno**, console in portatile salvo l'avvio 4.
+
+| Avvio | `game.toml` | Scopo |
+|---|---|---|
+| 1 | `nx_gpu = "vulkan"` | prestazioni con la GPU a 460,8 (riga `clocks: … applied 0x92220008`), righe `vulkan time` e `host memory … headroom`, fino alla partita, poi + |
+| 2 | `nx_gpu = "vulkan"`, `nx_profile = true` | dove va il tempo: profilo in partita (≥ 2 minuti), poi + |
+| 3 | `nx_gpu = "vulkan"`, `nx_mount_cache = true`, **cartelle `cache` e `cache1` cancellate prima** | il crash di 1–2 dipende dai file vecchi nella cache? |
+| 4 | come 1, con un passaggio in dock e ritorno in portatile durante la partita | `clocks (dock/handheld change)` |
+
+Dopo ogni avvio copiare `game.log`, `game-crash.log`, `game-exit.log`, il
+`.toml`, `frames/` e **il contenuto di `sdmc:/atmosphere/crash_reports/`**, e
+annotare cosa mostrava lo schermo alla fine.
