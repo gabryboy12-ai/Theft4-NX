@@ -165,6 +165,17 @@ REXCVAR_DEFINE_BOOL(nx_profile, false, "Switch",
                     "Sample the busy threads once a millisecond (pause, read pc/lr/frames, "
                     "resume) and log a histogram every 10 s; where.py --profile sums it per "
                     "function (nx_profiler.h). Costs a few % of one core");
+REXCVAR_DEFINE_BOOL(nx_nv_wrap, true, "Switch",
+                    "Count NVK's nvdrv calls (fence waits and queries, kickoffs, nvmaps) in the "
+                    "link-time wrappers (run 21). false: the wrappers only call the real "
+                    "function (run 22 bisection; the wrap itself stays, it is link-time)");
+REXCVAR_DEFINE_BOOL(nx_fault_count_handler, true, "Switch",
+                    "Install the handler that counts every access violation (run 21). false for "
+                    "the run 22 bisection: the 'faults:' line then stays at 0");
+REXCVAR_DEFINE_BOOL(nx_crash_log_after_setup, true, "Switch",
+                    "Install the crash-log handler again after Runtime::Setup, so it sees only "
+                    "unhandled faults (run 21). false: as in run 20, it stays first and writes "
+                    "(with an fsync) every handled write-watch fault too");
 REXCVAR_DEFINE_INT32(nx_mem_warn_mib, 64, "Switch",
                      "Heartbeat: an ERROR line, written at once, when the host heap can give "
                      "less than this many MiB (free in newlib's arena plus what sbrk can "
@@ -1300,6 +1311,7 @@ struct NvCalls {
   std::atomic<int64_t> map_bytes{0};                       // live nvmap bytes
 };
 NvCalls g_nv;
+std::atomic<bool> g_nv_count{true};  // cvar nx_nv_wrap: false = pure passthrough
 
 // VkResults that mean memory or the device: a crash-log entry (D.2).
 const char* VkFailureName(int32_t result) {
@@ -1323,6 +1335,9 @@ Result __real_nvMapCreate(NvMap* m, void* cpu_addr, u32 size, u32 align, NvKind 
 void __real_nvMapClose(NvMap* m);
 
 Result __wrap_nvFenceWait(NvFence* f, s32 timeout_us) {
+  if (!g_nv_count.load(std::memory_order_relaxed)) {
+    return __real_nvFenceWait(f, timeout_us);
+  }
   if (timeout_us == 0) {
     g_nv.fence_queries.fetch_add(1, std::memory_order_relaxed);
     return __real_nvFenceWait(f, timeout_us);
@@ -1335,20 +1350,23 @@ Result __wrap_nvFenceWait(NvFence* f, s32 timeout_us) {
   return rc;
 }
 Result __wrap_nvGpuChannelKickoff(NvGpuChannel* c) {
+  if (!g_nv_count.load(std::memory_order_relaxed)) {
+    return __real_nvGpuChannelKickoff(c);
+  }
   g_nv.kickoffs.fetch_add(1, std::memory_order_relaxed);
   return __real_nvGpuChannelKickoff(c);
 }
 Result __wrap_nvMapCreate(NvMap* m, void* cpu_addr, u32 size, u32 align, NvKind kind,
                           bool is_cpu_cacheable) {
   const Result rc = __real_nvMapCreate(m, cpu_addr, size, align, kind, is_cpu_cacheable);
-  if (R_SUCCEEDED(rc)) {
+  if (R_SUCCEEDED(rc) && g_nv_count.load(std::memory_order_relaxed)) {
     g_nv.maps_created.fetch_add(1, std::memory_order_relaxed);
     g_nv.map_bytes.fetch_add(int64_t(size), std::memory_order_relaxed);
   }
   return rc;
 }
 void __wrap_nvMapClose(NvMap* m) {
-  if (m && m->has_init) {
+  if (m && m->has_init && g_nv_count.load(std::memory_order_relaxed)) {
     g_nv.maps_closed.fetch_add(1, std::memory_order_relaxed);
     g_nv.map_bytes.fetch_sub(int64_t(m->size), std::memory_order_relaxed);
   }
@@ -2000,8 +2018,19 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
 
   StartLogging();
   CaptureTerminations();
-  rex::arch::ExceptionHandler::Install(FaultCountHandler, nullptr);
+  if (REXCVAR_GET(nx_fault_count_handler)) {
+    rex::arch::ExceptionHandler::Install(FaultCountHandler, nullptr);
+  }
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
+#if THEFT4_NX_VULKAN
+  g_nv_count.store(REXCVAR_GET(nx_nv_wrap), std::memory_order_relaxed);
+#endif
+  GAME_INFO("run 21 pieces: nx_apm_clock %d, nx_nv_wrap %d, nx_fault_count_handler %d, "
+            "nx_crash_log_after_setup %d, nx_profile %d, nx_vk_mesa_messenger (in the SDK) on "
+            "unless set false; nx_mount_cache %d",
+            int(REXCVAR_GET(nx_apm_clock)), int(REXCVAR_GET(nx_nv_wrap)),
+            int(REXCVAR_GET(nx_fault_count_handler)), int(REXCVAR_GET(nx_crash_log_after_setup)),
+            int(REXCVAR_GET(nx_profile)), int(REXCVAR_GET(nx_mount_cache)));
   theft4::nx_clocks::Start(REXCVAR_GET(nx_apm_clock), ClockLog);
   if (REXCVAR_GET(nx_profile)) {
     theft4::nx_profiler::Start(g_module_base, g_module_text_size, ProfileLog);
@@ -2139,8 +2168,10 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   LogArena("after Setup");
   // Setup installed the MMIO handler (and the write watch); the crash log goes
   // after it again, so that it sees only the faults nobody handled.
-  rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
-  rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
+  if (REXCVAR_GET(nx_crash_log_after_setup)) {
+    rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
+    rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
+  }
 #if THEFT4_NX_VULKAN
   if (g_vulkan_graphics) {
     // As ReXApp does: the window, then the presenter Setup made on this thread.

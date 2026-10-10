@@ -45,6 +45,13 @@ REXCVAR_DEFINE_BOOL(vulkan_moltenvk_synchronous_queue_submits, false, "UI/Vulkan
                     "Process Vulkan queue submissions synchronously in MoltenVK");
 #endif
 
+#if REX_PLATFORM_NX
+REXCVAR_DEFINE_BOOL(nx_vk_mesa_messenger, true, "Switch",
+                    "Create an error-only VK_EXT_debug_utils messenger so that Mesa's errors "
+                    "(NVK channel loss, failed allocations) reach the log (run 21); false for "
+                    "the run 22 bisection");
+#endif
+
 namespace rex {
 namespace ui {
 namespace vulkan {
@@ -547,7 +554,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   // allocation failures) only to a debug utils messenger: one for errors is
   // always created there (as plume does; switch-game run 21, D.2).
 #if REX_PLATFORM_NX
-  constexpr bool kNxErrorMessenger = true;
+  const bool kNxErrorMessenger = REXCVAR_GET(nx_vk_mesa_messenger);
 #else
   constexpr bool kNxErrorMessenger = false;
 #endif
