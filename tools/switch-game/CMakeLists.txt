@@ -60,7 +60,8 @@ add_custom_command(
     VERBATIM
 )
 
-add_executable(switch-game main.cpp nx_input.cpp "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
+add_executable(switch-game main.cpp nx_input.cpp nx_profiler.cpp
+    "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
     "${MISSING_IMPORTS_CPP}" ${GENERATED_SOURCES})
 target_compile_features(switch-game PRIVATE cxx_std_23)
 target_include_directories(switch-game PRIVATE
@@ -115,6 +116,10 @@ if(THEFT4_SWITCH_GAME_VULKAN)
     target_link_directories(switch-game PRIVATE "${DEVKITPRO}/portlibs/switch/lib")
     target_link_libraries(switch-game PRIVATE $<LINK_ONLY:rexgpu-xenos-nx>
         -Wl,--start-group vulkan expat zstd z nx -Wl,--end-group)
+    # Run 21: NVK's nvdrv calls go through main.cpp's counters first (fence
+    # waits and queries, kickoffs, nvmaps), as sa2-nx's switch_perf does.
+    target_link_options(switch-game PRIVATE
+        "-Wl,--wrap=nvFenceWait,--wrap=nvGpuChannelKickoff,--wrap=nvMapCreate,--wrap=nvMapClose")
 endif()
 # Every way out of the process goes through main.cpp's __wrap_* first, which
 # logs the code and the caller before the real function runs.

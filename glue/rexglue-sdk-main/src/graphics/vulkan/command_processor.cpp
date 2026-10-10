@@ -5652,9 +5652,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
     // order."
     const uint64_t theft4_wait_start_ns =
         theft4_gpu_timing_enabled_ ? Theft4GpuTimingNowNs() : 0;
+    const uint64_t nx_wait_start_ns = rex::graphics::NxGpuNowNs();
     VkResult wait_result =
         dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
                             submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    rex::graphics::NxGpuAddTime(rex::graphics::nx_gpu_counters().fence_wait_ns, nx_wait_start_ns);
+    rex::graphics::nx_gpu_counters().fence_waits.fetch_add(1, std::memory_order_relaxed);
     if (theft4_gpu_timing_enabled_) {
       theft4_gpu_timing_fence_wait_ns_ += Theft4GpuTimingNowNs() - theft4_wait_start_ns;
       theft4_gpu_timing_fences_waited_ += await_submission - submission_completed_;
@@ -6114,11 +6117,13 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     VkResult submit_result;
     const uint64_t theft4_submit_start_ns =
         theft4_gpu_timing_enabled_ ? Theft4GpuTimingNowNs() : 0;
+    const uint64_t nx_submit_start_ns = rex::graphics::NxGpuNowNs();
     {
       ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
     }
+    rex::graphics::NxGpuAddTime(rex::graphics::nx_gpu_counters().submit_ns, nx_submit_start_ns);
     if (rex::graphics::NxGpuCountSubmit(int32_t(submit_result))) {
       REXGPU_ERROR("vkQueueSubmit returned {}", int32_t(submit_result));
     }

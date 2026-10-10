@@ -2967,8 +2967,10 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
       gpu_flight::Record("present.submit-begin", uint64_t(uintptr_t(draw_command_buffer)),
                          current_paint_submission_index, tv_trace_provenance.submitted_frame,
                          swapchain_image_index, uint64_t(uintptr_t(fence_acqusition.fence())));
+      const uint64_t nx_submit_start_ns = rex::graphics::NxGpuNowNs();
       submit_result =
           dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence_acqusition.fence());
+      rex::graphics::NxGpuAddTime(rex::graphics::nx_gpu_counters().submit_ns, nx_submit_start_ns);
       gpu_flight::Record("present.submit-end", uint64_t(uintptr_t(draw_command_buffer)),
                          current_paint_submission_index, tv_trace_provenance.submitted_frame,
                          swapchain_image_index, uint64_t(uintptr_t(present_semaphore)),
@@ -3086,7 +3088,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   {
     const VulkanDevice::Queue::Acquisition queue_acquisition =
         vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
+    const uint64_t nx_present_start_ns = rex::graphics::NxGpuNowNs();
     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
+    rex::graphics::NxGpuAddTime(rex::graphics::nx_gpu_counters().present_ns, nx_present_start_ns);
   }
   if (rex::graphics::NxGpuCountPresent(int32_t(present_result))) {
     REXLOG_ERROR("VulkanPresenter: vkQueuePresentKHR returned {}", int32_t(present_result));

@@ -109,6 +109,7 @@
 #include "gta4_init.h"
 #include "nx_exit.h"
 #include "nx_input.h"
+#include "nx_profiler.h"
 
 #if THEFT4_NX_VULKAN
 #include <rex/graphics/nx_gpu_counters.h>
@@ -152,6 +153,10 @@ REXCVAR_DEFINE_BOOL(nx_mount_cache, true, "Switch",
                     "Mount cache: and cache1: on the SD (run 12). false: the game finds no "
                     "utility drive; to see whether it then skips copying ~2 GB into it (run 19: "
                     "the copy runs at 2 MB/s for the whole session, on every boot)");
+REXCVAR_DEFINE_BOOL(nx_profile, false, "Switch",
+                    "Sample the busy threads once a millisecond (pause, read pc/lr/frames, "
+                    "resume) and log a histogram every 10 s; where.py --profile sums it per "
+                    "function (nx_profiler.h). Costs a few % of one core");
 REXCVAR_DEFINE_STRING(nx_exit_mode, "D", "Switch",
                       "Exit at + (hold 1 s): D = file I/O gate closed and drained, null audio "
                       "stopped, every thread told to end and joined (2 s each), then exit(0); "
@@ -1008,9 +1013,14 @@ struct CpuRow {
   Handle handle = 0;
   uint32_t id = 0;  // XThread id; 0 = not an XThread
   const char* kind = "";
+  std::string name;
   u64 ticks = 0;
   double percent = 0;  // of one core over the window
 };
+
+// CPU of the GPU Commands thread (ReXGlue's command processor) over the last
+// window, in ns: the Vulkan line divides it by the draws (B.1).
+uint64_t g_cp_window_ns = 0;
 
 Handle g_main_thread_handle = 0;
 Handle g_resource_limit = 0;
@@ -1031,6 +1041,7 @@ void LogCpu(std::vector<std::pair<Handle, u64>>* last, u64 window_ticks) {
       r.handle = host->nx_kernel_handle();
       r.id = t->thread_id();
       r.kind = t->is_guest_thread() ? "guest" : "host";
+      r.name = t->thread_name();
       rows.push_back(r);
     }
   }
@@ -1056,8 +1067,26 @@ void LogCpu(std::vector<std::pair<Handle, u64>>* last, u64 window_ticks) {
     const u64 delta = r.ticks > before ? r.ticks - before : 0;
     r.percent = window_ticks ? 100.0 * double(delta) / double(window_ticks) : 0;
     (r.kind[0] == 'g' ? guest : r.kind[0] == 'h' ? host : other) += r.percent;
+    if (r.name.rfind("GPU Commands", 0) == 0) {
+      g_cp_window_ns = armTicksToNs(delta);
+    }
   }
   last->swap(now);
+  if (theft4::nx_profiler::Running()) {
+    // Run 21 (B.3): the threads above 3 % of a core are the ones sampled.
+    std::vector<theft4::nx_profiler::BusyThread> busy;
+    for (const CpuRow& r : rows) {
+      if (r.percent < 3.0 || r.kind[0] == 'l') continue;
+      theft4::nx_profiler::BusyThread b;
+      b.handle = r.handle;
+      b.id = r.id;
+      b.percent = r.percent;
+      std::snprintf(b.kind, sizeof(b.kind), "%s", r.kind);
+      std::snprintf(b.name, sizeof(b.name), "%s", r.name.empty() ? r.kind : r.name.c_str());
+      busy.push_back(b);
+    }
+    theft4::nx_profiler::SetBusyThreads(busy.data(), busy.size());
+  }
   std::sort(rows.begin(), rows.end(),
             [](const CpuRow& a, const CpuRow& b) { return a.percent > b.percent; });
   std::string top;
@@ -1144,11 +1173,73 @@ void LogDelayCounts() {
 // snapshot of the threads per stall (CheckVulkanStall).
 struct VulkanBeat {
   uint64_t presents = 0, draws = 0, submits = 0;
+  uint64_t submit_ns = 0, present_ns = 0, fence_waits = 0, fence_wait_ns = 0;
+  uint64_t nv_kickoffs = 0, nv_waits = 0, nv_wait_ns = 0, nv_queries = 0;
   uint64_t stall_presents = UINT64_MAX;
   u64 last_present_change = 0;
   bool stall_reported = false;
 };
 VulkanBeat g_vk_beat;
+
+// libnx's nvdrv calls made by NVK, counted through link-time wrappers
+// (-Wl,--wrap in CMakeLists.txt, Vulkan build only; as sa2-nx's switch_perf).
+struct NvCalls {
+  std::atomic<uint64_t> kickoffs{0};
+  std::atomic<uint64_t> fence_waits{0}, fence_wait_ns{0};  // nvFenceWait with a timeout
+  std::atomic<uint64_t> fence_queries{0};                  // nvFenceWait(…, 0)
+  std::atomic<uint64_t> maps_created{0}, maps_closed{0};
+  std::atomic<int64_t> map_bytes{0};                       // live nvmap bytes
+};
+NvCalls g_nv;
+
+
+}  // namespace
+
+#if THEFT4_NX_VULKAN
+// nvdrv calls of NVK (see NvCalls): count, time inside, nvmap bytes.
+extern "C" {
+Result __real_nvFenceWait(NvFence* f, s32 timeout_us);
+Result __real_nvGpuChannelKickoff(NvGpuChannel* c);
+Result __real_nvMapCreate(NvMap* m, void* cpu_addr, u32 size, u32 align, NvKind kind,
+                          bool is_cpu_cacheable);
+void __real_nvMapClose(NvMap* m);
+
+Result __wrap_nvFenceWait(NvFence* f, s32 timeout_us) {
+  if (timeout_us == 0) {
+    g_nv.fence_queries.fetch_add(1, std::memory_order_relaxed);
+    return __real_nvFenceWait(f, timeout_us);
+  }
+  const u64 start = armGetSystemTick();
+  const Result rc = __real_nvFenceWait(f, timeout_us);
+  g_nv.fence_wait_ns.fetch_add(armTicksToNs(armGetSystemTick() - start),
+                               std::memory_order_relaxed);
+  g_nv.fence_waits.fetch_add(1, std::memory_order_relaxed);
+  return rc;
+}
+Result __wrap_nvGpuChannelKickoff(NvGpuChannel* c) {
+  g_nv.kickoffs.fetch_add(1, std::memory_order_relaxed);
+  return __real_nvGpuChannelKickoff(c);
+}
+Result __wrap_nvMapCreate(NvMap* m, void* cpu_addr, u32 size, u32 align, NvKind kind,
+                          bool is_cpu_cacheable) {
+  const Result rc = __real_nvMapCreate(m, cpu_addr, size, align, kind, is_cpu_cacheable);
+  if (R_SUCCEEDED(rc)) {
+    g_nv.maps_created.fetch_add(1, std::memory_order_relaxed);
+    g_nv.map_bytes.fetch_add(int64_t(size), std::memory_order_relaxed);
+  }
+  return rc;
+}
+void __wrap_nvMapClose(NvMap* m) {
+  if (m && m->has_init) {
+    g_nv.maps_closed.fetch_add(1, std::memory_order_relaxed);
+    g_nv.map_bytes.fetch_sub(int64_t(m->size), std::memory_order_relaxed);
+  }
+  __real_nvMapClose(m);
+}
+}
+#endif
+
+namespace {
 
 void LogVulkan(double window_s) {
   if (!g_vulkan_graphics) {
@@ -1190,9 +1281,49 @@ void LogVulkan(double window_s) {
             c.last_submit_failure.load(std::memory_order_relaxed),
             c.present_failures.load(std::memory_order_relaxed),
             c.last_present_failure.load(std::memory_order_relaxed), heaps.c_str());
+  // Run 21 (B.1): where the command processor's and the presenter's time goes.
+  const uint64_t new_draws = draws - g_vk_beat.draws;
+  const uint64_t new_submits = submits - g_vk_beat.submits;
+  const uint64_t submit_ns = c.submit_ns.load(std::memory_order_relaxed);
+  const uint64_t present_ns = c.present_ns.load(std::memory_order_relaxed);
+  const uint64_t fence_waits = c.fence_waits.load(std::memory_order_relaxed);
+  const uint64_t fence_wait_ns = c.fence_wait_ns.load(std::memory_order_relaxed);
+  const uint64_t nv_kickoffs = g_nv.kickoffs.load(std::memory_order_relaxed);
+  const uint64_t nv_waits = g_nv.fence_waits.load(std::memory_order_relaxed);
+  const uint64_t nv_wait_ns = g_nv.fence_wait_ns.load(std::memory_order_relaxed);
+  const uint64_t nv_queries = g_nv.fence_queries.load(std::memory_order_relaxed);
+  const double ms = 1e-6;
+  GAME_INFO("vulkan time in the window: vkQueueSubmit %.2f ms per call, vkQueuePresentKHR %.2f "
+            "ms per present, %" PRIu64 " blocking fence waits of the command processor %.0f ms "
+            "(%.0f ms per frame); GPU Commands thread %.0f ms of CPU = %.0f us per draw, %.0f "
+            "draws per frame; nvdrv: %" PRIu64 " kickoffs, %" PRIu64 " fence waits %.0f ms, %" PRIu64
+            " fence queries, nvmaps %" PRIu64 " live (%" PRId64 " MiB), %" PRIu64 " created",
+            new_submits ? double(submit_ns - g_vk_beat.submit_ns) * ms / double(new_submits) : 0.0,
+            new_presents ? double(present_ns - g_vk_beat.present_ns) * ms / double(new_presents)
+                         : 0.0,
+            fence_waits - g_vk_beat.fence_waits, double(fence_wait_ns - g_vk_beat.fence_wait_ns) * ms,
+            new_presents ? double(fence_wait_ns - g_vk_beat.fence_wait_ns) * ms / double(new_presents)
+                         : 0.0,
+            double(g_cp_window_ns) * ms,
+            new_draws ? double(g_cp_window_ns) / 1000.0 / double(new_draws) : 0.0,
+            new_presents ? double(new_draws) / double(new_presents) : 0.0,
+            nv_kickoffs - g_vk_beat.nv_kickoffs, nv_waits - g_vk_beat.nv_waits,
+            double(nv_wait_ns - g_vk_beat.nv_wait_ns) * ms, nv_queries - g_vk_beat.nv_queries,
+            g_nv.maps_created.load(std::memory_order_relaxed) -
+                g_nv.maps_closed.load(std::memory_order_relaxed),
+            g_nv.map_bytes.load(std::memory_order_relaxed) >> 20,
+            g_nv.maps_created.load(std::memory_order_relaxed));
   g_vk_beat.presents = presents;
   g_vk_beat.draws = draws;
   g_vk_beat.submits = submits;
+  g_vk_beat.submit_ns = submit_ns;
+  g_vk_beat.present_ns = present_ns;
+  g_vk_beat.fence_waits = fence_waits;
+  g_vk_beat.fence_wait_ns = fence_wait_ns;
+  g_vk_beat.nv_kickoffs = nv_kickoffs;
+  g_vk_beat.nv_waits = nv_waits;
+  g_vk_beat.nv_wait_ns = nv_wait_ns;
+  g_vk_beat.nv_queries = nv_queries;
 }
 
 // Run 20 (A.2): at 20, 40, 60, 120 and 240 s the guest output the presenter
@@ -1686,6 +1817,8 @@ double MeasureThreadLocalNs(uint32_t iterations) {
   return iterations ? double(armTicksToNs(armGetSystemTick() - start)) / double(iterations) : 0.0;
 }
 
+void ProfileLog(const char* text) { GAME_INFO("%s", text); }
+
 [[noreturn]] void GameMain(int argc, char** argv) {
   rex::cvar::Init(argc, argv);
   consoleInit(nullptr);
@@ -1699,6 +1832,11 @@ double MeasureThreadLocalNs(uint32_t iterations) {
   StartLogging();
   CaptureTerminations();
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
+  if (REXCVAR_GET(nx_profile)) {
+    theft4::nx_profiler::Start(g_module_base, g_module_text_size, ProfileLog);
+    GAME_INFO("profile: %s (cvar nx_profile): busy threads sampled once a millisecond",
+              theft4::nx_profiler::Running() ? "on" : "the sampling thread did NOT start");
+  }
   // What the exit needs, made now while allocating is safe (ExitGame).
   g_exit_xthreads.reserve(kMaxExitThreads);
   if (!theft4::nx_exit::OpenStepLog(kExitStepPath)) {
