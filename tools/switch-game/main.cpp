@@ -150,10 +150,12 @@ REXCVAR_DEFINE_BOOL(nx_vk_dump_frames, false, "Switch",
                     "nx_gpu = vulkan: also write the guest output captured at 20, 40, 60, 120 "
                     "and 240 s as PPM files in sdmc:/switch/theft4/frames (the capture and its "
                     "pixel statistics are logged in any case)");
-REXCVAR_DEFINE_BOOL(nx_mount_cache, true, "Switch",
-                    "Mount cache: and cache1: on the SD (run 12). false: the game finds no "
-                    "utility drive; to see whether it then skips copying ~2 GB into it (run 19: "
-                    "the copy runs at 2 MB/s for the whole session, on every boot)");
+REXCVAR_DEFINE_BOOL(nx_mount_cache, false, "Switch",
+                    "Mount cache: and cache1: on the SD (run 12). Default false since run 21: "
+                    "the game then reads everything from game: as a 360 without a hard disk "
+                    "(run 20's third boot: no copy, same loading times, past the point where "
+                    "the two boots with the cache crashed). true: the game copies ~1 GB into "
+                    "the cache on every boot (run 19) and reuses what earlier runs left there");
 REXCVAR_DEFINE_BOOL(nx_apm_clock, true, "Switch",
                     "In handheld mode request Horizon's standard configuration 0x92220008 (GPU "
                     "460.8 MHz, memory 1331.2, CPU 1020) through apm, at start and on every "
