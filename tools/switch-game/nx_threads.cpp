@@ -271,6 +271,26 @@ bool FindById(uint64_t id, Info* out) {
   return false;
 }
 
+bool FindByHandle(uint32_t handle, Info* out) {
+  const int n = Count();
+  for (int i = 0; i < n; ++i) {
+    Entry& e = g_entries[i];
+    if (e.state.load(std::memory_order_acquire) != 1 || e.handle != handle) {
+      continue;
+    }
+    out->found = true;
+    out->handle = e.handle;
+    out->id = ThreadId(e);
+    out->stack_lo = e.lo;
+    out->stack_hi = e.hi;
+    out->start = e.start;
+    std::memcpy(out->name, e.name, sizeof(out->name));
+    out->name[sizeof(out->name) - 1] = 0;
+    return true;
+  }
+  return false;
+}
+
 void QueryBlock(uint64_t address, uint64_t* lo, uint64_t* hi) {
   *lo = *hi = 0;
   MemoryInfo mi{};

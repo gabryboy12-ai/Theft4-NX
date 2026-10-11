@@ -172,13 +172,10 @@ REXCVAR_DEFINE_BOOL(nx_nv_wrap, true, "Switch",
                     "Count NVK's nvdrv calls (fence waits and queries, kickoffs, nvmaps) in the "
                     "link-time wrappers (run 21). false: the wrappers only call the real "
                     "function (run 22 bisection; the wrap itself stays, it is link-time)");
-REXCVAR_DEFINE_BOOL(nx_fault_count_handler, true, "Switch",
-                    "Install the handler that counts every access violation (run 21). false for "
-                    "the run 22 bisection: the 'faults:' line then stays at 0");
-REXCVAR_DEFINE_BOOL(nx_crash_log_after_setup, true, "Switch",
-                    "Install the crash-log handler again after Runtime::Setup, so it sees only "
-                    "unhandled faults (run 21). false: as in run 20, it stays first and writes "
-                    "(with an fsync) every handled write-watch fault too");
+// Run 24 (B): nx_fault_count_handler and nx_crash_log_after_setup are gone.
+// The handler order is fixed: the runtime's (MMIO, write watch) first, ours
+// after Runtime::Setup, so they see only the faults nobody handled; the
+// counts and the last faults come from the exception entry (memory only).
 REXCVAR_DEFINE_BOOL(nx_stack_watch, true, "Switch",
                     "Fill every new thread's stack with a pattern before it starts and log "
                     "each stack's size and deepest use every minute (run 23, C.3)");
@@ -502,21 +499,125 @@ void CrashWriteState(const char* why) {
   if (g_crash_fd >= 0) fsync(g_crash_fd);
 }
 
-// Run 21: every access violation, handled or not (the Vulkan backend's write
-// watch on guest memory takes one per watched page the guest writes). Installed
-// first; never claims the fault.
-std::atomic<uint64_t> g_faults{0};
-bool FaultCountHandler(rex::arch::Exception*, void*) {
-  g_faults.fetch_add(1, std::memory_order_relaxed);
-  return false;
+// One line of the fault ring: built in a stack buffer, then one write.
+struct CrashLine {
+  char text[320];
+  size_t n = 0;
+  void Str(const char* s) {
+    while (*s && n < sizeof(text) - 2) text[n++] = *s++;
+  }
+  void Hex(uint64_t value) {
+    static const char kHex[] = "0123456789abcdef";
+    Str("0x");
+    for (int shift = 60; shift >= 0 && n < sizeof(text) - 2; shift -= 4) {
+      text[n++] = kHex[(value >> shift) & 0xF];
+    }
+  }
+  void Dec(uint64_t value) {
+    char digits[24];
+    int d = 0;
+    do {
+      digits[d++] = char('0' + value % 10);
+      value /= 10;
+    } while (value && d < 20);
+    while (d && n < sizeof(text) - 2) text[n++] = digits[--d];
+  }
+  void End() {
+    text[n++] = '\n';
+    text[n] = 0;
+    CrashWrite(text);
+    n = 0;
+  }
+};
+
+// Run 24 (B): the exception entry's ring of the last faults (handled or not,
+// memory only until now), newest first, with each fault's thread and time.
+// Fault-safe; one writer at a time (a second one notes it and returns).
+void CrashWriteFaultRing() {
+  static std::atomic<bool> busy{false};
+  if (busy.exchange(true)) {
+    CrashWrite("fault ring: written by another thread at the same time\n");
+    return;
+  }
+  const RexNxFaultRing* ring = rex_nx_fault_ring();
+  const RexNxResumeStats* s = rex_nx_resume_stats();
+  const RexNxPhysicalFaultStats* p = rex_nx_physical_fault_stats();
+  const uint64_t count = ring->count;
+  CrashLine l;
+  l.Str("=== fault ring: ");
+  l.Dec(count);
+  l.Str(" faults since start (");
+  l.Dec(s->handled);
+  l.Str(" handled, ");
+  l.Dec(s->unhandled);
+  l.Str(" unhandled; physical: stale protection recovered ");
+  l.Dec(p->stale_recovered);
+  l.Str(", unexplained ");
+  l.Dec(p->unhandled);
+  l.Str("), last ");
+  l.Dec(count < REX_NX_FAULT_RING_SIZE ? count : REX_NX_FAULT_RING_SIZE);
+  l.Str(" newest first ===");
+  l.End();
+  for (uint64_t k = 0; k < REX_NX_FAULT_RING_SIZE && k < count; ++k) {
+    const RexNxFaultEntry& e = ring->entries[(count - 1 - k) % REX_NX_FAULT_RING_SIZE];
+    theft4::nx_threads::Info info;
+    theft4::nx_threads::FindByHandle(uint32_t(e.thread_handle), &info);
+    l.Str("#");
+    l.Dec(e.seq);
+    l.Str(" at ");
+    l.Dec(armTicksToNs(e.entry_tick - g_start_tick) / 1'000'000);
+    l.Str(" ms, ");
+    l.Str(e.handled ? "handled" : e.ticks ? "UNHANDLED" : "UNHANDLED or in progress");
+    l.Str(" in ");
+    l.Dec(armTicksToNs(e.ticks) / 1000);
+    l.Str(" us; thread ");
+    l.Str(!info.found ? "(not in the table)" : info.name[0] ? info.name : "?");
+    l.Str(" id ");
+    l.Dec(info.id);
+    l.Str(" handle ");
+    l.Hex(e.thread_handle);
+    l.Str(" type ");
+    l.Dec(e.type);
+    l.End();
+    l.Str("  pc - base ");
+    l.Hex(e.pc - g_module_base);
+    l.Str(" lr ");
+    l.Hex(e.lr);
+    l.Str(" sp ");
+    l.Hex(e.sp);
+    l.Str(" far ");
+    l.Hex(e.far);
+    l.Str(" esr ");
+    l.Hex(e.esr);
+    l.End();
+    l.Str("  resumed with pc - base ");
+    l.Hex(e.resume_pc - g_module_base);
+    l.Str(" sp ");
+    l.Hex(e.resume_sp);
+    l.End();
+    for (int i = 0; i < 31; i += 4) {
+      l.Str("  ");
+      for (int j = i; j < i + 4 && j < 31; ++j) {
+        l.Str("x");
+        l.Dec(uint64_t(j));
+        l.Str(j < 10 ? "  " : " ");
+        l.Hex(e.x[j]);
+        l.Str(" ");
+      }
+      l.End();
+    }
+  }
+  CrashWrite("=== end of the fault ring ===\n");
+  busy.store(false);
 }
 
 // Runs only for access violations no runtime handler claimed (MMIO, physical
-// write watch): installed before Runtime::Setup, it is installed again after
-// it so that it comes after the MMIO handler (run 20 logged every handled
-// write-watch fault here, 2282 in run 20's third boot, each with an fsync).
-// Records the fault; returning false leaves it unhandled, and the runtime ends
-// it in svcBreak (Atmosphere crash report).
+// write watch): installed after Runtime::Setup, so after the MMIO handler (run
+// 20 logged every handled write-watch fault here, 2282 in run 20's third
+// boot, each with an fsync; runs 22-23 did again with nx_crash_log_after_setup
+// = false, ~300 ms in the handler per fault). Records the fault and the fault
+// ring; returning false leaves it unhandled, and the runtime ends it in
+// svcBreak (Atmosphere crash report).
 bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
   const auto* tc = ex->thread_context();
   CrashWrite("=== unhandled access violation ===\n");
@@ -536,6 +637,8 @@ bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
     CrashHex(name, tc->x[i]);
   }
   CrashWriteState("state:");
+  CrashWriteFaultRing();
+  if (g_crash_fd >= 0) fsync(g_crash_fd);
   // The lines still in the buffer (nx_log_durable = false), if nobody holds it.
   if (g_log_buffered && g_log_file_mutex.try_lock()) {
     FlushBufferLocked(true);
@@ -662,6 +765,9 @@ void LogTermination(const char* what, int code, const void* caller) {
     char why[96];
     std::snprintf(why, sizeof(why), "=== termination: %s(%d) ===", what, code);
     CrashWriteState(why);
+    // Run 24 (B): the faults kept in memory until now.
+    CrashWriteFaultRing();
+    if (g_crash_fd >= 0) fsync(g_crash_fd);
   }
   if (t_in_termination_log || !g_logging_ready) {
     return;
@@ -725,6 +831,8 @@ void CrashWriteLibnxExit(const char* what, uint64_t value, const void* caller) {
   CrashHex("value      ", value);
   CrashHex("caller - base", reinterpret_cast<u64>(caller) - g_module_base);
   CrashWriteState("state:");
+  CrashWriteFaultRing();
+  if (g_crash_fd >= 0) fsync(g_crash_fd);
 }
 }  // namespace
 
@@ -1785,7 +1893,7 @@ struct Heartbeat {
   u64 last_line_tick = 0;
   u64 last_rates_s = 0;
   uint64_t last_log_lines = 0, last_log_writes = 0, last_log_ns = 0;
-  uint64_t last_faults = 0;
+  uint64_t last_faults = 0, last_fault_ticks = 0;
 
   void Tick() {
     const u64 now_tick = armGetSystemTick();
@@ -1806,14 +1914,30 @@ struct Heartbeat {
       const std::string clocks = theft4::nx_clocks::Describe(theft4::nx_clocks::Read());
       GAME_INFO("clocks: %s", clocks.c_str());
       {
-        const uint64_t faults = g_faults.load(std::memory_order_relaxed);
-        GAME_INFO("faults: %" PRIu64 " access violations since start, %" PRIu64
-                  " in the window (handled ones are the Vulkan write watch on guest memory)",
-                  faults, faults - last_faults);
-        last_faults = faults;
+        // Run 24 (B): counted by the exception entry (handled = the Vulkan
+        // write watch on guest memory), with the time in the dispatcher.
+        const RexNxResumeStats* r = rex_nx_resume_stats();
+        const RexNxPhysicalFaultStats* p = rex_nx_physical_fault_stats();
+        const uint64_t handled = r->handled;
+        const uint64_t ticks = r->handled_ticks;
+        const uint64_t window_faults = handled - last_faults;
+        const uint64_t window_ticks = ticks - last_fault_ticks;
+        const uint64_t max_ns = armTicksToNs(rex_nx_take_fault_ticks_max());
+        const double fault_window_s = double(seconds - last_line_s);
+        GAME_INFO("faults: %" PRIu64 " handled since start, %" PRIu64
+                  " in the window (%.1f/s); time per handled fault in the window: mean %" PRIu64
+                  " ns, max %" PRIu64 " ns; since start mean %" PRIu64
+                  " ns; unhandled %" PRIu64 "; physical: stale protection recovered %" PRIu64
+                  ", unexplained %" PRIu64,
+                  handled, window_faults,
+                  fault_window_s > 0 ? double(window_faults) / fault_window_s : 0.0,
+                  window_faults ? armTicksToNs(window_ticks) / window_faults : 0, max_ns,
+                  handled ? armTicksToNs(ticks) / handled : 0, r->unhandled, p->stale_recovered,
+                  p->unhandled);
+        last_faults = handled;
+        last_fault_ticks = ticks;
         // Run 23 (D.2): the faults the exception entry resumed, and whether
         // the sp / pc it resumed with ever differed from the ones it got.
-        const RexNxResumeStats* r = rex_nx_resume_stats();
         GAME_INFO("resume: %" PRIu64 " faults resumed since start; sp/pc changed in the handler "
                   "%" PRIu64 ", frame read back wrong %" PRIu64 ", repaired %" PRIu64
                   " (nx_resume_guard %d)",
@@ -2215,19 +2339,20 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
 
   StartLogging();
   CaptureTerminations();
-  if (REXCVAR_GET(nx_fault_count_handler)) {
-    rex::arch::ExceptionHandler::Install(FaultCountHandler, nullptr);
-  }
+  // The crash log for a fault before Runtime::Setup (no runtime handler yet);
+  // moved behind the runtime's handlers right after Setup (run 24, B: always,
+  // the guest code that takes handled faults starts only after Setup).
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
 #if THEFT4_NX_VULKAN
   g_nv_count.store(REXCVAR_GET(nx_nv_wrap), std::memory_order_relaxed);
 #endif
-  GAME_INFO("run 21 pieces: nx_apm_clock %d, nx_nv_wrap %d, nx_fault_count_handler %d, "
-            "nx_crash_log_after_setup %d, nx_profile %d, nx_vk_mesa_messenger (in the SDK) on "
-            "unless set false; nx_mount_cache %d",
+  GAME_INFO("run 21 pieces: nx_apm_clock %d, nx_nv_wrap %d, nx_profile %d, "
+            "nx_vk_mesa_messenger (in the SDK) on unless set false; nx_mount_cache %d",
             int(REXCVAR_GET(nx_apm_clock)), int(REXCVAR_GET(nx_nv_wrap)),
-            int(REXCVAR_GET(nx_fault_count_handler)), int(REXCVAR_GET(nx_crash_log_after_setup)),
             int(REXCVAR_GET(nx_profile)), int(REXCVAR_GET(nx_mount_cache)));
+  GAME_INFO("run 24 pieces: handled faults recorded in memory only (fault ring of %d, written "
+            "on an unhandled fault, abort or exit); runtime handlers first, ours after Setup",
+            REX_NX_FAULT_RING_SIZE);
   GAME_INFO("run 23 pieces: vector registers saved first in the exception entry (always), "
             "crash record with threads and stacks (always), nx_stack_watch %d, "
             "nx_resume_guard %d",
@@ -2367,12 +2492,11 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     WaitForPlusAndExit(&g_pad);
   }
   LogArena("after Setup");
-  // Setup installed the MMIO handler (and the write watch); the crash log goes
-  // after it again, so that it sees only the faults nobody handled.
-  if (REXCVAR_GET(nx_crash_log_after_setup)) {
-    rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
-    rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
-  }
+  // Setup installed the MMIO handler (and the write watch); the crash log and
+  // the crash record go after it, so that they see only the faults nobody
+  // handled (run 24, B: always, no cvar).
+  rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
+  rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
   // Run 23 (D.2): last of all, only for the faults nobody handled.
   rex::arch::ExceptionHandler::Install(CrashFinalHandler, nullptr);
 #if THEFT4_NX_VULKAN
