@@ -2138,6 +2138,14 @@ struct Heartbeat {
         theft4::nx_input::GetCounters(&published, &reads);
         GAME_INFO("input: %" PRIu64 " pad states published, %" PRIu64 " XamInputGetState reads",
                   published, reads);
+        // Run 26 (C): what the game read, when its buttons changed.
+        theft4::nx_input::DrainReads(
+            [](uint64_t tick, uint16_t buttons, uint16_t latched, uint32_t packet) {
+              GAME_INFO("input read at %.3f s: 360 buttons 0x%04x (latched 0x%04x), packet %u",
+                        double(armTicksToNs(tick - g_start_tick)) / 1e9, buttons, latched,
+                        packet);
+            },
+            [](uint32_t count) { GAME_INFO("input reads: %u changes lost (ring full)", count); });
       }
     }
     // Every minute the count of each export, as pc-eu-base does, so the two
