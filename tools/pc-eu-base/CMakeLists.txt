@@ -58,6 +58,20 @@ add_executable(theft4-eu-base WIN32
   ${GENERATED_SOURCES}
 )
 target_include_directories(theft4-eu-base PRIVATE "${THEFT4_GENERATED_DIR}")
+
+# Direct3D census (tools/d3d_census.py; 06 section 11, phase (b)): every call
+# into the XDK's Direct3D library from another translation unit counted
+# through lld-link -wrap:, dumped every 10 s to d3d-census.log. Off by default.
+option(THEFT4_D3D_CENSUS "Count the calls of every Direct3D library function" OFF)
+if(THEFT4_D3D_CENSUS)
+  set(THEFT4_D3D_CENSUS_DIR "${THEFT4_ROOT}/out/d3d-census")
+  if(NOT EXISTS "${THEFT4_D3D_CENSUS_DIR}/d3d_census_hooks.cpp")
+    message(FATAL_ERROR "Run python tools/d3d_census.py first")
+  endif()
+  target_sources(theft4-eu-base PRIVATE "${THEFT4_D3D_CENSUS_DIR}/d3d_census_hooks.cpp")
+  # clang++ expands the file itself: its lines are "-Xlinker -wrap:<symbol>".
+  target_link_options(theft4-eu-base PRIVATE "@${THEFT4_D3D_CENSUS_DIR}/d3d_census_wrap.rsp")
+endif()
 # rexui brings imgui and SDL3, which rex_app.cpp and the SDL main need.
 target_link_libraries(theft4-eu-base PRIVATE rex::runtime rexui)
 rexglue_configure_target(theft4-eu-base GPU_PLUGINS xenos)
