@@ -119,7 +119,88 @@ struct NxVectorSave {
 alignas(16) NxVectorSave rex_nx_vector_save;
 
 bool rex_nx_resume_guard = false;
+
+#if REX_NX_RESUME_TRAMPOLINE
+// Smoke only (run 25, C; the game's build does not define it): a handled fault
+// resumes at rex_nx_resume_trampoline_entry instead of the faulting pc, with
+// x18 = this thread's state. The trampoline reloads q0-q31, fpsr, fpcr, nzcv,
+// sp and x0-x30 from it in user mode, after svcReturnFromException, then
+// branches to the resume pc through x18: x18 comes back equal to the resume pc
+// (AArch64 has no branch through memory at EL0, so one register is spent).
+struct NxTrampolineState {
+  uint64_t x[31];     // 0x000
+  uint64_t sp;        // 0x0F8
+  uint64_t pc;        // 0x100
+  uint64_t nzcv;      // 0x108
+  uint64_t fpsr;      // 0x110
+  uint64_t fpcr;      // 0x118
+  uint8_t v[32][16];  // 0x120
+};
+bool rex_nx_resume_trampoline = false;
+uint64_t rex_nx_resume_trampoline_count = 0;
+void rex_nx_resume_trampoline_entry();
+#endif
 }
+
+#if REX_NX_RESUME_TRAMPOLINE
+static_assert(offsetof(NxTrampolineState, sp) == 0x0F8);
+static_assert(offsetof(NxTrampolineState, pc) == 0x100);
+static_assert(offsetof(NxTrampolineState, nzcv) == 0x108);
+static_assert(offsetof(NxTrampolineState, v) == 0x120);
+alignas(16) static thread_local NxTrampolineState t_nx_trampoline_state;
+
+asm(R"(
+    .section .text.rex_nx_resume_trampoline_entry, "ax", %progbits
+    .global rex_nx_resume_trampoline_entry
+    .type   rex_nx_resume_trampoline_entry, %function
+    .balign 16
+rex_nx_resume_trampoline_entry:
+    add     x0, x18, #0x120
+    ldp     q0,  q1,  [x0, #0x000]
+    ldp     q2,  q3,  [x0, #0x020]
+    ldp     q4,  q5,  [x0, #0x040]
+    ldp     q6,  q7,  [x0, #0x060]
+    ldp     q8,  q9,  [x0, #0x080]
+    ldp     q10, q11, [x0, #0x0a0]
+    ldp     q12, q13, [x0, #0x0c0]
+    ldp     q14, q15, [x0, #0x0e0]
+    ldp     q16, q17, [x0, #0x100]
+    ldp     q18, q19, [x0, #0x120]
+    ldp     q20, q21, [x0, #0x140]
+    ldp     q22, q23, [x0, #0x160]
+    ldp     q24, q25, [x0, #0x180]
+    ldp     q26, q27, [x0, #0x1a0]
+    ldp     q28, q29, [x0, #0x1c0]
+    ldp     q30, q31, [x0, #0x1e0]
+    ldr     x0, [x18, #0x110]
+    msr     fpsr, x0
+    ldr     x0, [x18, #0x118]
+    msr     fpcr, x0
+    ldr     x0, [x18, #0x0f8]
+    mov     sp, x0
+    ldr     x0, [x18, #0x108]
+    msr     nzcv, x0
+    ldp     x0,  x1,  [x18, #0x00]
+    ldp     x2,  x3,  [x18, #0x10]
+    ldp     x4,  x5,  [x18, #0x20]
+    ldp     x6,  x7,  [x18, #0x30]
+    ldp     x8,  x9,  [x18, #0x40]
+    ldp     x10, x11, [x18, #0x50]
+    ldp     x12, x13, [x18, #0x60]
+    ldp     x14, x15, [x18, #0x70]
+    ldp     x16, x17, [x18, #0x80]
+    ldp     x19, x20, [x18, #0x98]
+    ldp     x21, x22, [x18, #0xa8]
+    ldp     x23, x24, [x18, #0xb8]
+    ldp     x25, x26, [x18, #0xc8]
+    ldp     x27, x28, [x18, #0xd8]
+    ldp     x29, x30, [x18, #0xe8]
+    ldr     x18, [x18, #0x100]
+    br      x18
+    .size   rex_nx_resume_trampoline_entry, . - rex_nx_resume_trampoline_entry
+    .text
+)");
+#endif
 
 static_assert(offsetof(NxVectorSave, fpsr) == 0x200);
 static_assert(sizeof(NxVectorSave) == 0x210);
@@ -541,6 +622,26 @@ static void ResumeAtUnhandledBreak(uint32_t type, ThreadExceptionFrameA64* frame
   frame->elr_el1 = reinterpret_cast<u64>(&rex_nx_unhandled_break);
 }
 
+#if REX_NX_RESUME_TRAMPOLINE
+// The registers svcReturnFromException would load, into this thread's state;
+// then the return goes to the trampoline with x18 = the state.
+static void ResumeThroughTrampoline(ThreadExceptionFrameA64* frame, NxSavedRegisters* saved) {
+  NxTrampolineState& s = t_nx_trampoline_state;
+  for (uint32_t i = 0; i < 9; ++i) s.x[i] = frame->cpu_gprs[i];
+  for (uint32_t i = 9; i < 30; ++i) s.x[i] = saved->x9_to_x29[i - 9];
+  s.x[30] = frame->lr;
+  s.sp = Load64(frame->sp);
+  s.pc = Load64(frame->elr_el1);
+  s.nzcv = frame->pstate & 0xF0000000u;
+  s.fpsr = rex_nx_vector_save.fpsr;
+  s.fpcr = rex_nx_vector_save.fpcr;
+  std::memcpy(s.v, rex_nx_vector_save.v, sizeof(s.v));
+  saved->x9_to_x29[18 - 9] = reinterpret_cast<uint64_t>(&s);
+  Store64(frame->elr_el1, reinterpret_cast<uint64_t>(&rex_nx_resume_trampoline_entry));
+  Store64(rex_nx_resume_trampoline_count, Load64(rex_nx_resume_trampoline_count) + 1);
+}
+#endif
+
 // Called by __libnx_exception_entry with the user-exception claim held.
 // Returns true: a handled exception resumes with the (possibly modified)
 // registers, an unhandled one at rex_nx_unhandled_break (svcBreak, crash
@@ -621,6 +722,11 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
       Store64(rec.handled, Load64(rec.handled) + 1);
       Store64(rec.last_tick, armGetSystemTick());
       Store64(g_nx_resume_stats.handled, Load64(g_nx_resume_stats.handled) + 1);
+#if REX_NX_RESUME_TRAMPOLINE
+      if (rex_nx_resume_trampoline) {
+        ResumeThroughTrampoline(frame, saved);
+      }
+#endif
       FinishFaultEntry(entry, frame, true);
       return true;
     }
