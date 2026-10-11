@@ -604,6 +604,49 @@ fotogramma), ~98 µs di CPU per draw nel processore dei comandi, che è fermo
 tre quarti del tempo; heap 2984 MiB in uso, Vulkan 1395 di 1482 MiB. Cosa
 serve per (b): §27 F.
 
+**Fase (a) misurata (run 24, gruppo 2, avvii 1 e 4 in partita, finestre di
+10 s fra 220 e 320 s; build `c1b2858`, CPU 1020 / GPU 460,8 / memoria 1331,2
+MHz, portatile):**
+
+| Misura | Avvio 1 | Avvio 4 |
+|---|---|---|
+| present al secondo (FPS) | 0,5–0,7 | 0,5–0,7 |
+| ms per fotogramma | 1.300–1.700 | 1.300–1.700 |
+| draw per fotogramma | 4.500–6.800 (~5.000) | 3.900–6.900 (~5.000) |
+| `vkQueueSubmit` | 0,09–0,11 ms per chiamata, 25–32 ogni 10 s | uguale |
+| `vkQueuePresentKHR` | 0,19–0,23 ms | **785–1.317 ms** (l'attesa si sposta qui) |
+| attese bloccanti del command processor sulle fence | 7,7–9,2 s ogni 10 s (1,2–1,6 s per fotogramma) | 0–3 s (l'attesa è nel present) |
+| fence di nvdrv (`nvdrv: … fence waits`) | ~190 attese, 7,5–11 s ogni 10 s | uguale |
+| CPU del thread GPU Commands | 1,1–1,7 s ogni 10 s, 40–57 µs per draw (~200 ms per fotogramma) | 1,0–1,7 s, 38–53 µs per draw |
+| CPU dei thread guest | ~205–213 % (main ~95 %, id 18 ~73 %, id 19 ~35 %) | uguale |
+| CPU dei thread host | 26–35 % (GPU Commands ~13 %, XMA ~17 %) | uguale |
+| `pipelines:` | 0 create per finestra (333 pipeline e 207 shader dall'avvio) | 0 per finestra |
+
+**Dove va il tempo:** nella GPU. Di ~1,5 s per fotogramma, ~1,3 s sono
+attesa sulle fence della GPU (nel command processor o nel present) e ~0,2 s
+CPU del command processor (emulazione: decodifica PM4, stato, binding); niente
+compilazione di pipeline in partita, niente attese di I/O. Tempo di GPU per
+draw ≈ 1,3 s / 5.000 ≈ 260 µs. La CPU guest (~2,1 core) non è il limite:
+il gioco aspetta la GPU.
+
+**Confronti:**
+
+- run 20, avvio 3 (stesso percorso, GPU a 307,2 MHz): 0,4 FPS, 2,5 s per
+  fotogramma, ~98 µs di CPU per draw (con il tracciamento delle export e il
+  gestore lento). Da 0,4 a 0,6–0,7 FPS con la GPU 1,5 volte più veloce: il
+  fotogramma scala quasi come il clock della GPU, coerente con un limite di
+  GPU (il run 25 lo misura con il solo clock cambiato);
+- nfsmw-nx: ~2 FPS in gara con la stessa GPU emulata; GTA IV fa ~5.000 draw
+  per fotogramma.
+
+**Giocabile con ottimizzazioni locali?** No, secondo questi numeri (stima):
+anche in dock (GPU 768 MHz) si arriverebbe a ~1 FPS; per 20 FPS serve un
+fattore ~30 sul tempo di GPU per fotogramma, che nessuna ottimizzazione locale
+del backend emulato (risoluzione, cache, meno copie EDRAM) dà. La fase (a)
+resta lo strumento per far girare la logica; per qualcosa di giocabile serve
+il renderer nativo (fasi b e c). In più la memoria non regge oltre ~10 minuti
+(§27, run 24 A.3).
+
 La grafica di ReXGlue (plugin `xenos`: emulazione del command processor, EDRAM
 imitata, traduzione degli shader durante il gioco) su NVK, **solo per
 verificare che la logica del gioco giri** fino ai menu e in partita.
@@ -623,6 +666,90 @@ tradotti con il confronto di sequenze di istruzioni normalizzate già usato per 
 confini delle funzioni (06 §6), o con `tools/editions` di nfsmw-nx (08 §5). Un
 indirizzo tradotto è confermato quando il tracciamento mostra la chiamata con
 argomenti plausibili nel punto atteso del frame.
+
+**Fase (b): censimento sul PC (2026-10-11; strumento `tools/d3d_census.py`,
+build `tools/pc-eu-base` con `-DTHEFT4_D3D_CENSUS=ON`; nessuna modifica al
+build Switch).**
+
+*Indirizzi.* Sul disco non ci sono né l'immagine né il codice generato della
+v8 USA: il confronto di sequenze di istruzioni contro la v8 (o
+`d3d_match.py` di sa2-nx, che vuole le due immagini) non si può fare. Si è
+fatto il controllo più forte che i dati permettono: dei 78 indirizzi v8 della
+libreria che il repository nomina (23 nomi FLIRT di `gta4_config.toml`, 55
+funzioni agganciate o chiamate da `gta4-recomp/src` e `gta4_native`), **77
+cadono esattamente su un inizio di funzione dell'eseguibile europeo con la
+stessa traslazione, EU = v8 − 0x714A0**; il 78° (`0x82A355E0`, un hook
+online) è fuori dalla libreria. La seconda traslazione più votata raccoglie 21
+indirizzi su 78. Controlli di contenuto: EU `829D5338` (v8 `82A467D8`, Swap)
+chiama `VdSwap`; EU `829DF260` (v8 `D3D_VideoModeInitialize`) chiama
+`VdGetCurrentDisplayInformation`/`VdSetDisplayMode`; EU `829DEF28` (v8
+`82A503C8`) chiama `VdQueryVideoMode`. La libreria D3D è la stessa, spostata
+in blocco: ogni indirizzo v8 di `gta4_native` vale sull'europea meno 0x714A0.
+L'intervallo europeo della libreria (`829C7000`–`829E4600`, 560 funzioni) è
+una stima ai bordi.
+
+*Censimento.* Ogni funzione dell'intervallo è avvolta con `lld-link -wrap:`
+(senza ricompilare il codice generato): conta le chiamate che arrivano da
+un'altra unità di traduzione (quelle del gioco; non quelle interne a uno dei
+due file generati della libreria) e ogni 10 s scrive in `d3d-census.log` le
+chiamate della finestra e i fotogrammi (chiamate dello Swap). Esecuzione di
+480 s (`out/pc-runs/run25-census/`): 117 export come il run 17e, thread
+principale nel ciclo del gioco; ~50 fotogrammi al secondo nel caricamento,
+5,5–6,7 dopo i 50 s. Rapporto: `python tools/d3d_census.py --report
+out/d3d-census/d3d_functions.tsv <log> --last 10`.
+
+- **Funzioni D3D distinte chiamate davvero:** **304 su 560** in 480 s (267 già
+  nei primi 10 s); **177–178 per finestra di 10 s** a regime (ultime 10
+  finestre: 661 fotogrammi).
+- **Quante scrivono PM4 per fotogramma:** 40 funzioni della libreria
+  costruiscono nel codice un'intestazione PM4 tipo 3 (`lis 0xC0nn` + `ori`
+  con un opcode noto; limite inferiore: chi copia pacchetti da tabelle o li
+  compone a runtime non è contato); **24 di queste sono chiamate a ogni
+  fotogramma** a regime: i draw (`829CCEA8` 1.796/fotogramma, `829CC610` 873,
+  `829CCAC0` 136), `829DAB30` (`LOAD_ALU_CONSTANT`, 820), `829DAD20`
+  (`IM_LOAD`, 540), `829D9650` (`EVENT_WRITE`, 457), il dispatcher di
+  `SetRenderState` (`829C7A88`, 244), `829D0080` (61), `829D9850` (49), il
+  Resolve (`829CB7C8`, 42), `829DA9D0` (40), `829D77D8`
+  (`INDIRECT_BUFFER`, 17) e altre 12 sotto 10 per fotogramma (Swap 1). Le
+  etichette `SET_BIN_MASK_*` nei draw e nel dispatcher sono probabilmente
+  costanti diverse con la stessa forma (**ambigue**). I ~60 setter di stato
+  piccoli (100–1.100 chiamate per fotogramma, `829C7D68`…`829C8B10`) non
+  scrivono PM4: segnano lo stato sporco nel device (`829C7D68`: `ori … 64`
+  su device+16) e il flush (`829CA608`, StoreAllDirty) lo scrive.
+- **La funzione più chiamata** è `829CFE80` (v8 `82A41320`, subito dopo
+  `D3D_MemAllocAligned`): **80.570 chiamate per fotogramma**, 294 milioni in
+  480 s. È un'attesa attiva della GPU: legge un valore che la GPU scrive
+  (device+10896), aspetta con `db16cyc`, e dopo un timeout (5000) chiama
+  `829DEBD0` (mai chiamata sul PC). È dove giravano i lavoratori bloccati
+  dell'avvio 3 del run 24 (§27, A.4).
+- Seguono il caricamento delle costanti degli shader (`829D0CC8` 6.768 e
+  `829D0DB0` 3.239 per fotogramma), `829D9F88`/`829D9BE8`/`829D9E28` (3.353,
+  2.673, 2.617; ruolo **da trovare**), SetStreamSource (`829CA1F0`, 2.070),
+  SetIndices (`829CA310`, 1.794).
+
+*Hook per un renderer che legga il ring PM4 (fase c):*
+
+| Scopo | EU | v8 | Chiamate | Stato |
+|---|---|---|---|---|
+| creazione dei pixel shader (riconoscere il microcodice) | `829D1708` | `82A42BA8` | 646 in 480 s (caricamenti) | trovato |
+| creazione dei vertex shader | `829D1818` | `82A42CB8` | 642 | trovato |
+| draw indicizzato | `829CCEA8` | `82A3E348` | 1.796 per fotogramma | trovato |
+| draw indicizzato (secondo percorso) | `829CC610` | `82A3DAB0` | 873 | ambiguo (stesso nome nel renderer nativo; uno chiama forse l'altro) |
+| draw non indicizzato / UP | `829CCAC0`, `829CCAB0` | `82A3DF60`, `82A3DF50` | 136, 873 | trovato |
+| SetRenderTarget / SetDepthStencil (annotare i passi) | `829CAAB0`, `829CAE18` | `82A3BF50`, `82A3C2B8` | ~30 e ~26 per fotogramma | trovato |
+| Resolve | `829CB7C8` | `82A3CC68` | ~23 per fotogramma (42 a regime) | trovato |
+| Swap (fine fotogramma) | `829D5338` | `82A467D8` | 1 per fotogramma | trovato |
+| creazione di texture / superfici | `829D33B0`, `829D34D0` | `82A44850`, `82A44970` | 64 e 62 | trovato |
+| lock/unlock delle risorse (al posto dei fault del write-watch) | `829D8F28`, `829D9160` | `82A4A3C8`, `82A4A600` | – | trovato |
+| attesa attiva della GPU (da sostituire con un'attesa vera) | `829CFE80` | `82A41320` | 80.570 per fotogramma | trovato (ruolo dal listato) |
+| costanti degli shader | `829D0CC8`, `829D0DB0` | `82A42168`, `82A42250` | 6.768, 3.239 | trovato |
+| SetVertexShader / SetPixelShader / SetVertexDeclaration | `829D12C0`, `829D1008`, `829D1490` | `82A42760`, `82A424A8`, `82A42930` | 408, 439, 178 | ambiguo (ruolo dal corpo degli hook nativi) |
+| `829D9F88`, `829D9BE8`, `829D9E28` (caldi) | – | `82A4B428`, `82A4B088`, `82A4B2C8` | 2.600–3.400 | da trovare |
+| le altre ~57 funzioni che il piano attribuiva a `gta4_native` (~135) | – | – | – | da trovare: non sono nei sorgenti del repository |
+
+La tabella completa (560 righe: EU, v8, istruzioni, file generato, opcode PM4
+nel codice, nome) la rigenera `python tools/d3d_census.py` in
+`out/d3d-census/d3d_functions.tsv`.
 
 ### c) Nucleo del renderer nativo di nfsmw-nx
 
@@ -3235,3 +3362,258 @@ Tre o quattro punti bastano. Per la
 regola di 09 §13 ogni build della bisezione porta le correzioni note: cache
 spenta e, se il gruppo 2 le conferma, B e D.1/D.2 (cherry-pick sul commit
 provato; nei commit prima di `31542c8` l'ingresso va sostituito per intero).
+
+### Run 24: risultati (2026-10-11, `out/console-runs/run24/gruppo1/1`–`5` e `gruppo2/1`–`5`)
+
+Note dell'utente (dalla console): gruppo 1 mai in partita in 5 avvii; gruppo 2
+in partita negli avvii 1 e 4 (chiusi con +, comandi lentissimi), crash nel
+filmato negli avvii 2 e 5, blocco alla fine del filmato nel 3 (chiuso con +).
+Il gruppo 2 differisce dal run 23 anche per GPU a 460,8 MHz, contatori nvdrv e
+messenger di Mesa (default del build), non solo per il gestore dei fault.
+Nessuna copia del `game.toml` né di `frames/` nelle cartelle: la
+configurazione viene dalle righe `config`/`build:` dei log.
+
+#### A.1 Avvio per avvio
+
+| Gruppo/avvio | Build | Configurazione letta | Durata | Fase raggiunta | Fine | `=== fault ring` | `game-crash.log` |
+|---|---|---|---|---|---|---|---|
+| 1/1 | `716936b` (nessuna riga `build:`: binario del run 20) | `game.toml`: `nx_gpu = vulkan`, `nx_mount_cache = false`, `nx_vk_dump_frames = true` | ≥ 180 s (ultimo battito) | caricamento (3,4 present/s, Vulkan 700 MiB) | **nessuna traccia** | (non esiste in questo binario) | 483 record, uno per fault gestito (`fsync`) |
+| 1/2 | uguale | uguale | ≥ 202 s | inizio del filmato (present 0, Vulkan 1099) | nessuna traccia | – | 466 |
+| 1/3 | uguale | uguale | 101 s | caricamento | **fault non gestito**: PC non allineato (esr `0x8a000000`), pc = far = `0x6acbd03a`, sp = `0x6acbcfd3`, lr = +0x23cffb4 | – | 234, l'ultimo è il fault |
+| 1/4 | uguale | uguale | ≥ 270 s | filmato (Vulkan 1361) | nessuna traccia | – | 506 |
+| 1/5 | uguale | uguale | 306 s | filmato (Vulkan 1367) | **fault non gestito**: PC non allineato, pc = `0x6acbd30a`, sp = `0x6acbd1cc` | – | 603 |
+| 2/1 | `c1b2858` (riga `build: commit c1b2858, Vulkan NRO`) | `game.toml`; non di default solo `nx_gpu=vulkan` (+ `nx_mount_cache = false`, `nx_stack_watch = true`, uguali al default) | 389 s | **in partita** da ~200 s | exit (+, modo D, 12 passi) | sì (2 copie: `exit`, `_exit`) | ring: 2475 fault, 0 non gestiti |
+| 2/2 | uguale | uguale | 682 s | filmato | **`std::bad_alloc`** (thread GPU Commands) → `abort` → `_exit(1)`; memoria esaurita | sì | 2559 fault, 0 non gestiti |
+| 2/3 | uguale | uguale | 1681 s | filmato, poi fermo da ~600 s | **blocco** con uscita pulita (+ a 1674 s, `exit(0)`) | sì | 2485 fault |
+| 2/4 | uguale | uguale | 338 s | **in partita** da ~200 s | exit (+) | sì | 1952 fault |
+| 2/5 | uguale | uguale | 587 s | filmato | **`std::bad_alloc`** (thread GPU Commands) → `abort` → `_exit(1)` | sì | 2408 fault |
+
+Gruppo 1: nessuna riga `TERMINATION`, `game-exit.log` vuoto; le due morti con
+record hanno la forma del run 22 ("sp/pc sbagliati": sp fuori da ogni stack,
+pc = far non allineato), che il binario del run 20 non ha D.1/D.2 per
+evitare; le altre tre sono "senza record" come tutte quelle del run 23.
+Gruppo 2: **nessuna morte senza record** (run 23: 5 su 5); le due morti e il
+blocco vengono dalla memoria esaurita (A.3).
+
+#### A.2 Fault (gruppo 2)
+
+Righe `faults:` (finestre di 10 s):
+
+| Fase | Fault al secondo | Tempo medio | Massimo |
+|---|---|---|---|
+| caricamento (50–80 s) | 28,2–28,7 | 69–77 µs | 0,26–0,83 ms |
+| filmato | 0,1–7,7 | 32–155 µs | fino a 2,3 ms |
+| partita (avvii 1 e 4) | 4,4–7,5 | 50–106 µs | fino a 2,1 ms |
+| dall'avvio | – | 58–65 µs | – |
+
+Contro il run 23 (circa 3 fault al secondo, ~300 ms l'uno con il `fsync`) il
+gestore è ~4.000 volte più veloce; resta 4–5 volte lo smoke T9 (13,7 µs: il
+gestore del gioco passa dal write-watch del runtime e dalle sue callback).
+`unhandled 0`, `stale protection recovered 0`, `unexplained 0` in tutti.
+
+**Contatori delle varianti (a):** `sp/pc changed in the handler 0, frame read
+back wrong 0, repaired 0` a ogni battito di tutti e cinque (1.952–2.559 fault
+ripresi per avvio, 11.879 in tutto). **Fault ring:** 32 fault per avvio, tutti
+ripresi con pc e sp uguali a quelli del fault (`resumed with` = `pc - base` e
+`sp` in 64 righe su 64 per avvio); thread: guest (`XThread…`, F8000C7C o
+F8000CAC) e GPU Commands; pc nelle funzioni del gioco già note (+0x244e5b0,
++0x234404c, +0x1e80e34, +0x270a90c…). Negli avvii 2 e 5 l'ultimo fault è 48 s
+(2) e 0,15 s (5, thread GPU Commands) prima dell'`abort`: le morti non sono un
+fault.
+
+**Firma della perdita dei vettori (C.2):** nessun blocco `unhandled fault`
+nel gruppo 2, quindi nessun record con i registri vettoriali da guardare:
+**non verificabile** in questo run. Il ring registra x0–x30, non i vettori.
+
+#### A.3 Memoria
+
+| Avvio (gruppo 2) | 120 s | 210 s | 330 s | 450 s | Fine |
+|---|---|---|---|---|---|
+| 1 (in partita) | 439 MiB liberi / Vulkan 1149 / nvmap 171 | 152 / 1385 / 711 | 125 / 1399 / 818 | – | 121 / 1401 di 1482 / 831 (1483 MiB) a 380 s |
+| 4 (in partita) | 442 / 1149 / 173 | 168 / 1377 / 613 | 139 / 1391 / 725 | – | 139 a 330 s |
+| 2 (filmato) | 438 / 1151 / 167 | 188 / 1369 / 373 | 173 / 1369 / 420 | 67 / 1449 / 603 | **22** / 1464 di 1479 / 829 (1551 MiB) |
+| 3 (filmato, blocco) | 439 / 1151 / 171 | 194 / 1367 / 329 | 175 / 1369 / 389 | 63 / 1449 / 652 | **20** / 1467 di 1481 / 793 (1553 MiB) |
+| 5 (filmato) | 443 / 1147 / 168 | 191 / 1367 / 339 | 179 / 1367 / 381 | 62 / 1455 / 588 | **29** / 1462 di 1482 / 800 (1545 MiB) |
+
+(heap libero = arena + sbrk; Vulkan = heap 0 usato di budget; nvmap vivi e MiB.)
+
+- Tutti e cinque partono uguali (973 MiB liberi a 30 s, Vulkan 652) e
+  scendono a ~440 MiB a 120 s e ~200 MiB a 180 s, durante il caricamento del
+  filmato.
+- **Avvii 2, 3, 5:** `memory LOW` (63 MiB) a 430–480 s, poi a 580–630 s
+  `Failed to allocate 2097152 bytes of Vulkan upload buffer memory`,
+  `Failed to end a Vulkan command buffer`, `IssueDraw failed` (draw persi),
+  `XmaContext …: error (-12)` (ENOMEM nell'audio): 2 e 5 finiscono in
+  `std::bad_alloc` sul thread GPU Commands, il 3 si ferma (A.4). È la stessa
+  fine dell'avvio 2 del run 21 (20 MiB, draw persi da ~650 s) e del suo avvio
+  3 (`bad_alloc` a 567 s).
+- **Avvii 1 e 4** sono stati chiusi a 389 e 338 s con 121 e 139 MiB liberi, in
+  discesa di ~0,2 MiB/s in partita (avvio 1: 152 → 121 MiB fra 210 e 380 s):
+  a quel ritmo sarebbero arrivati a zero in ~10 minuti (stima, **da
+  verificare**): "in partita senza crash" vuol dire "chiuso prima".
+- **Correlazione:** sì, il crash nel filmato coincide con la memoria finita
+  (heap libero 20–29 MiB, Vulkan al budget). Nel run 23 le morti avevano
+  164–925 MiB liberi: un'altra cosa (senza record, non memoria).
+- **Cache delle texture:** non si può attribuire la crescita a lei. Il log
+  non conta la memoria delle texture; il backend crea un buffer pieno da 512
+  MB per la memoria condivisa (riga `Vulkan sparse binding is not used for
+  shared memory emulation … a full 512 MB buffer`: NVK non dà lo sparse), che
+  con le altre risorse fa i 652 MiB di partenza; la crescita successiva (fino
+  a ~1460 MiB) può essere texture (limite duro 768 MB, morbido 384 con 30 s di
+  vita), render target e pool di upload da 2 MiB. Nel run 22 l'avvio 7
+  (`texture_cache_memory_limit_hard = 384`) era a 1369 MiB di Vulkan a 338 s
+  come gli altri: il limite duro più basso non ha cambiato la curva, quindi o
+  la crescita non è la cache o il limite non la contiene (**da verificare**
+  con un contatore della cache nel battito).
+
+#### A.4 Il blocco alla fine del filmato (gruppo 2, avvio 3)
+
+- **Da ~600 s:** draw persi per memoria, present a 0 (1302 present a 600 s,
+  1305 a 1670 s), file I/O quasi fermo, fault quasi zero (2458 → 2485 in 1000
+  s). CPU guest costante ~214 %, host ~2,5 %.
+- **Main XThread** (id 6): `NtWaitForSingleObjectEx` dalla guest LR
+  `829A9720`, pila guest `823E2E3C 82729A68 822836C0 8220E2FC 82122A54
+  82120188 …` (il ciclo del gioco, `82122A54`, come sul PC); in attesa da 20 s
+  a 600 s, poi si sveglia ogni ~4–5 minuti (circa 3.000 export) e torna ad
+  aspettare: 217,9 s alla snapshot di 1620 s.
+- **Tre XThread del gioco** (id 21, 22, 23; pila guest `8272C91C 82729BF4
+  8272A640` quando aspettano, la stessa dei lavoratori del job system del PC)
+  girano a turno al 99 % "in guest code" dentro la libreria D3D: host
+  `sub_829CFE80`, `sub_829D7D40`, `sub_829CFCE8` ← `sub_829D8F28` ←
+  `sub_829D9430` ← `sub_8287E380` ← `sub_8286DA78` ← `sub_827C8D48`. Con la
+  traslazione di E (v8 = EU + 0x714A0): `sub_829D8F28` = v8 `0x82A4A3C8`
+  (lock di una risorsa, agganciato da `gta4_native`), `sub_829D9430` = v8
+  `0x82A4A8D0` (lock di un vertex buffer), `sub_829CFE80` = v8 `0x82A41320`:
+  dal listato è **un'attesa attiva della GPU** (legge un valore che la GPU
+  scrive, device+10896, aspetta con `db16cyc`, timeout dopo 5000); sul PC la
+  si chiama 80.570 volte per fotogramma (§11, fase (b)).
+- **GPU Commands** (host): a 600 s nella scrittura del log, a 1620 s nel flush
+  di spdlog da `VulkanUploadBufferPool::CreatePageImplementation` (l'upload
+  che fallisce e lo scrive).
+- **Export subito prima:** a 580–600 s `XmaContext … (-12)` a centinaia,
+  allocazioni di upload fallite, poi niente di nuovo (116 export distinte, come
+  negli altri avvii).
+- **PC** (`compare_export_traces.py`, `out/pc-runs/run17e/pc-full.log` contro
+  questo `game.log`): stesso ordine per le prime 39 export; prima divergenza
+  `NtSetInformationFile` (PC #117, guest LR `829A3E2C`), che la Switch non
+  chiama mai (neanche negli avvii in partita). Alla snapshot di 361 s il PC ha
+  il thread principale "in guest code" (ultima export
+  `NtWaitForMultipleObjectsEx`) e i lavoratori con la stessa pila
+  (`8272C91C 82729BF4 8272A640`) in attesa da 0,1 s: il job system gira.
+- **Cosa aspetta la Switch che il PC riceve** (ipotesi, **da verificare**): il
+  thread principale aspetta la fine di un lavoro del job system; i lavoratori
+  di quel lavoro, dentro il lock di una risorsa D3D, aspettano a loro volta la
+  GPU nell'attesa attiva `829CFE80`: il valore che la GPU dovrebbe scrivere
+  (fence o puntatore di lettura) non arriva, perché dopo l'esaurimento della
+  memoria il backend Vulkan perde i draw e non chiude i command buffer. Sul PC
+  la GPU emulata avanza e l'attesa finisce in microsecondi. Il blocco è quindi
+  una conseguenza della memoria (A.3), non un errore indipendente della
+  logica.
+
+#### A.5 Gruppo 1: perché non entra mai in partita
+
+Dai log (nessuna causa dichiarata):
+
+- **Gestore lento:** ogni fault gestito scrive un record di 1,2 KB con `fsync`
+  (483–603 record per avvio), circa 2,7 fault al secondo. Il gruppo 2 nello
+  stesso punto ne fa 28 al secondo. La schermata di caricamento va a 3,4–3,9
+  present/s contro 26,5; il filmato comincia a ~190–210 s contro ~90 s. Il
+  thread che fa il fault passa quasi tutto il tempo nel gestore.
+- **Clock:** il binario del run 20 non chiede niente ad apm, quindi GPU a 307,2
+  MHz (run 21: è il clock di sistema in portatile) contro 460,8.
+- **Dump dei fotogrammi:** solo a 20, 40, 60, 120 e 240 s (5 PPM di ~2,7 MB),
+  nessuna riga di errore: pesa poco.
+- **Morti:** 2 su 5 con sp/pc sbagliati (la forma che D.1/D.2 hanno tolto), 3
+  senza record, a 101–306 s, prima che il caricamento più lento arrivi alla
+  partita (il gruppo 2 ci arriva a ~200 s andando 7 volte più veloce).
+- **Plausibile:** il gruppo 1 non entra in partita perché è troppo lento (il
+  gestore lento, più il clock) e muore prima per le due forme note; l'avvio 3
+  del run 20 ci era arrivato con lo stesso binario (812 s di vita):
+  **non è una regressione**, la bisezione di §27 non serve.
+
+#### C. Perdita dei vettori: smoke del run 25
+
+Nessuna modifica al build del gioco. Il trampolino è in
+`exception_handler_switch.cpp` sotto `REX_NX_RESUME_TRAMPOLINE`, che solo il
+CMake dello smoke definisce (e lo smoke ora tiene `librexcore.a` e
+`librexruntime.a` nella sua cartella di build: prima scriveva nella cartella
+condivisa `out/switch-aarch64`, da cui il gioco collega). Con
+`rex_nx_resume_trampoline` acceso, un fault gestito riprende a
+`rex_nx_resume_trampoline_entry` con x18 = stato del thread; il trampolino, in
+modo utente dopo `svcReturnFromException`, ricarica q0–q31, fpsr, fpcr, nzcv,
+sp e x0–x30 e salta al pc di ripresa **attraverso x18**: AArch64 a EL0 non ha
+un salto indiretto da memoria, quindi un registro si perde (x18 torna uguale
+al pc di ripresa). Nel gioco servirebbe un registro che il codice generato non
+usa nel punto del fault: x18 è usato (ring del run 24: x18 = base della
+memoria guest), x16/x17 anche; servirebbe compilare il codice generato con
+`-ffixed-x18` (ricompilazione completa).
+
+T10 nello smoke, nell'ordine: fase A (3 × 10.000 fault) senza e con il
+trampolino (costo per fault), poi fase B (thread vettoriale e thread delle
+chiamate profonde) **fino a 100.000 fault** (al massimo 20 minuti) senza e con
+il trampolino. Nel modo trampolino x18 è controllato a parte (deve valere il pc
+di ripresa, voce `x18 not the resume pc`). Righe: `T10 phase A cost`,
+`T10 phase A trampoline cost`, `T10 phase B RESULT discrepancies…`, `T10
+phase B trampoline RESULT discrepancies…`, `T10 trampoline: N faults resumed
+through it`. Esito: **da fare sulla console** (run 25).
+
+### Run 25: il clock della GPU (`out/console-runs/run25-build/`)
+
+Build di base (`c1b2858`, lo stesso NRO di `baseline-ingame`, `COMMIT`) e
+`game.toml` con **una sola** differenza dal gruppo 2 del run 24:
+
+```toml
+nx_gpu = "vulkan"
+nx_mount_cache = false
+nx_stack_watch = true
+nx_apm_clock = false
+```
+
+Con `nx_apm_clock = false` la GPU resta a 307,2 MHz in portatile; CPU (1020) e
+memoria (1331,2) non cambiano (la configurazione apm del run 24 cambia solo
+la GPU).
+
+Istruzioni, per ciascuno dei 5 avvii:
+
+1. Console in portatile, niente overclock (niente sys-clk / Horizon OC),
+   niente overlay.
+2. Copiare `switch-game.nro` e `game.toml` di `run25-build` in
+   `sdmc:/switch/theft4/`; cancellare `switch-game.toml` se c'è.
+3. Cancellare `game.log`, `game-crash.log`, `game-exit.log` dell'avvio prima
+   (dopo averli copiati).
+4. Avviare senza toccare niente; annotare il momento di "Starting a new game".
+5. Lasciare girare **5 minuti da "Starting a new game"** o fino al crash; se
+   vivo, tenere premuto + per 1 s.
+6. Annotare in `note.txt`: se è entrato in partita (Niko si muove), il tempo
+   del crash da "Starting a new game", cosa mostra lo schermo alla fine
+   (codice `2XXX-XXXX`, immagine ferma, nero).
+7. Copiare `game.log`, `game-crash.log`, `game-exit.log`, `game.toml` e
+   `note.txt` in `out/console-runs/run25/N/` (N = 1–5).
+
+Poi **lo smoke, una volta**: `switch-smoke.nro` e `smoke.toml` (Vulkan e
+benchmark della SD spenti) della stessa cartella; avviarlo e aspettare `PROBES
+DONE` (T10 dura fino a ~45 minuti: due fasi B da 100.000 fault, ognuna al
+massimo 20 minuti; una riga di avanzamento al minuto), poi +; copiare
+`smoke.log` in `out/console-runs/run25/smoke/`.
+
+Come leggere:
+
+- **Tasso di crash entro 5 minuti:** nel gruppo 2 del run 24 nessun avvio è
+  morto entro 5 minuti da "Starting a new game" (la schermata di caricamento
+  è a ~60–90 s di log, quindi i 5 minuti finiscono verso 360–400 s, stima);
+  le morti sono a 587–682 s di log, per memoria. Se nel run 25 ci sono morti entro i 5 minuti,
+  in particolare **senza record** come nel run 23, il clock conta; se il
+  quadro resta quello del gruppo 2 (vivi a 5 minuti, nessuna morte senza
+  record), conta il gestore dei fault.
+- **Velocità:** present/s nella schermata di caricamento (gruppo 2: 26,5) e
+  tempo dell'ingresso in partita (gruppo 2: ~200 s di log); in partita FPS e
+  `blocking fence waits` per fotogramma: se il tempo per fotogramma cresce di
+  ~1,5 volte (460,8/307,2), la partita è limitata dalla GPU (D).
+- **Memoria:** la curva dell'heap libero (A.3) non dovrebbe dipendere dal
+  clock; se l'esaurimento arriva più tardi in secondi, dipende dal ritmo dei
+  fotogrammi.
+- Smoke: `T10 phase B RESULT … v0-v7 N, v16-v31 N` senza trampolino (run 23:
+  2 su 2.219) contro `T10 phase B trampoline RESULT …`: zero con il trampolino
+  e non zero senza giustifica il passo nel gioco (run 26); zero in entrambi
+  non dice niente (la perdita è rara); non zero anche con il trampolino vuol
+  dire che i vettori si perdono altrove (non nella finestra di `svc 0x28`).

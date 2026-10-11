@@ -264,6 +264,16 @@ una bisezione, comprese le build vecchie (con la cvar, o portando la
 correzione sul commit provato); si spegne solo nell'avvio che prova proprio
 lei.
 
+**Confronto con la base (run 24).** Da ora c'è una base fissa: il NRO del
+gruppo 2 del run 24 (`c1b2858`, tag locale `baseline-ingame-c1b2858`, file in
+`out/console-runs/baseline-ingame/` con ELF, `COMMIT` e `game.toml`), l'unica
+configurazione con cui il gioco è entrato in partita senza morti "senza
+record" (2 avvii su 5; gli altri 3 finiti per memoria). Ogni run nuovo è "la
+base più una riga" e si legge contro i suoi numeri (06 §27, run 24); ogni
+run aggiunge la sua riga a `run-index.md` (commit, configurazione, esito per
+avvio, cartella dei log). Il binario vecchio del run 20 (gruppo 1) non è una
+base: gestore lento, niente D.1/D.2.
+
 **Clock:** la riga `clocks (start-up)` dice se `0x92220008` è stata applicata
 (`applied …` o `NOT applied`) e da che valore partiva la GPU; il battito
 scrive i clock ogni 10 s. Un run con `CPU ABOVE 1020 MHz` o `GPU UNDER 100
@@ -295,9 +305,11 @@ Regole:
   fpsr (flag cumulativi e QC), tpidr_el0, v0–v31 (metà bassa con l'etichetta
   del thread, metà alta il complemento), e il pc: un fault per scrittura,
   preso e ripreso all'indirizzo della `str` (record per thread
-  `rex_nx_thread_faults`). Fase A senza disturbo, fase B per 20 s con un
-  thread vettoriale e uno a chiamate profonde a priorità più alta che
-  interrompono i thread dei fault anche dentro il gestore. Esito per tipo di
+  `rex_nx_thread_faults`). Fase A senza disturbo, fase B (dal run 25 fino a
+  100.000 fault) con un thread vettoriale e uno a chiamate profonde a
+  priorità più alta che interrompono i thread dei fault anche dentro il
+  gestore; dal run 25 entrambe anche con la ripresa dal trampolino in modo
+  utente (solo nello smoke, x18 controllato a parte). Esito per tipo di
   registro; deve essere 0 ovunque.
 - Una prova sul percorso delle eccezioni che non interrompe mai il thread nel
   gestore non prova la ripresa: la fase B è obbligatoria.
@@ -333,3 +345,12 @@ Regole:
   ha preso. Nessuna cvar lo cambia.
 - Il battito dà fault gestiti, fault al secondo, tempo medio e massimo per
   fault (dall'inizio del dispatcher al suo ritorno).
+- **Esito del run 24 (gruppo 2, 5 avvii):** 28 fault al secondo nel
+  caricamento, 4–8 in partita, 58–65 µs per fault in media (massimo ~2 ms),
+  contro ~3 al secondo e ~300 ms del gestore lento; caricamento ~7 volte più
+  veloce (26,5 present/s contro 3,4–3,9 del gruppo 1); **nessuna morte senza
+  record** (run 23: 5 su 5) e due avvii in partita. Il gruppo 2 aveva anche la
+  GPU a 460,8 MHz, i contatori nvdrv e il messenger: il miglioramento non è
+  ancora attribuibile al solo gestore (run 25: stessa base con
+  `nx_apm_clock = false`). Le tre fini del gruppo 2 sono la memoria esaurita
+  a 580–680 s, non i fault.
