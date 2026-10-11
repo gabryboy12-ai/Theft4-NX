@@ -2959,3 +2959,279 @@ Cosa guardare:
 - `smoke.log`: `T10 phase A RESULT` / `T10 phase B RESULT discrepancies by
   register …`: qualunque valore diverso da 0 dice quale registro il percorso
   delle eccezioni non restituisce.
+
+### Run 23: risultati (2026-10-11, `out/console-runs/run23/1`–`5` e smoke, NRO del commit `9fe69f7`)
+
+Cinque avvii identici (il `game.toml` qui sopra), poi lo smoke. Note
+dell'utente: **5 crash su 5**; quattro "subito dopo Starting a new game, circa
+nello stesso punto", nel quinto quasi tutto il filmato visto prima del crash.
+**Attenzione:** la base aveva `nx_crash_log_after_setup = false`, quindi il
+crash log restava primo e scriveva ogni fault gestito con `fsync`: il run 23
+ha provato D.1 e D.2 **con il gestore lento**, non il gestore veloce.
+
+#### A.1 Avvio per avvio
+
+La durata è il tempo dell'ultimo record di `game-crash.log` (scritto con
+`fsync`, quindi un limite inferiore della morte); `game.log` è bufferizzato e
+perde l'ultimo secondo, quindi l'ultimo battito è più vecchio.
+
+| Avvio | Ultimo record | Ultimo battito | Fase (dal log) | Fault ripresi | Heap libero / Vulkan (ultimo battito) | Record della morte |
+|---|---|---|---|---|---|---|
+| 1 | 92,5 s | 80 s | caricamento, 3,6 present/s | 214 (a 80 s) | 925 MiB / 700 di 1324 | **nessuno** |
+| 2 | 139,7 s | 130 s | caricamento, 2,5 present/s | 364 | 918 / 700 di 1319 | nessuno |
+| 3 | 274,5 s | 270 s | filmato (present 0,0–0,3/s da ~210 s) | 583 | 438 / 1151 di 1446 | nessuno |
+| 4 | 297,9 s | 290 s | filmato | 638 | 227 / 1357 di 1510 | nessuno |
+| 5 | 535,2 s | 530 s | filmato (0,2–0,4 present/s) | 837 | 164 / 1371 di 1481 | nessuno |
+
+In tutti e cinque `game-exit.log` è vuoto, nessuna riga `termination`,
+nessun blocco `=== unhandled fault: thread, stack, last resume ===`, nessun
+`[stderr] [rex]` (l'unica riga `[stderr]` è l'avviso di NVK all'avvio),
+nessun `memory LOW`, nessun VkResult di errore. L'ultimo record di ogni avvio
+è un fault di write-watch come gli altri (`sub_829D…`: +0x2452c74/+0x2452fd0
+negli avvii 1–2, +0x245d40c/+0x2463810/+0x245d434 nel filmato), completo
+fino alla riga `vulkan:`. **Tutte e cinque le morti sono "senza record"**: il
+fault che uccide il processo, se c'è, non arriva al nostro dispatcher.
+
+Tempi: 92–535 s (run 22, base: 122–195 s). I tempi del log non coincidono con
+"quattro nello stesso punto": l'1 e il 2 muoiono durante il caricamento
+(present 2–4/s, memoria ferma), il 3 e il 4 nel filmato (present quasi a 0,
+memoria Vulkan in crescita da ~210 s), il 5 molto più avanti nel filmato.
+Il filmato è lento: nel run 20 durava 190–290 s, qui va da ~210 s oltre i
+530 s.
+
+**Record di ripresa e le due varianti di (a):** in tutti gli avvii, a ogni
+battito, `sp/pc changed in the handler 0, frame read back wrong 0, repaired
+0`, su 214–837 fault ripresi per avvio (2.636 in tutto). Il valore riletto
+dal frame è sempre quello scritto, e la copia di sp/pc non è mai cambiata
+durante i gestori. **Nessuna delle due varianti si è vista**, e nessuna morte
+è stata la ripresa di un fault con sp/pc sbagliati (run 22: 4 su 7, 2 su 4
+nella base). Con D.1 e D.2 la forma "sp/pc sbagliati" è sparita: coerente con
+la variante a1 (la coppia copiata con `q31`, e `q31` è fra i registri che il
+kernel può perdere, A.3), ma con 5 avvii è **da verificare**. Domanda "prima o
+dopo il nostro codice": nel run 23 non ci sono valori sbagliati da
+localizzare; nel run 22 il valore sbagliato nasceva **nel nostro codice**
+(copia della coppia con `q31` prima della scrittura del frame), non nel
+kernel dopo.
+
+**Due record rovinati** (3: tre byte `00 11 89` prima di `last heartbeat:`;
+5: intestazione tagliata a `=== unhandled access viola` seguita dal record
+dopo, e un `module base 0x` senza le cifre seguito da un byte nullo). Con la
+claim un solo thread alla volta scrive, quindi non è concorrenza fra due
+record. Causa non stabilita; il gestore nuovo (B) non scrive più nel
+percorso dei fault gestiti.
+
+#### A.2 Stack dei thread (`nx_stack_watch`)
+
+Uso massimo in tutti e cinque gli avvii (36 thread vivi, 477 MiB di stack):
+
+| Thread | Stack | Uso massimo |
+|---|---|---|
+| GPU Commands (XThread host) | 16 MiB | 66 KiB (0,4 %) |
+| main (UI) | 1 MiB | 58 KiB (5,7 %) |
+| 3 thread `rex::thread::Thread` senza nome (routine `ThreadStartRoutine`, `threading_switch.cpp`) | 4 MiB | 55 KiB |
+| XMA Decoder | 16 MiB | 16 KiB |
+| thread dei clock (`nx_clocks.cpp`) | 31 KiB | 7 KiB (22,7 %) |
+| Main XThread, gli XThread del gioco (24) | 16 MiB | 2–7 KiB |
+| Kernel Host Tasks, Audio Worker, GPU VSync | 16 MiB | 3–4 KiB |
+| log writer | 63 KiB | < 1 KiB |
+| un `std::thread` (`execute_native_thread_routine`) | 127 KiB | non dipinto (creato prima del filtro) |
+
+**Nessun thread di Mesa o di NAK** nella tabella: in questo percorso NVK non
+crea thread propri (compilazione degli shader sul thread chiamante). Nessuno
+stack sopra il 23 %: **(b) overflow di uno stack: escluso per questi thread.**
+Resta non misurato lo stack delle eccezioni (`__nx_exception_stack`, 64 KiB),
+su cui gira tutto il gestore.
+
+#### A.3 Smoke: T10 esteso
+
+| | Fase A (3 thread × 10.000 fault, nessun disturbo) | Fase B (20 s, thread vettoriale e thread a chiamate profonde a priorità 43) |
+|---|---|---|
+| Fault | 30.000, 77,7 µs per fault a thread (serializzati), 26 µs ciascuno | 2.219 (111/s) |
+| x0–x28, x29, x30, sp | 0 | 0 |
+| nzcv, fpcr, fpsr, tpidr_el0 | 0 | 0 |
+| v0–v7 | 0 | **32** |
+| v8–v15 | 0 | 0 |
+| v16–v31 | 0 | **64** |
+| pc di ripresa | 0 (sempre la `str`) | 0 (sempre la `str`) |
+| Record dell'ingresso | 30.000 ripresi, 0 cambiati, 0 riletti sbagliati | 2.219, 0, 0 |
+| Thread di disturbo | – | 35.435 giri vettoriali e 35.427 discese di 1500 frame: 0 errori |
+
+Fase B: **2 giri su 740 del thread 0** sbagliati; in ciascuno **tutti** i
+registri q0–q7 e q16–q31 (16 + 32 metà da 64 bit) valgono **0**, v8–v15 e
+tutto il resto giusti. Riga finale `T10 RESULT UNEXPECTED`. Il pc di ripresa
+è sempre l'istruzione giusta. I thread di disturbo, mai dentro il gestore,
+non perdono niente.
+
+Lettura: è la firma di un thread che il kernel ha tolto dalla CPU mentre era
+**dentro una SVC**, per la quale salva solo i registri vettoriali
+callee-saved (q8–q15) e restituisce gli altri azzerati. D.1 salva i vettori
+con le prime istruzioni e li ripristina subito prima di `svc 0x28`, quindi
+quello che resta scoperto è **`svc 0x28` stessa** (svcReturnFromException:
+rilascia la claim, può svegliare e far girare un thread a priorità più alta)
+più le poche istruzioni prima che l'ultima `stp` del salvataggio sia
+eseguita. Ipotesi sulla finestra, **da verificare**; il fatto (q0–q7 e
+q16–q31 a zero dopo un fault ripreso, 0,09 % dei fault con interruzioni) è
+misurato. Nessun ordine di salvataggio dentro l'ingresso chiude una perdita
+che avviene dentro la SVC di ritorno.
+
+Conseguenza per il gioco (ipotesi): un thread del gioco ripreso dopo un
+write-watch può trovare a zero i registri vettoriali caller-saved che il
+codice generato teneva vivi attraverso la `str` (valori in virgola mobile,
+copie con `ldp q`, a volte registri generali parcheggiati in `d16`–`d31`):
+dati sbagliati senza fault immediato. Non spiega da solo le morti senza
+record.
+
+#### A.4 Tempo per fault gestito e gestori nel percorso
+
+Il run 23 non misurava il tempo nel gestore. Dai record: fault gestiti a
+intervalli di **min 252–289 ms, mediana 322–331 ms**, ~3 al secondo durante
+il caricamento (27–31 ogni 10 s, contatore `resume:`), 0–2 ogni 10 s nel
+filmato. Il thread che fa i fault ricomincia subito dopo la ripresa, quindi
+~300 ms è il tempo nel gestore per fault, quasi tutto I/O. Riferimento:
+smoke T9, un fault gestito senza I/O costa 13,7 µs (percorso delle eccezioni
+7,7 µs): **~20.000 volte meno**.
+
+Gestori nel percorso di un fault gestito (configurazione del run 23):
+
+| Ordine | Gestore | Cosa fa | I/O |
+|---|---|---|---|
+| 1 | `CrashLogHandler` (switch-game, primo perché `nx_crash_log_after_setup = false`) | record di ~1,8 KB con ~40 `write` su `game-crash.log`, `fsync`; poi, se il log è bufferizzato, `open`/`write`/`fsync`/`close` di `game.log` con tutto il buffer (`open` di newlib alloca la voce del descrittore) | **sì** |
+| 2 | `MMIOHandler::ExceptionCallbackThunk` (runtime) | `global_critical_region_` (mutex ricorsivo), `QueryProtect`; `Memory::NxPhysicalAccessViolation` → `PhysicalHeap::TriggerCallbacks` dei tre finestre → callback di invalidazione di `SharedMemory` e `PrimitiveProcessor`, `FireWatches` (cache delle texture), `Protect` | no; due righe spdlog sui rami rari (`Recovered stale physical page protection`, gestito; `Unhandled guest physical write fault`, non gestito): 0 nel run 23 |
+| 3 | `CrashFinalHandler` | solo per i fault non gestiti | (solo non gestiti) |
+| – | dispatcher dell'SDK | nessun I/O per i gestiti; `write` su stderr solo per i non gestiti | no |
+
+Altre cvar di diagnostica che mettevano I/O o altro nel percorso del fault:
+solo `nx_crash_log_after_setup = false` (sopra). `nx_fault_count_handler =
+true` metteva un gestore **prima** del runtime (solo un contatore atomico, nessun
+I/O). `nx_log_durable = true` renderebbe immediata (apertura e `fsync`) ogni
+riga di log, comprese le due righe spdlog dei rami rari. `nx_profile` non è
+nel percorso, ma mette in pausa thread qualunque, anche uno che tiene la
+claim. `nx_stack_watch`, `nx_trace_exports`, `nx_nv_wrap`,
+`nx_vk_mesa_messenger`, `nx_apm_clock`: non nel percorso.
+
+#### B. Percorso del fault gestito senza I/O (da verificare)
+
+- **SDK** (`exception_handler_switch.cpp`, `nx_fault_record.h`): il
+  dispatcher scrive ogni fault in un anello in memoria di 32 voci
+  (`RexNxFaultRing`: numero, tempo, durata, handle del thread, tipo, pc, lr,
+  sp, far, esr, x0–x30 all'arrivo, pc e sp di ripresa, gestito o no) e conta
+  tempo totale e massimo dei fault gestiti (dall'inizio del dispatcher al
+  ritorno; l'assembly dell'ingresso e il kernel restano fuori) e i fault non
+  gestiti. Store semplici, nessuna chiamata, nessun lock (la claim basta).
+  Ingresso in assembly, D.1 e D.2: **invariati**.
+- **SDK** (`xmemory.cpp`): le due righe spdlog di
+  `NxPhysicalAccessViolation` diventano contatori
+  (`RexNxPhysicalFaultStats`: pagine riprotette, fault fisici inspiegati,
+  ultimo indirizzo).
+- **switch-game:** `nx_crash_log_after_setup` e `nx_fault_count_handler`
+  **tolte** (in un `.toml` vecchio danno solo `Config: unknown cvar`).
+  `CrashLogHandler` è installato all'avvio (per un fault prima di Setup, quando
+  non esiste un gestore del runtime) e **sempre** spostato dopo i gestori del
+  runtime subito dopo Runtime::Setup, seguito da `CrashFinalHandler`: vedono
+  solo i fault non gestiti. Su disco l'anello va solo con un fault non gestito
+  (dopo il record completo, che resta com'era), `exit`/`_exit`/`abort`/
+  `svcExitProcess` (anche l'uscita col +), `fatalThrow`,
+  `diagAbortWithResult` e `svcBreak` (anche un fault dentro il gestore, che
+  finisce in `svcBreak`): blocco `=== fault ring: … ===`, il più recente per
+  primo, con il nome del thread.
+- **Battito:** `faults: N handled since start, M in the window (X/s); time per
+  handled fault in the window: mean … ns, max … ns; since start mean … ns;
+  unhandled …; physical: stale protection recovered …, unexplained …`.
+- **Avvio:** `build: commit …, Vulkan NRO; config read: game.toml`, poi
+  `build: Switch cvars (n): …` (tutte le cvar della categoria Switch con il
+  valore) e `build: cvars not at the default (n): …` (ogni categoria). Il
+  commit viene da `build_commit.cmake`, ricontrollato a ogni build
+  (`-dirty` se c'erano modifiche non salvate).
+
+Effetto atteso (ipotesi): il gioco smette di passare ~90 % del tempo del
+thread dei fault nel gestore e fa molti più fault al secondo (il run 22,
+avvio 3, andava il doppio più veloce). Due effetti opposti sulle morti: meno
+tempo dentro il gestore (meno occasioni per un fault annidato, ipotesi delle
+morti senza record) ma **più `svc 0x28` al secondo**, cioè più occasioni per
+la perdita dei vettori di A.3. Il run 24 non separa i due.
+
+#### Run 24: due gruppi di 5 avvii (`out/console-runs/run24-build/`)
+
+Domanda: il run 20 (avvio 3) era entrato in partita e girato 800 s; dal run
+21 in poi la base muore entro 1–9 minuti. **Regressione del codice o fortuna
+del run 20?** E il gestore senza I/O cambia qualcosa?
+
+| Gruppo | NRO | `game.toml` |
+|---|---|---|
+| 1 (avvii 1–5) | `gruppo1/switch-game.nro`: lo stesso file del run 20 (`run20-build/switch-game-vulkan.nro`, codice del commit `716936b`; `COMMIT` del run 20 dice `5efe9ad`, che sopra `716936b` cambia solo documenti), con il suo ELF | quello dell'avvio 3 del run 20: `nx_gpu = "vulkan"`, `nx_vk_dump_frames = true` (era nel `game.toml` del run 20 per tutti e tre gli avvii), `nx_mount_cache = false` |
+| 2 (avvii 6–10) | `gruppo2/switch-game.nro`, commit in `gruppo2/COMMIT` (con B) | `nx_gpu = "vulkan"`, `nx_mount_cache = false`, `nx_stack_watch = true`; il resto di default, quindi anche `nx_apm_clock = true` (GPU a 460,8 MHz), `nx_nv_wrap = true`, messenger di Mesa acceso |
+
+Nota sul gruppo 2: rispetto al run 23 cambiano B **e** i default che la base
+del run 23 spegneva (clock 460,8, contatori nvdrv, messenger). È la scelta
+del piano; se il gruppo 2 migliora, la causa non è attribuibile a B da sola.
+
+Il NRO del gruppo 1 non ha la riga `build:`; si riconosce dalla riga
+`config sdmc:/switch/theft4/game.toml: found, loaded`, dall'assenza di righe
+`run 21 pieces` e dal battito senza `clocks`. Quello del gruppo 2 scrive
+`build: commit …` subito dopo le righe `config`.
+
+**Per ogni avvio** (console in portatile, nessun overclock né sys-clk,
+nessun overlay):
+
+1. Copiare il `.toml` del gruppo come `sdmc:/switch/theft4/game.toml` e il
+   NRO del gruppo come `sdmc:/switch/theft4/switch-game.nro` (o dove lo si
+   lancia di solito); cancellare `sdmc:/switch/theft4/switch-game.toml` se
+   esiste.
+2. Cancellare da `sdmc:/switch/theft4/` `game.log`, `game-crash.log`,
+   `game-exit.log` (dopo averli copiati dall'avvio prima) e, per il gruppo 1,
+   la cartella `frames/`.
+3. Avviare, non toccare niente. Annotare l'ora in cui compare "Starting a new
+   game".
+4. Lasciare girare **5 minuti dopo "Starting a new game"** o fino al crash.
+   Se dopo 5 minuti è vivo: tenere premuto + per 1 s (uscita del modo D).
+5. Annotare: **entrato in partita sì/no** (si vede Niko e si può muoverlo, non
+   solo il filmato); tempo approssimativo del crash da "Starting a new game";
+   **cosa mostra lo schermo alla fine** (errore del sistema col codice
+   `2XXX-XXXX` se c'è, immagine ferma, ritorno al menu, schermo nero).
+6. Copiare `game.log`, `game-crash.log`, `game-exit.log`, il `game.toml`
+   usato e (gruppo 1) `frames/` in `out/console-runs/run24/N/`, con N =
+   1–5 per il gruppo 1 e 6–10 per il gruppo 2, più un `note.txt` con le
+   annotazioni del punto 5.
+
+Ordine consigliato: alternare i gruppi (1, 6, 2, 7, …) perché temperatura e
+stato della SD pesino uguale sui due.
+
+**Come leggere i risultati:**
+
+- Gruppo 1 entra in partita **3 volte su 5 o più**: il codice di allora
+  arrivava in partita e quello di oggi no → **regressione**. Si prepara la
+  bisezione sui commit fra `716936b` e oggi (sotto).
+- Gruppo 1 in partita 0–2 volte su 5: l'avvio 3 del run 20 era **fortuna**
+  (lo stesso guasto non deterministico c'era già), e si lavora sul percorso
+  delle eccezioni (A.3).
+- Gruppo 2: la riga `faults:` dà fault al secondo e tempo per fault reali
+  (attesi: decine o centinaia al secondo, decine di µs). Morti con il blocco
+  `=== fault ring` (fault non gestito, `svcBreak`, uscita) dicono quali fault
+  hanno preceduto la morte; morti senza nessun blocco restano uccisioni dal
+  kernel fuori dal nostro codice.
+
+**Bisezione, se serve.** Commit con codice fra il run 20 e oggi (`9fe69f7`
+tocca solo lo smoke; i commit di documenti non contano):
+
+| Commit | Cosa tocca | Nel percorso caldo? |
+|---|---|---|
+| `0c20bf3` | tempi delle chiamate Vulkan (command processor, presenter), contatori nvdrv, profiler (spento) | sì: Vulkan submit/present |
+| `6c574a9` | clock apm (GPU 460,8) | sì se `nx_apm_clock = true` |
+| `bb26b80` | heap headroom, contatore dei fault (gestore **prima** del runtime), crash log dopo Setup, stato prima di ogni uscita, messenger di Mesa | sì: ordine dei gestori, messenger |
+| `a9727e1` | `nx_mount_cache` falso per default | no (nel run 20 era già falsa via `.toml`) |
+| `578f5be` | cvar per spegnere le novità del run 21 | no |
+| `5a005e4` | tempi di pipeline e shader | sì: creazione delle pipeline |
+| `6bc6c24` | wrapper di `fatalThrow`, `diagAbortWithResult`, `svcBreak` | no (solo uscite) |
+| `31542c8` | ingresso delle eccezioni: q0–q31 per primi, sp/pc con registri generali, record di ripresa | sì: ogni fault |
+| `644bac5` | tabella dei thread e stack watch (wrap di `threadCreate`, `pthread_create`) | alla creazione dei thread |
+| (B) | anello in memoria, gestori in ordine fisso | sì: ogni fault |
+
+Ordine di prova (bisezione binaria sui 9 commit di codice, 5 avvii per
+punto, configurazione del gruppo 1 con `nx_apm_clock = false` dove esiste):
+prima `578f5be` (metà: tutto il run 21, le sue novità spente via cvar); se
+entra in partita la regressione è dopo (poi `31542c8`, poi `5a005e4` o
+`644bac5`), altrimenti è prima (poi `6c574a9`, poi `0c20bf3` o `bb26b80`).
+Tre o quattro punti bastano. Per la
+regola di 09 §13 ogni build della bisezione porta le correzioni note: cache
+spenta e, se il gruppo 2 le conferma, B e D.1/D.2 (cherry-pick sul commit
+provato; nei commit prima di `31542c8` l'ingresso va sostituito per intero).

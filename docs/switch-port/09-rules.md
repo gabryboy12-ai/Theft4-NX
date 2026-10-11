@@ -249,10 +249,20 @@ dock), scritta nelle note del run. Il run 21 mescolava nello stesso giro sei
 novità del codice, la GPU passata da 307,2 a 460,8 MHz e, in un avvio, un
 overclock esterno: un crash a 47 s non si poteva attribuire. Ogni novità del
 codice nasce quindi con una cvar che la spegne a runtime (run 22: `nx_apm_clock`,
-`nx_nv_wrap`, `nx_fault_count_handler`, `nx_crash_log_after_setup`,
-`nx_vk_mesa_messenger`, `nx_profile`). Un guasto non deterministico va
+`nx_nv_wrap`, `nx_vk_mesa_messenger`, `nx_profile`; `nx_fault_count_handler` e
+`nx_crash_log_after_setup` tolte nel run 24, §15). Un guasto non deterministico va
 riprodotto sulla base prima di accusare una variabile: un avvio senza crash
 non la assolve.
+
+**La base di una bisezione include le correzioni già note, non le spegne**
+(run 24). La base del run 22 e del run 23 aveva `nx_crash_log_after_setup =
+false` per "togliere le novità", e così rimetteva nel percorso di ogni fault
+gestito il record con `fsync` del run 20 (~300 ms nel gestore per fault): la
+base provava il gestore lento, non quello corretto. Una correzione nota (cache
+spenta, gestore senza I/O, registri restituiti) resta accesa in ogni avvio di
+una bisezione, comprese le build vecchie (con la cvar, o portando la
+correzione sul commit provato); si spegne solo nell'avvio che prova proprio
+lei.
 
 **Clock:** la riga `clocks (start-up)` dice se `0x92220008` è stata applicata
 (`applied …` o `NOT applied`) e da che valore partiva la GPU; il battito
@@ -291,3 +301,35 @@ Regole:
   registro; deve essere 0 ovunque.
 - Una prova sul percorso delle eccezioni che non interrompe mai il thread nel
   gestore non prova la ripresa: la fase B è obbligatoria.
+- **Run 23: la fase B fallisce anche con i vettori salvati per primi.** In 2
+  fault su 2219 un thread è tornato con q0–q7 e q16–q31 **a zero** (tutti e
+  48 i valori di quei registri, v8–v15 e tutto il resto giusti; fase A 0 su
+  30.000). È la firma del kernel che, per un thread dentro una SVC, salva solo
+  i registri vettoriali callee-saved: la finestra è `svc 0x28`
+  (svcReturnFromException, che rilascia la claim e può far girare un thread a
+  priorità più alta) o le istruzioni prima dell'ultima `stp` di salvataggio.
+  Nessun ordine di salvataggio nell'ingresso la chiude (06 §27, run 23 A.3).
+
+## 15. Nel percorso di un fault gestito niente I/O, niente log, niente allocazioni (run 24)
+
+Il thread che fa un fault gestito (write-watch, MMIO) tiene la claim delle
+eccezioni del processo: finché non torna, ogni altro thread che fa un fault
+aspetta nel kernel. Nel run 20 e nei run 22–23 il crash log scriveva ogni
+fault gestito con 40 `write` e un `fsync` su `game-crash.log` più il
+buffer di `game.log` (apertura, scrittura, `fsync`, chiusura): ~300 ms a
+fault, ~3 fault al secondo, il thread del gioco quasi sempre nel gestore.
+
+Regole:
+
+- Il percorso di un fault gestito non scrive file, non chiama spdlog né
+  `printf`, non alloca. Lo stato va in memoria: i contatori e l'anello degli
+  ultimi 32 fault (`RexNxFaultRing`, `nx_fault_record.h`) li riempie il
+  dispatcher con store semplici.
+- Su disco solo per un fault non gestito, `abort`, `exit` (anche il +),
+  `fatalThrow`, `diagAbortWithResult` e `svcBreak`: lì il crash log scrive il
+  record completo e l'anello.
+- Ordine dei gestori fisso: prima quelli del runtime (MMIO, write-watch),
+  poi i nostri (crash log, record finale), che vedono solo i fault che nessuno
+  ha preso. Nessuna cvar lo cambia.
+- Il battito dà fault gestiti, fault al secondo, tempo medio e massimo per
+  fault (dall'inizio del dispatcher al suo ritorno).
