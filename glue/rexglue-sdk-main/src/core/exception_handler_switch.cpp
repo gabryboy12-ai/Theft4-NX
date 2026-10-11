@@ -79,6 +79,7 @@ extern "C" {
 #include <switch/arm/counter.h>
 #include <switch/arm/thread_context.h>
 #include <switch/kernel/svc.h>
+#include <switch/kernel/thread.h>
 #include <switch/types.h>
 }
 
@@ -473,6 +474,65 @@ static void NoteResumeEvent(uint64_t kind, RexNxThreadFaults& rec, uint64_t seen
 extern "C" const RexNxThreadFaults* rex_nx_thread_faults() { return &t_nx_faults; }
 extern "C" const RexNxResumeStats* rex_nx_resume_stats() { return &g_nx_resume_stats; }
 
+extern "C" uint64_t rex_nx_take_fault_ticks_max() {
+  const uint64_t max = Load64(g_nx_resume_stats.handled_ticks_max);
+  Store64(g_nx_resume_stats.handled_ticks_max, 0);
+  return max;
+}
+
+// ── Fault ring (run 24, B) ───────────────────────────────────────────────────
+// Memory only: the game writes it out on an unhandled fault, abort or exit.
+static RexNxFaultRing g_nx_fault_ring;
+
+extern "C" const RexNxFaultRing* rex_nx_fault_ring() { return &g_nx_fault_ring; }
+
+// A new slot with the fault as it came in: x0-x8, lr, sp and pc from the
+// kernel's frame, x9-x29 as the entry saved them.
+static RexNxFaultEntry& RecordFaultEntry(uint32_t type, const ThreadExceptionFrameA64* frame,
+                                         const NxSavedRegisters* saved, uint64_t start_tick) {
+  RexNxFaultRing& ring = g_nx_fault_ring;
+  const uint64_t seq = ring.count + 1;
+  RexNxFaultEntry& e = ring.entries[(seq - 1) % REX_NX_FAULT_RING_SIZE];
+  e.seq = seq;
+  e.entry_tick = start_tick;
+  e.ticks = 0;
+  e.thread_handle = threadGetCurHandle();
+  e.handled = 0;
+  e.type = type;
+  e.pc = frame->elr_el1;
+  e.lr = frame->lr;
+  e.sp = frame->sp;
+  e.far = frame->far;
+  e.esr = frame->esr;
+  e.resume_pc = 0;
+  e.resume_sp = 0;
+  for (uint32_t i = 0; i < 9; ++i) e.x[i] = frame->cpu_gprs[i];
+  for (uint32_t i = 9; i < 30; ++i) e.x[i] = saved->x9_to_x29[i - 9];
+  e.x[30] = frame->lr;
+  ring.count = seq;
+  return e;
+}
+
+// The way out: what svcReturnFromException will load, the time spent, and
+// the process counters.
+static void FinishFaultEntry(RexNxFaultEntry& e, const ThreadExceptionFrameA64* frame,
+                             bool handled) {
+  const uint64_t ticks = armGetSystemTick() - e.entry_tick;
+  e.resume_pc = frame->elr_el1;
+  e.resume_sp = frame->sp;
+  e.handled = handled ? 1 : 0;
+  e.ticks = ticks;
+  RexNxResumeStats& s = g_nx_resume_stats;
+  if (handled) {
+    Store64(s.handled_ticks, Load64(s.handled_ticks) + ticks);
+    if (ticks > Load64(s.handled_ticks_max)) {
+      Store64(s.handled_ticks_max, ticks);
+    }
+  } else {
+    Store64(s.unhandled, Load64(s.unhandled) + 1);
+  }
+}
+
 // Unhandled: record the fault, then resume the thread with its own registers
 // at rex_nx_unhandled_break (svcBreak), LR = faulting PC for the report.
 static void ResumeAtUnhandledBreak(uint32_t type, ThreadExceptionFrameA64* frame) {
@@ -490,6 +550,9 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
                                           NxSavedRegisters* saved) {
   using namespace rex::arch;
 
+  // Run 24 (B): the fault in the ring before anything else runs.
+  RexNxFaultEntry& entry = RecordFaultEntry(type, frame, saved, armGetSystemTick());
+
   const uint64_t fault_pc   = frame->elr_el1;
   const uint64_t fault_addr = frame->far;
   const uint32_t esr        = frame->esr;
@@ -506,6 +569,7 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
     SigSafeWriteLabelHex("far", fault_addr);
     SigSafeWriteLabelHex("esr", static_cast<uint64_t>(esr));
     ResumeAtUnhandledBreak(type, frame);
+    FinishFaultEntry(entry, frame, false);
     return true;
   }
 
@@ -557,6 +621,7 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
       Store64(rec.handled, Load64(rec.handled) + 1);
       Store64(rec.last_tick, armGetSystemTick());
       Store64(g_nx_resume_stats.handled, Load64(g_nx_resume_stats.handled) + 1);
+      FinishFaultEntry(entry, frame, true);
       return true;
     }
   }
@@ -571,6 +636,7 @@ extern "C" bool rex_nx_exception_dispatch(uint32_t type, ThreadExceptionFrameA64
   SigSafeWriteLabelHex("esr", static_cast<uint64_t>(esr));
   SigSafeWriteLabelHex("is_write", is_write ? 1ULL : 0ULL);
   ResumeAtUnhandledBreak(type, frame);
+  FinishFaultEntry(entry, frame, false);
   return true;
 }
 

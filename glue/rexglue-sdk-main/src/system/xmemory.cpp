@@ -25,6 +25,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/platform/nx_fault_record.h>
 #include <rex/stream.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/mmio_handler.h>
@@ -684,6 +685,15 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
 }
 
 #if REX_PLATFORM_NX
+// Run 24 (B): this runs inside the exception handler, so its two outcomes
+// that were log lines (spdlog: a lock, an allocation, a file write) are now
+// counters, read by the heartbeat and the crash record (nx_fault_record.h).
+static RexNxPhysicalFaultStats g_nx_physical_fault_stats;
+
+extern "C" const RexNxPhysicalFaultStats* rex_nx_physical_fault_stats() {
+  return &g_nx_physical_fault_stats;
+}
+
 bool Memory::NxPhysicalAccessViolation(
     std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* host_address,
     bool is_write) {
@@ -727,13 +737,14 @@ bool Memory::NxPhysicalAccessViolation(
     const uintptr_t page_base = host & ~(uintptr_t(rex::memory::page_size()) - 1);
     if (rex::memory::Protect(reinterpret_cast<void*>(page_base), rex::memory::page_size(),
                              rex::memory::PageAccess::kReadWrite, nullptr)) {
-      REXSYS_WARN("Recovered stale physical page protection for physical {:08X}",
-                  physical_address);
+      ++g_nx_physical_fault_stats.stale_recovered;
+      g_nx_physical_fault_stats.last_stale_physical = physical_address;
       return true;
     }
   }
-  REXSYS_ERROR("Unhandled guest physical write fault: physical={:08X} host={:016X} protect={:08X}",
-               physical_address, static_cast<uint64_t>(host), physical_protect);
+  ++g_nx_physical_fault_stats.unhandled;
+  g_nx_physical_fault_stats.last_unhandled_physical = physical_address;
+  g_nx_physical_fault_stats.last_unhandled_protect = physical_protect;
   return false;
 }
 #endif
