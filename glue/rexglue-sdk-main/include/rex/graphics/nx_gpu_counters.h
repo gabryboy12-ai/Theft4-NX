@@ -29,7 +29,31 @@ struct NxGpuCounters {
   std::atomic<uint64_t> pipelines_cp{0}, pipeline_ns_cp{0};
   std::atomic<uint64_t> shaders{0}, shader_ns{0};
   std::atomic<uint64_t> shaders_cp{0}, shader_ns_cp{0};
+  // Run 26 (B.1): Vulkan memory by kind (vkAllocateMemory/vkFreeMemory, counted
+  // in VulkanDevice), live allocations and bytes; see NxVkMemoryKind.
+  std::atomic<int64_t> vk_live[4]{}, vk_bytes[4]{};
+  std::atomic<uint64_t> vk_allocs{0}, vk_frees{0}, vk_alloc_failures{0};
+  // The texture cache (live textures, their host memory as the cache counts
+  // it for its limits, and what its limits and the low-memory trim destroyed).
+  std::atomic<int64_t> textures_live{0}, texture_bytes{0};
+  std::atomic<uint64_t> textures_evicted{0}, texture_bytes_evicted{0};
+  // Upload buffer pool pages created (they are freed only when the pool is
+  // destroyed, so this is also what is live while the game runs).
+  std::atomic<int64_t> upload_pages{0}, upload_bytes{0};
+  // Run 26 (B.4): the low-memory cushion. switch-game sets host_memory_low
+  // when the host heap headroom is under nx_mem_warn_mib; the texture cache
+  // then destroys textures unused for 10 s, and a std::bad_alloc in the GPU
+  // Commands thread skips the packet instead of terminating.
+  std::atomic<bool> host_memory_low{false};
+  std::atomic<uint64_t> trims{0}, trim_textures{0}, trim_bytes{0};
+  std::atomic<uint64_t> bad_alloc_packets{0};
 };
+
+// Kinds of vkAllocateMemory (from VkMemoryDedicatedAllocateInfo and the
+// memory type): a dedicated image (textures, render targets), a dedicated
+// host-visible buffer (upload pages, readback), a dedicated device-local
+// buffer (the 512 MiB shared memory, scratch), anything else (VMA blocks).
+enum NxVkMemoryKind : int { kNxVkImage = 0, kNxVkHostBuffer, kNxVkDeviceBuffer, kNxVkOther };
 
 // True on the command processor's worker thread (CommandProcessor::WorkerThreadMain).
 inline thread_local bool nx_gpu_on_command_thread = false;

@@ -606,6 +606,8 @@ class TextureCache {
   uint64_t textures_total_host_memory_usage_ = 0;
 
   Texture* texture_used_first_ = nullptr;
+  // Run 26 (B.4): last low-memory trim, in host uptime ms (NX only).
+  uint64_t nx_last_trim_time_ = 0;
   Texture* texture_used_last_ = nullptr;
 
   // Whether a texture has become outdated (a memory watch has been triggered),

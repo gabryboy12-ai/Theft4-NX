@@ -18,6 +18,7 @@
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/graphics/flags.h>
+#include <rex/graphics/nx_gpu_counters.h>
 #include <rex/graphics/pipeline/texture/cache.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
@@ -25,6 +26,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/platform.h>
 
 REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
                      "Texture cache memory limit for render-to-texture (MB)")
@@ -264,6 +266,42 @@ void TextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_inde
       REXCVAR_GET(texture_cache_memory_limit_hard) + limit_scaled_resolve_add_mb;
   uint32_t limit_soft_lifetime = REXCVAR_GET(texture_cache_memory_limit_soft_lifetime) * 1000;
   bool destroyed_any = false;
+#if REX_PLATFORM_NX
+  // Run 26 (B.4): while switch-game reports the host heap under
+  // nx_mem_warn_mib, destroy the textures unused for 10 s whatever the
+  // limits say, at most once a second, with a line each time.
+  auto& nx = rex::graphics::nx_gpu_counters();
+  if (nx.host_memory_low.load(std::memory_order_relaxed) &&
+      current_time >= nx_last_trim_time_ + 1000) {
+    nx_last_trim_time_ = current_time;
+    uint64_t trimmed = 0, trimmed_bytes = 0;
+    while (texture_used_first_ != nullptr) {
+      Texture* texture = texture_used_first_;
+      if (texture->last_usage_submission_index() > completed_submission_index ||
+          texture->last_usage_time() + 10000 > current_time) {
+        break;
+      }
+      if (!destroyed_any) {
+        destroyed_any = true;
+        ResetTextureBindings();  // as below
+      }
+      ++trimmed;
+      trimmed_bytes += texture->GetHostMemoryUsage();
+      auto found_texture_it = textures_.find(texture->key());
+      assert_true(found_texture_it != textures_.end());
+      if (found_texture_it == textures_.end()) {
+        break;  // not in the map: destroying it here would leave a dangling entry
+      }
+      textures_.erase(found_texture_it);
+    }
+    nx.trims.fetch_add(1, std::memory_order_relaxed);
+    nx.trim_textures.fetch_add(trimmed, std::memory_order_relaxed);
+    nx.trim_bytes.fetch_add(trimmed_bytes, std::memory_order_relaxed);
+    REXGPU_WARN("low host memory: destroyed {} textures unused for 10 s ({} KiB); {} left, {} MiB",
+                trimmed, trimmed_bytes >> 10, textures_.size(),
+                textures_total_host_memory_usage_ >> 20);
+  }
+#endif
   while (texture_used_first_ != nullptr) {
     uint64_t total_host_memory_usage_mb =
         (textures_total_host_memory_usage_ + ((UINT32_C(1) << 20) - 1)) >> 20;
@@ -287,6 +325,11 @@ void TextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_inde
       // any texture has been destroyed.
       ResetTextureBindings();
     }
+#if REX_PLATFORM_NX
+    rex::graphics::nx_gpu_counters().textures_evicted.fetch_add(1, std::memory_order_relaxed);
+    rex::graphics::nx_gpu_counters().texture_bytes_evicted.fetch_add(
+        texture->GetHostMemoryUsage(), std::memory_order_relaxed);
+#endif
     // Remove the texture from the map and destroy it via its unique_ptr.
     auto found_texture_it = textures_.find(texture->key());
     assert_true(found_texture_it != textures_.end());
@@ -656,9 +699,15 @@ TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& ke
   outdated_mask_.store(
       (base_outdated_ ? kOutdatedBitBase : 0) | (mips_outdated_ ? kOutdatedBitMips : 0),
       std::memory_order_relaxed);
+#if REX_PLATFORM_NX
+  rex::graphics::nx_gpu_counters().textures_live.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 TextureCache::Texture::~Texture() {
+#if REX_PLATFORM_NX
+  rex::graphics::nx_gpu_counters().textures_live.fetch_sub(1, std::memory_order_relaxed);
+#endif
   if (mips_watch_handle_) {
     texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
   }
@@ -1005,6 +1054,10 @@ void TextureCache::ResetTextureBindings(bool from_destructor) {
 
 void TextureCache::UpdateTexturesTotalHostMemoryUsage(uint64_t add, uint64_t subtract) {
   textures_total_host_memory_usage_ = textures_total_host_memory_usage_ - subtract + add;
+#if REX_PLATFORM_NX
+  rex::graphics::nx_gpu_counters().texture_bytes.store(int64_t(textures_total_host_memory_usage_),
+                                                       std::memory_order_relaxed);
+#endif
   COUNT_profile_set(
       "gpu/texture_cache/total_host_memory_usage_mb",
       uint32_t((textures_total_host_memory_usage_ + ((UINT32_C(1) << 20) - 1)) >> 20));

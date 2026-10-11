@@ -227,6 +227,9 @@ extern "C" char* fake_heap_end;
 #if THEFT4_NX_VULKAN
 // libnx's weak symbol (nv.o, 8 MiB): read by nvInitialize, i.e. when NVK starts.
 extern "C" u32 __nx_nv_transfermem_size;
+// The texture cache's limits (pipeline/texture/cache.cpp), for the mem: line.
+REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_soft);
+REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_hard);
 #endif
 
 namespace {
@@ -1877,6 +1880,114 @@ void CheckVulkanStall() {
     LogThreadSnapshot(when);
   }
 }
+
+// Run 26 (B.1): where the host heap goes, by subsystem, and how much each
+// part grew per minute since the last line. The guest pool is one
+// aligned_alloc at Setup; Vulkan memory is counted at vkAllocateMemory (by
+// kind, nx_gpu_counters.h); nvmap bytes minus Vulkan bytes is NVK's own
+// memory (command buffers, shader heaps, descriptors); what is in use in the
+// heap besides the pool and the nvmaps is the rest of the process (ReXGlue,
+// Mesa's compilers, the game's file buffers, thread stacks).
+struct MemBeat {
+  bool valid = false;
+  u64 tick = 0;
+  int64_t heap = 0, vk = 0, nvk = 0, rest = 0, textures = 0, upload = 0;
+  int64_t kinds[4] = {};
+};
+MemBeat g_mem_beat;
+
+void LogMemoryAccounts() {
+  auto& c = rex::graphics::nx_gpu_counters();
+  const auto a = rex::memory::nx::GetGuestArenaStats();
+  const struct mallinfo mi = mallinfo();
+  const int64_t pool = int64_t(a.pool_blocks) * (2 << 20);
+  const int64_t heap = int64_t(mi.uordblks);
+  int64_t kinds[4], vk = 0, live = 0;
+  for (int k = 0; k < 4; ++k) {
+    kinds[k] = c.vk_bytes[k].load(std::memory_order_relaxed);
+    vk += kinds[k];
+    live += c.vk_live[k].load(std::memory_order_relaxed);
+  }
+  const int64_t nvmap = g_nv.map_bytes.load(std::memory_order_relaxed);
+  const int64_t nvk = nvmap - vk;
+  const int64_t rest = heap - pool - nvmap;
+  const int64_t textures = c.texture_bytes.load(std::memory_order_relaxed);
+  const int64_t upload = c.upload_bytes.load(std::memory_order_relaxed);
+  const u64 now = armGetSystemTick();
+  // MiB per minute since the last line.
+  const double minutes = g_mem_beat.valid ? double(armTicksToNs(now - g_mem_beat.tick)) / 60e9 : 0;
+  auto rate = [&](int64_t now_bytes, int64_t then_bytes) {
+    return minutes > 0 ? double(now_bytes - then_bytes) / double(1 << 20) / minutes : 0.0;
+  };
+  constexpr int kMiB = 20;
+  GAME_INFO("mem: heap in use %" PRId64 " MiB (%+.1f/min) = guest pool %" PRId64 " (%zu of %zu "
+            "blocks used, peak %zu) + nvmaps %" PRId64 " + rest %" PRId64 " (%+.1f/min); "
+            "nvmaps = vulkan %" PRId64 " (%+.1f/min) + NVK's own %" PRId64 " (%+.1f/min)",
+            heap >> kMiB, rate(heap, g_mem_beat.heap), pool >> kMiB, a.mapped_blocks,
+            a.pool_blocks, a.peak_mapped_blocks, nvmap >> kMiB, rest >> kMiB,
+            rate(rest, g_mem_beat.rest), vk >> kMiB, rate(vk, g_mem_beat.vk), nvk >> kMiB,
+            rate(nvk, g_mem_beat.nvk));
+  GAME_INFO("mem: vulkan %" PRId64 " allocations: dedicated images %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min), dedicated host buffers %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min), dedicated device buffers %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min), other (VMA blocks) %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min); %" PRIu64 " allocated, %" PRIu64 " freed, %" PRIu64 " failed",
+            live, c.vk_live[0].load(std::memory_order_relaxed), kinds[0] >> kMiB,
+            rate(kinds[0], g_mem_beat.kinds[0]), c.vk_live[1].load(std::memory_order_relaxed),
+            kinds[1] >> kMiB, rate(kinds[1], g_mem_beat.kinds[1]),
+            c.vk_live[2].load(std::memory_order_relaxed), kinds[2] >> kMiB,
+            rate(kinds[2], g_mem_beat.kinds[2]), c.vk_live[3].load(std::memory_order_relaxed),
+            kinds[3] >> kMiB, rate(kinds[3], g_mem_beat.kinds[3]),
+            c.vk_allocs.load(std::memory_order_relaxed), c.vk_frees.load(std::memory_order_relaxed),
+            c.vk_alloc_failures.load(std::memory_order_relaxed));
+  GAME_INFO("mem: texture cache %" PRId64 " textures, %" PRId64 " MiB (%+.1f/min; limits soft %d, "
+            "hard %d MiB), destroyed by the limits %" PRIu64 " (%" PRIu64 " MiB); upload pages %" PRId64
+            " = %" PRId64 " MiB (%+.1f/min); low-memory trims %" PRIu64 " (%" PRIu64
+            " textures, %" PRIu64 " MiB); packets skipped on bad_alloc %" PRIu64,
+            c.textures_live.load(std::memory_order_relaxed), textures >> kMiB,
+            rate(textures, g_mem_beat.textures),
+            REXCVAR_GET(texture_cache_memory_limit_soft),
+            REXCVAR_GET(texture_cache_memory_limit_hard),
+            c.textures_evicted.load(std::memory_order_relaxed),
+            c.texture_bytes_evicted.load(std::memory_order_relaxed) >> kMiB,
+            c.upload_pages.load(std::memory_order_relaxed), upload >> kMiB,
+            rate(upload, g_mem_beat.upload), c.trims.load(std::memory_order_relaxed),
+            c.trim_textures.load(std::memory_order_relaxed),
+            c.trim_bytes.load(std::memory_order_relaxed) >> kMiB,
+            c.bad_alloc_packets.load(std::memory_order_relaxed));
+  g_mem_beat.valid = true;
+  g_mem_beat.tick = now;
+  g_mem_beat.heap = heap;
+  g_mem_beat.vk = vk;
+  g_mem_beat.nvk = nvk;
+  g_mem_beat.rest = rest;
+  g_mem_beat.textures = textures;
+  g_mem_beat.upload = upload;
+  for (int k = 0; k < 4; ++k) {
+    g_mem_beat.kinds[k] = kinds[k];
+  }
+}
+
+// Run 26 (B.4): once a second, tell the backend whether the host heap is
+// under nx_mem_warn_mib (the texture cache trims while it is). The heartbeat's
+// memory line still reports it every 10 s.
+void UpdateMemoryLowFlag() {
+  static u64 last = 0;
+  const u64 now = armGetSystemTick();
+  if (last && armTicksToNs(now - last) < 1'000'000'000ull) {
+    return;
+  }
+  last = now;
+  const struct mallinfo mi = mallinfo();
+  const char* top = static_cast<const char*>(sbrk(0));
+  const uint64_t sbrk_left =
+      fake_heap_end && top && fake_heap_end > top ? uint64_t(fake_heap_end - top) : 0;
+  const uint64_t headroom = sbrk_left + uint64_t(mi.fordblks);
+  g_heap_headroom.store(headroom, std::memory_order_relaxed);
+  const uint64_t warn = uint64_t(std::max(0, REXCVAR_GET(nx_mem_warn_mib))) << 20;
+  rex::graphics::nx_gpu_counters().host_memory_low.store(headroom < warn,
+                                                          std::memory_order_relaxed);
+}
 #endif  // THEFT4_NX_VULKAN
 
 // Every 10 s: one line; every 60 s: the call count of each export; at 5, 20,
@@ -2013,6 +2124,7 @@ struct Heartbeat {
       LogLogCost(&last_log_lines, &last_log_writes, &last_log_ns);
 #if THEFT4_NX_VULKAN
       LogVulkan(window_s);
+      LogMemoryAccounts();
 #endif
       {
         char when[64];
@@ -2584,6 +2696,7 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     }
     heartbeat.Tick();
 #if THEFT4_NX_VULKAN
+    UpdateMemoryLowFlag();
     CheckVulkanStall();
     CheckFrameCaptures(heartbeat.start);
     if (g_ui_context) {
