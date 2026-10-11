@@ -113,6 +113,7 @@
 #include "nx_input.h"
 #include "nx_profiler.h"
 #include "nx_threads.h"
+#include "theft4_build_commit.h"  // build dir, see build_commit.cmake
 
 #if THEFT4_NX_VULKAN
 #include <rex/graphics/nx_gpu_counters.h>
@@ -834,17 +835,49 @@ void StartLogging() {
   // Run 19: the Vulkan run had no game.toml on the SD (the notes of run 18
   // named it switch-game.toml), so nx_gpu stayed null. Both names are read,
   // game.toml first, and each one found or missing is a [game] line.
+  std::string loaded;
   for (const char* path : {kConfigPath, kAltConfigPath}) {
     struct stat st {};
     const bool found = stat(path, &st) == 0;
     GAME_INFO("config %s: %s", path, found ? "found, loaded" : "not found");
     if (found) {
       rex::cvar::LoadConfig(path);
+      loaded += loaded.empty() ? "" : " + ";
+      loaded += std::strrchr(path, '/') + 1;
     }
   }
   rex::cvar::FinalizeInit();
   GAME_INFO("cvars from argv, then %s and %s; nx_gpu = %s", kConfigPath, kAltConfigPath,
             REXCVAR_GET(nx_gpu).c_str());
+  // Run 24 (C): which NRO and which configuration are running, in one line:
+  // the build's commit, the file(s) read, every Switch cvar, and every cvar
+  // of any category that is not at its default.
+  // Report() cuts a line at 768 bytes: the lists go out in pieces.
+  {
+#if THEFT4_NX_VULKAN
+    constexpr const char* kNroKind = "Vulkan";
+#else
+    constexpr const char* kNroKind = "null GPU only";
+#endif
+    GAME_INFO("build: commit %s, %s NRO; config read: %s", THEFT4_BUILD_COMMIT, kNroKind,
+              loaded.empty() ? "none (all defaults)" : loaded.c_str());
+    const auto log_list = [](const char* title, const std::vector<std::string>& names) {
+      std::string line;
+      int part = 1;
+      for (const std::string& name : names) {
+        line += " " + name + "=" + rex::cvar::GetFlagByName(name);
+        if (line.size() > 560) {
+          GAME_INFO("%s (%d):%s", title, part++, line.c_str());
+          line.clear();
+        }
+      }
+      if (!line.empty() || part == 1) {
+        GAME_INFO("%s (%d):%s", title, part, line.empty() ? " none" : line.c_str());
+      }
+    };
+    log_list("build: Switch cvars", rex::cvar::ListFlagsByCategory("Switch"));
+    log_list("build: cvars not at the default", rex::cvar::ListModifiedFlags());
+  }
   StartLogWriter();
   GAME_INFO("log: %s", g_log_buffered
                            ? "buffered, written once a second by its own thread and at once on "

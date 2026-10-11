@@ -64,7 +64,19 @@ add_executable(switch-game main.cpp nx_input.cpp nx_clocks.cpp nx_profiler.cpp n
     "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
     "${MISSING_IMPORTS_CPP}" ${GENERATED_SOURCES})
 target_compile_features(switch-game PRIVATE cxx_std_23)
+# Run 24 (C): the commit of the build in game.log's start-up line
+# (theft4_build_commit.h, checked at every build, see build_commit.cmake).
+set(THEFT4_BUILD_COMMIT_H "${CMAKE_CURRENT_BINARY_DIR}/theft4_build_commit.h")
+add_custom_target(switch-game-commit
+    COMMAND "${CMAKE_COMMAND}" "-DOUT=${THEFT4_BUILD_COMMIT_H}" "-DREPO=${THEFT4_ROOT}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/build_commit.cmake"
+    BYPRODUCTS "${THEFT4_BUILD_COMMIT_H}"
+    COMMENT "Commit of the build"
+    VERBATIM
+)
+add_dependencies(switch-game switch-game-commit)
 target_include_directories(switch-game PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}"
     "${THEFT4_GENERATED_DIR}"
     "${THEFT4_ROOT}/tools/switch-common"
     "${THEFT4_ROOT}/glue/rexglue-sdk-main/include"
