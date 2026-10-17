@@ -14,10 +14,12 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
+#include <rex/graphics/nx_gpu_counters.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/string.h>
@@ -77,6 +79,68 @@ bool StencilCopyEnabled(VkDevice device) {
   return std::find(stencil_copy_devices.begin(), stencil_copy_devices.end(), device) !=
          stencil_copy_devices.end();
 }
+#if REX_PLATFORM_NX
+// Run 26 (06 section 27, B.1): every vkAllocateMemory/vkFreeMemory of the
+// device counted by kind (rex::graphics::NxVkMemoryKind) in
+// nx_gpu_counters(), for switch-game's mem: line. One device on Switch.
+namespace {
+PFN_vkAllocateMemory g_nx_real_allocate_memory = nullptr;
+PFN_vkFreeMemory g_nx_real_free_memory = nullptr;
+uint32_t g_nx_host_visible_types = 0;
+std::mutex g_nx_memory_mutex;
+std::unordered_map<VkDeviceMemory, std::pair<int, VkDeviceSize>> g_nx_memory;
+
+VKAPI_ATTR VkResult VKAPI_CALL NxCountedAllocateMemory(VkDevice device,
+                                                       const VkMemoryAllocateInfo* info,
+                                                       const VkAllocationCallbacks* allocator,
+                                                       VkDeviceMemory* memory) {
+  auto& c = rex::graphics::nx_gpu_counters();
+  const VkResult result = g_nx_real_allocate_memory(device, info, allocator, memory);
+  if (result != VK_SUCCESS) {
+    c.vk_alloc_failures.fetch_add(1, std::memory_order_relaxed);
+    return result;
+  }
+  int kind = rex::graphics::kNxVkOther;
+  for (auto* s = static_cast<const VkBaseInStructure*>(info->pNext); s; s = s->pNext) {
+    if (s->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO) {
+      const auto* d = reinterpret_cast<const VkMemoryDedicatedAllocateInfo*>(s);
+      if (d->image != VK_NULL_HANDLE) {
+        kind = rex::graphics::kNxVkImage;
+      } else if (d->buffer != VK_NULL_HANDLE) {
+        kind = (g_nx_host_visible_types >> info->memoryTypeIndex) & 1
+                   ? rex::graphics::kNxVkHostBuffer
+                   : rex::graphics::kNxVkDeviceBuffer;
+      }
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_nx_memory_mutex);
+    g_nx_memory[*memory] = {kind, info->allocationSize};
+  }
+  c.vk_live[kind].fetch_add(1, std::memory_order_relaxed);
+  c.vk_bytes[kind].fetch_add(int64_t(info->allocationSize), std::memory_order_relaxed);
+  c.vk_allocs.fetch_add(1, std::memory_order_relaxed);
+  return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL NxCountedFreeMemory(VkDevice device, VkDeviceMemory memory,
+                                               const VkAllocationCallbacks* allocator) {
+  if (memory != VK_NULL_HANDLE) {
+    auto& c = rex::graphics::nx_gpu_counters();
+    std::lock_guard<std::mutex> lock(g_nx_memory_mutex);
+    auto it = g_nx_memory.find(memory);
+    if (it != g_nx_memory.end()) {
+      c.vk_live[it->second.first].fetch_sub(1, std::memory_order_relaxed);
+      c.vk_bytes[it->second.first].fetch_sub(int64_t(it->second.second),
+                                             std::memory_order_relaxed);
+      c.vk_frees.fetch_add(1, std::memory_order_relaxed);
+      g_nx_memory.erase(it);
+    }
+  }
+  g_nx_real_free_memory(device, memory, allocator);
+}
+}  // namespace
+#endif
 
 template <typename Structure, VkStructureType StructureType>
 struct VulkanFeatures {
@@ -1063,6 +1127,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   if (features_KHR_maintenance8.enabled.maintenance8) {
     RegisterStencilCopyDevice(device->device_);
   }
+#if REX_PLATFORM_NX
+  // Before anything allocates (VMA copies the pointers when it is created).
+  g_nx_host_visible_types = device->memory_types_.host_visible;
+  g_nx_real_allocate_memory = device->functions_.vkAllocateMemory;
+  g_nx_real_free_memory = device->functions_.vkFreeMemory;
+  device->functions_.vkAllocateMemory = NxCountedAllocateMemory;
+  device->functions_.vkFreeMemory = NxCountedFreeMemory;
+#endif
+
   return device;
 }
 

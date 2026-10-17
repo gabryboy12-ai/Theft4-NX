@@ -16,8 +16,10 @@
 //      on separate watched pages (is libnx's single exception stack a problem?),
 //      and register integrity: x0-x30, sp, nzcv, fpcr, fpsr, tpidr_el0 and
 //      v0-v31 unique per thread before each fault, compared after the resume,
-//      and the resume pc (0 discrepancies required); then 20 s of the same with
-//      a vector thread and a deep-call thread preempting them (run 23)
+//      and the resume pc (0 discrepancies required); the same through the
+//      SDK's resume trampoline (run 25); then 100,000 faults with a vector
+//      thread and a deep-call thread preempting them (run 23), without and
+//      with the trampoline (run 25)
 //   T11 guest-memory models with svcMapProcessMemory aliases: the alias
 //      primitive on our 2 MiB blocks, model D (every view at commit) and its
 //      ceiling, and the access cost of direct / table / nfsmw-nx's macros
@@ -1357,7 +1359,10 @@ void ProbeFaultRoundTrip(rex::memory::Memory* memory) {
 // thread inside the exception handler included, as the game's threads do.
 constexpr int kT10Threads = 3;
 constexpr u32 kT10Rounds = 10000;
-constexpr u64 kT10StressSeconds = 20;
+// Run 25 (C): phase B runs until 100,000 faults (at most 20 minutes), once
+// resuming as before and once through the SDK's resume trampoline.
+constexpr u64 kT10StressFaults = 100000;
+constexpr u64 kT10StressMaxSeconds = 1200;
 
 // Layout (byte offsets, what the asm below uses). During the round sp points
 // at x_out, so the outputs are stored relative to sp.
@@ -1403,6 +1408,12 @@ void t10_round(T10Block* block);
 // Where the T10 handler sends a worker whose resume went wrong (x0 = block).
 extern char t10_round_recover[];
 void t10_vector_burn(const u64* in, u64* out, u64 iterations);
+// exception_handler_switch.cpp, built with REX_NX_RESUME_TRAMPOLINE in this
+// project only: a handled fault resumes through a user-mode trampoline that
+// reloads every register after svcReturnFromException; x18 comes back equal
+// to the resume pc.
+extern bool rex_nx_resume_trampoline;
+extern uint64_t rex_nx_resume_trampoline_count;
 }
 
 // t10_round: x19-x30 and d8-d15 saved on the C stack; fpcr, fpsr and
@@ -1682,12 +1693,14 @@ enum T10Kind : int {
   kT10FaultCount,
   kT10ReadBack,
   kT10Recovered,
+  kT10X18Trampoline,
   kT10Kinds
 };
 const char* const kT10KindName[kT10Kinds] = {
     "x0-x28", "x29",     "x30",      "sp",        "nzcv",           "fpcr",      "fpsr",
     "tpidr_el0", "v0-v7", "v8-v15", "v16-v31", "resume pc", "faults per store", "read-back",
-    "recovered (unhandled fault after the resume)"};
+    "recovered (unhandled fault after the resume)",
+    "x18 not the resume pc (trampoline)"};
 
 // Per thread, written only by that thread (plain counters, no atomics).
 struct T10Check {
@@ -1722,10 +1735,17 @@ struct T10Check {
   }
 
   void Check(const T10Block& b, int thread, u32 round, u64 faults_before,
-             const RexNxThreadFaults& after) {
+             const RexNxThreadFaults& after, bool trampoline) {
     bool any = false;
     ++rounds;
     for (u32 r = 0; r < 31; ++r) {
+      if (trampoline && r == 18) {
+        // The trampoline branches through x18: it must hold the resume pc.
+        if (b.x_out[18] != b.store_pc) {
+          Note(kT10X18Trampoline, 18, b.store_pc, b.x_out[18], thread, round, &any);
+        }
+        continue;
+      }
       if (b.x_out[r] != b.x_in[r]) {
         Note(r < 29 ? kT10X0to28 : r == 29 ? kT10X29 : kT10X30, r, b.x_in[r], b.x_out[r], thread,
              round, &any);
@@ -1788,12 +1808,12 @@ bool T10RecoverHandler(rex::arch::Exception* ex, void*) {
 
 // One round on the calling thread; returns false if the read-back differs.
 bool T10Round(T10Block* block, T10Check* check, int thread, u32 round, u32 physical,
-              volatile u32* word, rex::memory::Memory* memory, u64 fpcr) {
+              volatile u32* word, rex::memory::Memory* memory, u64 fpcr, bool trampoline) {
   memory->EnablePhysicalMemoryAccessCallbacks(physical, 0x1000, true, false);
   const u32 value = T10Fill(block, thread, round, word, fpcr);
   const u64 faults_before = rex_nx_thread_faults()->handled;
   t10_round(block);  // write fault on the read-only page
-  check->Check(*block, thread, round, faults_before, *rex_nx_thread_faults());
+  check->Check(*block, thread, round, faults_before, *rex_nx_thread_faults(), trampoline);
   if (*word != value) {
     bool any = false;
     check->Note(kT10ReadBack, 0, value, *word, thread, round, &any);
@@ -1821,6 +1841,7 @@ struct T10Run {
   std::atomic<bool> go{false};
   std::atomic<bool> stop{false};
   bool timed_phase = false;  // phase B: run until stop
+  bool trampoline = false;   // resume through the SDK's trampoline
   std::atomic<int> ran_on[kT10Threads] = {};
   std::atomic<u64> ticks[kT10Threads] = {};
   std::atomic<s32> priority[kT10Threads] = {};
@@ -1987,7 +2008,7 @@ bool T10StartFaultThreads(T10Run* run, rex::memory::Memory* memory, const uint32
       for (u32 k = 0; run->timed_phase ? !run->stop.load(std::memory_order_relaxed)
                                        : k < kT10Rounds;
            ++k) {
-        T10Round(block.get(), &check, i, k, physical, word, memory, fpcr);
+        T10Round(block.get(), &check, i, k, physical, word, memory, fpcr, run->trampoline);
       }
       t_t10_block = nullptr;
       t_t10_check = nullptr;
@@ -2019,11 +2040,153 @@ bool T10Join(T10Run* run, int seconds) {
   return ok;
 }
 
+// Resets the per-thread checks and the watch counters before a phase.
+void T10ResetChecks(T10Run* run) {
+  for (int i = 0; i < kT10Threads; ++i) {
+    run->checks[i] = T10Check{};
+    run->watch.slots[i].calls.store(0);
+  }
+  run->go.store(false);
+  run->stop.store(false);
+}
+
+// Phase A: 3 threads x kT10Rounds faults, no stress. Returns true on a timeout.
+bool T10PhaseA(T10Run* run, rex::memory::Memory* memory, const uint32_t* guest,
+               const char* label, bool trampoline, bool* ok) {
+  T10Watch& watch = run->watch;
+  T10ResetChecks(run);
+  run->timed_phase = false;
+  run->trampoline = trampoline;
+  rex_nx_resume_trampoline = trampoline;
+  SMOKE_INFO("T10 %s: about to release the threads (a hang here means a deadlock in the "
+             "fault path)", label);
+  const bool started = T10StartFaultThreads(run, memory, guest);
+  const u64 t0 = armGetSystemTick();
+  run->go.store(true);
+  const bool timed_out = !T10Join(run, 60);
+  const double total_ms = TicksToMs(armGetSystemTick() - t0);
+  *ok &= started && !timed_out && watch.stray_calls.load() == 0;
+  if (!timed_out) {
+    u64 rounds = 0;
+    double us_sum = 0;
+    for (int i = 0; i < kT10Threads; ++i) {
+      const u32 calls = watch.slots[i].calls.load();
+      rounds += run->checks[i].rounds;
+      const bool thread_ok = run->threads[i] && calls == kT10Rounds;
+      *ok &= thread_ok;
+      const double us = TicksToMs(run->ticks[i].load()) * 1000.0 / kT10Rounds;
+      us_sum += us;
+      SMOKE_INFO("T10 %s thread %d on core %d (priority %d): %u callbacks for %u writes, "
+                 "%.2f us per fault -> %s",
+                 label, i, run->ran_on[i].load(), run->priority[i].load(), calls, kT10Rounds, us,
+                 thread_ok ? "ok" : "WRONG");
+    }
+    SMOKE_INFO("T10 %s cost: %.2f us per fault per thread (mean of the %d threads)", label,
+               us_sum / kT10Threads, kT10Threads);
+    T10Report(label, run, rounds);
+    for (int i = 0; i < kT10Threads; ++i) *ok &= run->checks[i].bad_rounds == 0;
+  }
+  const u32 max_in_flight = watch.max_in_flight.load();
+  SMOKE_INFO("T10 %s RESULT %s in %.1f ms; %u stray callbacks; at most %u thread(s) inside "
+             "the handler at once -> %s",
+             label, timed_out ? "TIMEOUT (threads still stuck)" : "done", total_ms,
+             watch.stray_calls.load(), max_in_flight,
+             max_in_flight <= 1 ? "faults are serialised (one exception stack in use at a time)"
+                                : "OVERLAP: two faults shared the libnx exception stack");
+  return timed_out;
+}
+
+// Phase B (run 23 C.2, run 25 C): the fault threads until kT10StressFaults
+// faults (at most kT10StressMaxSeconds) with the vector and deep-call threads.
+// Returns true on a timeout.
+bool T10PhaseB(T10Run* run, rex::memory::Memory* memory, const uint32_t* guest,
+               const char* label, bool trampoline, bool* ok) {
+  T10Watch& watch = run->watch;
+  T10ResetChecks(run);
+  for (int i = 0; i < kT10Threads; ++i) run->priority[i].store(0);
+  run->vector_loops = 0;
+  run->deep_calls = 0;
+  run->deep_bad = 0;
+  for (u64& bad : run->vector_bad) bad = 0;
+  run->timed_phase = true;
+  run->trampoline = trampoline;
+  rex_nx_resume_trampoline = trampoline;
+  const bool started = T10StartFaultThreads(run, memory, guest);
+  // The stress threads: one priority above the fault threads.
+  s32 fault_prio = 0;
+  for (int spin = 0; spin < 1000 && !(fault_prio = run->priority[0].load()); ++spin) {
+    svcSleepThread(1'000'000);
+  }
+  const int stress_prio = fault_prio > 0x1C ? fault_prio - 1 : fault_prio;
+  Thread vector_thread{}, deep_thread{};
+  const Result rv = threadCreate(&vector_thread, T10VectorThread, run, nullptr, 64 * 1024,
+                                 stress_prio, 0);
+  const Result rd = threadCreate(&deep_thread, T10DeepThread, run, nullptr, 1024 * 1024,
+                                 stress_prio, 1);
+  SMOKE_INFO("T10 %s: fault threads at priority %d; vector thread %s, deep-call thread %s at "
+             "priority %d; about to run until %" PRIu64 " faults (at most %" PRIu64 " s)",
+             label, fault_prio, Rc(rv).c_str(), Rc(rd).c_str(), stress_prio, kT10StressFaults,
+             kT10StressMaxSeconds);
+  if (R_SUCCEEDED(rv)) threadStart(&vector_thread);
+  if (R_SUCCEEDED(rd)) threadStart(&deep_thread);
+  const u64 t0 = armGetSystemTick();
+  run->go.store(true);
+  u64 next_line = 60;
+  for (;;) {
+    svcSleepThread(500'000'000);
+    u64 done = 0;
+    for (int i = 0; i < kT10Threads; ++i) {
+      done += __atomic_load_n(&run->checks[i].rounds, __ATOMIC_RELAXED);
+    }
+    const u64 seconds = u64(TicksToMs(armGetSystemTick() - t0) / 1000.0);
+    if (done >= kT10StressFaults || seconds >= kT10StressMaxSeconds) break;
+    if (seconds >= next_line) {
+      SMOKE_INFO("T10 %s: %" PRIu64 " faults after %" PRIu64 " s", label, done, seconds);
+      next_line += 60;
+    }
+  }
+  run->stop.store(true);
+  const bool timed_out = !T10Join(run, 60);
+  const double total_ms = TicksToMs(armGetSystemTick() - t0);
+  if (R_SUCCEEDED(rv)) {
+    threadWaitForExit(&vector_thread);
+    threadClose(&vector_thread);
+  }
+  if (R_SUCCEEDED(rd)) {
+    threadWaitForExit(&deep_thread);
+    threadClose(&deep_thread);
+  }
+  *ok &= started && !timed_out;
+  if (!timed_out) {
+    u64 rounds = 0;
+    double ms_sum = 0;
+    for (int i = 0; i < kT10Threads; ++i) {
+      rounds += run->checks[i].rounds;
+      ms_sum += TicksToMs(run->ticks[i].load());
+    }
+    SMOKE_INFO("T10 %s: %" PRIu64 " faults in %.1f ms = %.0f faults/s (%.1f us of fault-thread "
+               "time per fault); vector thread %" PRIu64 " bursts, wrong v0-v7 %" PRIu64
+               ", v8-v15 %" PRIu64 ", v16-v31 %" PRIu64 "; deep-call thread %" PRIu64
+               " calls of 1500 frames, wrong words %" PRIu64,
+               label, rounds, total_ms, total_ms > 0 ? double(rounds) * 1000.0 / total_ms : 0.0,
+               rounds ? ms_sum * 1000.0 / double(rounds) : 0.0, run->vector_loops,
+               run->vector_bad[0], run->vector_bad[1], run->vector_bad[2], run->deep_calls,
+               run->deep_bad);
+    T10Report(label, run, rounds);
+    for (int i = 0; i < kT10Threads; ++i) *ok &= run->checks[i].bad_rounds == 0;
+    *ok &= run->vector_bad[0] + run->vector_bad[1] + run->vector_bad[2] + run->deep_bad == 0;
+  }
+  SMOKE_INFO("T10 %s RESULT %s; at most %u thread(s) inside the handler at once", label,
+             timed_out ? "TIMEOUT (threads still stuck)" : "done", watch.max_in_flight.load());
+  return timed_out;
+}
+
 void ProbeConcurrentFaults(rex::memory::Memory* memory) {
   SMOKE_INFO("T10 BEGIN concurrent write faults: %d threads x %u faults on separate watched "
              "pages, every register checked (x0-x30, sp, nzcv, fpcr, fpsr, tpidr_el0, v0-v31, "
-             "resume pc), then %" PRIu64 " s with a vector thread and a deep-call thread",
-             kT10Threads, kT10Rounds, kT10StressSeconds);
+             "resume pc), again through the resume trampoline, then %" PRIu64 " faults with a "
+             "vector thread and a deep-call thread without and with the trampoline",
+             kT10Threads, kT10Rounds, kT10StressFaults);
   if (!memory) {
     SMOKE_INFO("T10 SKIP no rex::memory::Memory (step 3 failed)");
     return;
@@ -2050,97 +2213,22 @@ void ProbeConcurrentFaults(rex::memory::Memory* memory) {
   void* handle = memory->RegisterPhysicalMemoryInvalidationCallback(T10Invalidation, &watch);
   rex::arch::ExceptionHandler::Install(T10RecoverHandler, nullptr);
   const RexNxResumeStats stats_before = *rex_nx_resume_stats();
+  bool ok = true;
 
-  // Phase A.
-  SMOKE_INFO("T10 phase A: about to release the threads (a hang here means a deadlock in the "
-             "fault path)");
-  bool started = T10StartFaultThreads(run.get(), memory, guest);
-  u64 t0 = armGetSystemTick();
-  run->go.store(true);
-  bool timed_out = !T10Join(run.get(), 60);
-  double total_ms = TicksToMs(armGetSystemTick() - t0);
-  bool ok = started && !timed_out && watch.stray_calls.load() == 0;
+  // Phase A, then phase A again through the trampoline (cost per fault),
+  // then phase B without and with it.
+  bool timed_out = T10PhaseA(run.get(), memory, guest, "phase A", false, &ok);
   if (!timed_out) {
-    u64 rounds = 0;
-    for (int i = 0; i < kT10Threads; ++i) {
-      const u32 calls = watch.slots[i].calls.load();
-      rounds += run->checks[i].rounds;
-      const bool thread_ok = run->threads[i] && calls == kT10Rounds;
-      ok &= thread_ok;
-      SMOKE_INFO("T10 phase A thread %d on core %d (priority %d): %u callbacks for %u writes, "
-                 "%.2f us per fault -> %s",
-                 i, run->ran_on[i].load(), run->priority[i].load(), calls, kT10Rounds,
-                 TicksToMs(run->ticks[i].load()) * 1000.0 / kT10Rounds,
-                 thread_ok ? "ok" : "WRONG");
-    }
-    T10Report("phase A", run.get(), rounds);
-    for (int i = 0; i < kT10Threads; ++i) ok &= run->checks[i].bad_rounds == 0;
+    timed_out = T10PhaseA(run.get(), memory, guest, "phase A trampoline", true, &ok);
   }
-  const u32 max_in_flight = watch.max_in_flight.load();
-  SMOKE_INFO("T10 phase A RESULT %s in %.1f ms; %u stray callbacks; at most %u thread(s) inside "
-             "the handler at once -> %s",
-             timed_out ? "TIMEOUT (threads still stuck)" : "done", total_ms,
-             watch.stray_calls.load(), max_in_flight,
-             max_in_flight <= 1 ? "faults are serialised (one exception stack in use at a time)"
-                                : "OVERLAP: two faults shared the libnx exception stack");
-
-  // Phase B (C.2).
   if (!timed_out) {
-    for (int i = 0; i < kT10Threads; ++i) {
-      run->checks[i] = T10Check{};
-      watch.slots[i].calls.store(0);
-    }
-    run->go.store(false);
-    run->stop.store(false);
-    run->timed_phase = true;
-    started = T10StartFaultThreads(run.get(), memory, guest);
-    // The stress threads: one priority above the fault threads.
-    s32 fault_prio = 0;
-    for (int spin = 0; spin < 1000 && !(fault_prio = run->priority[0].load()); ++spin) {
-      svcSleepThread(1'000'000);
-    }
-    const int stress_prio = fault_prio > 0x1C ? fault_prio - 1 : fault_prio;
-    Thread vector_thread{}, deep_thread{};
-    const Result rv = threadCreate(&vector_thread, T10VectorThread, run.get(), nullptr, 64 * 1024,
-                                   stress_prio, 0);
-    const Result rd = threadCreate(&deep_thread, T10DeepThread, run.get(), nullptr, 1024 * 1024,
-                                   stress_prio, 1);
-    SMOKE_INFO("T10 phase B: fault threads at priority %d; vector thread %s, deep-call thread %s "
-               "at priority %d; about to run %" PRIu64 " s",
-               fault_prio, Rc(rv).c_str(), Rc(rd).c_str(), stress_prio, kT10StressSeconds);
-    if (R_SUCCEEDED(rv)) threadStart(&vector_thread);
-    if (R_SUCCEEDED(rd)) threadStart(&deep_thread);
-    t0 = armGetSystemTick();
-    run->go.store(true);
-    svcSleepThread(s64(kT10StressSeconds) * 1'000'000'000);
-    run->stop.store(true);
-    timed_out = !T10Join(run.get(), 60);
-    total_ms = TicksToMs(armGetSystemTick() - t0);
-    if (R_SUCCEEDED(rv)) {
-      threadWaitForExit(&vector_thread);
-      threadClose(&vector_thread);
-    }
-    if (R_SUCCEEDED(rd)) {
-      threadWaitForExit(&deep_thread);
-      threadClose(&deep_thread);
-    }
-    ok &= started && !timed_out;
-    if (!timed_out) {
-      u64 rounds = 0;
-      for (int i = 0; i < kT10Threads; ++i) rounds += run->checks[i].rounds;
-      SMOKE_INFO("T10 phase B: %" PRIu64 " faults in %.1f ms = %.0f faults/s; vector thread %" PRIu64
-                 " bursts, wrong v0-v7 %" PRIu64 ", v8-v15 %" PRIu64 ", v16-v31 %" PRIu64
-                 "; deep-call thread %" PRIu64 " calls of 1500 frames, wrong words %" PRIu64,
-                 rounds, total_ms, total_ms > 0 ? double(rounds) * 1000.0 / total_ms : 0.0,
-                 run->vector_loops, run->vector_bad[0], run->vector_bad[1], run->vector_bad[2],
-                 run->deep_calls, run->deep_bad);
-      T10Report("phase B", run.get(), rounds);
-      for (int i = 0; i < kT10Threads; ++i) ok &= run->checks[i].bad_rounds == 0;
-      ok &= run->vector_bad[0] + run->vector_bad[1] + run->vector_bad[2] + run->deep_bad == 0;
-    }
-    SMOKE_INFO("T10 phase B RESULT %s; at most %u thread(s) inside the handler at once",
-               timed_out ? "TIMEOUT (threads still stuck)" : "done", watch.max_in_flight.load());
+    timed_out = T10PhaseB(run.get(), memory, guest, "phase B", false, &ok);
   }
+  if (!timed_out) {
+    timed_out = T10PhaseB(run.get(), memory, guest, "phase B trampoline", true, &ok);
+  }
+  rex_nx_resume_trampoline = false;
+  SMOKE_INFO("T10 trampoline: %" PRIu64 " faults resumed through it", rex_nx_resume_trampoline_count);
   const RexNxResumeStats* s = rex_nx_resume_stats();
   SMOKE_INFO("T10 resume records (exception_handler_switch.cpp): %" PRIu64 " faults resumed, sp/pc "
              "changed in the handler %" PRIu64 ", frame read back wrong %" PRIu64

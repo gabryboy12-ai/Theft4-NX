@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <rex/assert.h>
 
+#include <rex/graphics/nx_gpu_counters.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/platform.h>
 #include <rex/ui/vulkan/upload_buffer_pool.h>
 #include <rex/ui/vulkan/util.h>
 
@@ -168,6 +170,12 @@ GraphicsUploadBufferPool::Page* VulkanUploadBufferPool::CreatePageImplementation
     return nullptr;
   }
 
+#if REX_PLATFORM_NX
+  // Run 26 (B.1): pages are only freed when the pool is destroyed.
+  rex::graphics::nx_gpu_counters().upload_pages.fetch_add(1, std::memory_order_relaxed);
+  rex::graphics::nx_gpu_counters().upload_bytes.fetch_add(int64_t(allocation_size_),
+                                                          std::memory_order_relaxed);
+#endif
   VkBuffer device_buffer = VK_NULL_HANDLE;
   VkDeviceMemory device_memory = VK_NULL_HANDLE;
   if (device_local_mirror_) {

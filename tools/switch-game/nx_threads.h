@@ -50,6 +50,9 @@ struct Info {
 // Fault-safe: the thread with this Horizon thread id.
 bool FindById(uint64_t id, Info* out);
 
+// Fault-safe: the thread with this libnx handle (fault ring, run 24).
+bool FindByHandle(uint32_t handle, Info* out);
+
 // Fault-safe: [lo, hi) of the memory block holding `address`
 // (svcQueryMemory), 0/0 if unmapped.
 void QueryBlock(uint64_t address, uint64_t* lo, uint64_t* hi);

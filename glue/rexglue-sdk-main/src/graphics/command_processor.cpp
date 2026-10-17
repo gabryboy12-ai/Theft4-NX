@@ -13,6 +13,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <new>
 #include <string_view>
 
 #include <fmt/format.h>
@@ -37,6 +38,7 @@
 #include <rex/math.h>
 #include <rex/memory.h>
 #include <rex/memory/ring_buffer.h>
+#include <rex/platform.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
@@ -970,7 +972,33 @@ bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
     case 0x02:
       return ExecutePacketType2(reader, packet);
     case 0x03:
+#if REX_PLATFORM_NX
+    {
+      // Run 26 (B.4): a std::bad_alloc while executing a packet (a draw,
+      // usually) used to reach std::terminate in this thread (run 24). Skip
+      // the rest of the packet instead, with a line; the read offset goes to
+      // the packet's end so the ring stays in step. Whether the backend's
+      // state survives is to be verified.
+      const size_t packet_end =
+          size_t(reader->read_offset()) + ((((packet >> 16) & 0x3FFF) + 1) * sizeof(uint32_t));
+      try {
+        return ExecutePacketType3(reader, packet);
+      } catch (const std::bad_alloc&) {
+        const uint64_t n = rex::graphics::nx_gpu_counters().bad_alloc_packets.fetch_add(
+                               1, std::memory_order_relaxed) +
+                           1;
+        if (n <= 32) {
+          REXGPU_ERROR("out of host memory in PM4 type-3 packet, opcode {:02X}: packet skipped "
+                       "({} so far)",
+                       (packet >> 8) & 0x7F, n);
+        }
+        reader->set_read_offset(packet_end);
+        return true;
+      }
+    }
+#else
       return ExecutePacketType3(reader, packet);
+#endif
     default:
       assert_unhandled_case(packet_type);
       return false;

@@ -18,6 +18,13 @@ endif()
 
 get_filename_component(THEFT4_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 add_subdirectory("${THEFT4_ROOT}/glue/rexglue-sdk-main" rexglue-sdk)
+# Run 25 (C): the resume trampoline of exception_handler_switch.cpp, in this
+# build's copy of the SDK only (switch-game's build does not define it).
+target_compile_definitions(rexcore PRIVATE REX_NX_RESUME_TRAMPOLINE=1)
+# rexcore and rexruntime (which embeds it): keep this build's archives out of the SDK's
+# shared out/switch-aarch64, where switch-game's build would link them.
+set_target_properties(rexcore rexruntime PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/sdk-lib")
 
 add_executable(switch-smoke main.cpp probes.cpp sd_bench.cpp vulkan_probe.cpp nx_elf_stubs.c
     "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp")

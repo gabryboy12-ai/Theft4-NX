@@ -23,6 +23,12 @@ std::unique_ptr<rex::system::IInputSystem> CreatePadInputSystem();
 // with nothing pressed (the exit menu is open).
 void Publish(const PadState* pad, bool muted);
 
+// Run 26 (C): the reads whose buttons changed since the previous read, oldest
+// first (X360 buttons; latched = pressed and released between two reads,
+// delivered by the latch), and how many the ring lost. UI thread only.
+void DrainReads(void (*line)(uint64_t tick, uint16_t buttons, uint16_t latched, uint32_t packet),
+                void (*lost)(uint32_t count));
+
 // Packets published and GetState calls, for the heartbeat.
 void GetCounters(uint64_t* published, uint64_t* reads);
 

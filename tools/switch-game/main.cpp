@@ -117,6 +117,7 @@
 #include "nx_profiler.h"
 #include "nx_perf_csv.h"
 #include "nx_threads.h"
+#include "theft4_build_commit.h"  // build dir, see build_commit.cmake
 
 #if THEFT4_NX_VULKAN
 #include <rex/graphics/nx_ab.h>
@@ -271,13 +272,10 @@ REXCVAR_DEFINE_BOOL(nx_nv_wrap, true, "Switch",
                     "Count NVK's nvdrv calls (fence waits and queries, kickoffs, nvmaps) in the "
                     "link-time wrappers (run 21). false: the wrappers only call the real "
                     "function (run 22 bisection; the wrap itself stays, it is link-time)");
-REXCVAR_DEFINE_BOOL(nx_fault_count_handler, true, "Switch",
-                    "Install the handler that counts every access violation (run 21). false for "
-                    "the run 22 bisection: the 'faults:' line then stays at 0");
-REXCVAR_DEFINE_BOOL(nx_crash_log_after_setup, true, "Switch",
-                    "Install the crash-log handler again after Runtime::Setup, so it sees only "
-                    "unhandled faults (run 21). false: as in run 20, it stays first and writes "
-                    "(with an fsync) every handled write-watch fault too");
+// Run 24 (B): nx_fault_count_handler and nx_crash_log_after_setup are gone.
+// The handler order is fixed: the runtime's (MMIO, write watch) first, ours
+// after Runtime::Setup, so they see only the faults nobody handled; the
+// counts and the last faults come from the exception entry (memory only).
 REXCVAR_DEFINE_BOOL(nx_stack_watch, true, "Switch",
                     "Fill every new thread's stack with a pattern before it starts and log "
                     "each stack's size and deepest use every minute (run 23, C.3)");
@@ -329,6 +327,9 @@ extern "C" char* fake_heap_end;
 #if THEFT4_NX_VULKAN
 // libnx's weak symbol (nv.o, 8 MiB): read by nvInitialize, i.e. when NVK starts.
 extern "C" u32 __nx_nv_transfermem_size;
+// The texture cache's limits (pipeline/texture/cache.cpp), for the mem: line.
+REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_soft);
+REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_hard);
 #endif
 
 namespace {
@@ -601,21 +602,125 @@ void CrashWriteState(const char* why) {
   if (g_crash_fd >= 0) fsync(g_crash_fd);
 }
 
-// Run 21: every access violation, handled or not (the Vulkan backend's write
-// watch on guest memory takes one per watched page the guest writes). Installed
-// first; never claims the fault.
-std::atomic<uint64_t> g_faults{0};
-bool FaultCountHandler(rex::arch::Exception*, void*) {
-  g_faults.fetch_add(1, std::memory_order_relaxed);
-  return false;
+// One line of the fault ring: built in a stack buffer, then one write.
+struct CrashLine {
+  char text[320];
+  size_t n = 0;
+  void Str(const char* s) {
+    while (*s && n < sizeof(text) - 2) text[n++] = *s++;
+  }
+  void Hex(uint64_t value) {
+    static const char kHex[] = "0123456789abcdef";
+    Str("0x");
+    for (int shift = 60; shift >= 0 && n < sizeof(text) - 2; shift -= 4) {
+      text[n++] = kHex[(value >> shift) & 0xF];
+    }
+  }
+  void Dec(uint64_t value) {
+    char digits[24];
+    int d = 0;
+    do {
+      digits[d++] = char('0' + value % 10);
+      value /= 10;
+    } while (value && d < 20);
+    while (d && n < sizeof(text) - 2) text[n++] = digits[--d];
+  }
+  void End() {
+    text[n++] = '\n';
+    text[n] = 0;
+    CrashWrite(text);
+    n = 0;
+  }
+};
+
+// Run 24 (B): the exception entry's ring of the last faults (handled or not,
+// memory only until now), newest first, with each fault's thread and time.
+// Fault-safe; one writer at a time (a second one notes it and returns).
+void CrashWriteFaultRing() {
+  static std::atomic<bool> busy{false};
+  if (busy.exchange(true)) {
+    CrashWrite("fault ring: written by another thread at the same time\n");
+    return;
+  }
+  const RexNxFaultRing* ring = rex_nx_fault_ring();
+  const RexNxResumeStats* s = rex_nx_resume_stats();
+  const RexNxPhysicalFaultStats* p = rex_nx_physical_fault_stats();
+  const uint64_t count = ring->count;
+  CrashLine l;
+  l.Str("=== fault ring: ");
+  l.Dec(count);
+  l.Str(" faults since start (");
+  l.Dec(s->handled);
+  l.Str(" handled, ");
+  l.Dec(s->unhandled);
+  l.Str(" unhandled; physical: stale protection recovered ");
+  l.Dec(p->stale_recovered);
+  l.Str(", unexplained ");
+  l.Dec(p->unhandled);
+  l.Str("), last ");
+  l.Dec(count < REX_NX_FAULT_RING_SIZE ? count : REX_NX_FAULT_RING_SIZE);
+  l.Str(" newest first ===");
+  l.End();
+  for (uint64_t k = 0; k < REX_NX_FAULT_RING_SIZE && k < count; ++k) {
+    const RexNxFaultEntry& e = ring->entries[(count - 1 - k) % REX_NX_FAULT_RING_SIZE];
+    theft4::nx_threads::Info info;
+    theft4::nx_threads::FindByHandle(uint32_t(e.thread_handle), &info);
+    l.Str("#");
+    l.Dec(e.seq);
+    l.Str(" at ");
+    l.Dec(armTicksToNs(e.entry_tick - g_start_tick) / 1'000'000);
+    l.Str(" ms, ");
+    l.Str(e.handled ? "handled" : e.ticks ? "UNHANDLED" : "UNHANDLED or in progress");
+    l.Str(" in ");
+    l.Dec(armTicksToNs(e.ticks) / 1000);
+    l.Str(" us; thread ");
+    l.Str(!info.found ? "(not in the table)" : info.name[0] ? info.name : "?");
+    l.Str(" id ");
+    l.Dec(info.id);
+    l.Str(" handle ");
+    l.Hex(e.thread_handle);
+    l.Str(" type ");
+    l.Dec(e.type);
+    l.End();
+    l.Str("  pc - base ");
+    l.Hex(e.pc - g_module_base);
+    l.Str(" lr ");
+    l.Hex(e.lr);
+    l.Str(" sp ");
+    l.Hex(e.sp);
+    l.Str(" far ");
+    l.Hex(e.far);
+    l.Str(" esr ");
+    l.Hex(e.esr);
+    l.End();
+    l.Str("  resumed with pc - base ");
+    l.Hex(e.resume_pc - g_module_base);
+    l.Str(" sp ");
+    l.Hex(e.resume_sp);
+    l.End();
+    for (int i = 0; i < 31; i += 4) {
+      l.Str("  ");
+      for (int j = i; j < i + 4 && j < 31; ++j) {
+        l.Str("x");
+        l.Dec(uint64_t(j));
+        l.Str(j < 10 ? "  " : " ");
+        l.Hex(e.x[j]);
+        l.Str(" ");
+      }
+      l.End();
+    }
+  }
+  CrashWrite("=== end of the fault ring ===\n");
+  busy.store(false);
 }
 
 // Runs only for access violations no runtime handler claimed (MMIO, physical
-// write watch): installed before Runtime::Setup, it is installed again after
-// it so that it comes after the MMIO handler (run 20 logged every handled
-// write-watch fault here, 2282 in run 20's third boot, each with an fsync).
-// Records the fault; returning false leaves it unhandled, and the runtime ends
-// it in svcBreak (Atmosphere crash report).
+// write watch): installed after Runtime::Setup, so after the MMIO handler (run
+// 20 logged every handled write-watch fault here, 2282 in run 20's third
+// boot, each with an fsync; runs 22-23 did again with nx_crash_log_after_setup
+// = false, ~300 ms in the handler per fault). Records the fault and the fault
+// ring; returning false leaves it unhandled, and the runtime ends it in
+// svcBreak (Atmosphere crash report).
 bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
   const auto* tc = ex->thread_context();
   CrashWrite("=== unhandled access violation ===\n");
@@ -635,6 +740,8 @@ bool CrashLogHandler(rex::arch::Exception* ex, void* /*data*/) {
     CrashHex(name, tc->x[i]);
   }
   CrashWriteState("state:");
+  CrashWriteFaultRing();
+  if (g_crash_fd >= 0) fsync(g_crash_fd);
   // The lines still in the buffer (nx_log_durable = false), if nobody holds it.
   if (g_log_buffered && g_log_file_mutex.try_lock()) {
     FlushBufferLocked(true);
@@ -761,6 +868,9 @@ void LogTermination(const char* what, int code, const void* caller) {
     char why[96];
     std::snprintf(why, sizeof(why), "=== termination: %s(%d) ===", what, code);
     CrashWriteState(why);
+    // Run 24 (B): the faults kept in memory until now.
+    CrashWriteFaultRing();
+    if (g_crash_fd >= 0) fsync(g_crash_fd);
   }
   if (t_in_termination_log || !g_logging_ready) {
     return;
@@ -824,6 +934,8 @@ void CrashWriteLibnxExit(const char* what, uint64_t value, const void* caller) {
   CrashHex("value      ", value);
   CrashHex("caller - base", reinterpret_cast<u64>(caller) - g_module_base);
   CrashWriteState("state:");
+  CrashWriteFaultRing();
+  if (g_crash_fd >= 0) fsync(g_crash_fd);
 }
 }  // namespace
 
@@ -935,12 +1047,15 @@ void StartLogging() {
   // Run 19: the Vulkan run had no game.toml on the SD (the notes of run 18
   // named it switch-game.toml), so nx_gpu stayed null. Both names are read,
   // game.toml first, and each one found or missing is a [game] line.
+  std::string loaded;
   for (const char* path : {kConfigPath, kAltConfigPath}) {
     struct stat st {};
     const bool found = stat(path, &st) == 0;
     GAME_INFO("config %s: %s", path, found ? "found, loaded" : "not found");
     if (found) {
       rex::cvar::LoadConfig(path);
+      loaded += loaded.empty() ? "" : " + ";
+      loaded += std::strrchr(path, '/') + 1;
     }
   }
   rex::cvar::FinalizeInit();
@@ -951,6 +1066,35 @@ void StartLogging() {
   rex::SetDefaultLevel(REXCVAR_GET(nx_log_debug) ? spdlog::level::debug : spdlog::level::info);
   GAME_INFO("SDK log level: %s (cvar nx_log_debug)",
             REXCVAR_GET(nx_log_debug) ? "debug" : "info");
+  // Run 24 (C): which NRO and which configuration are running, in one line:
+  // the build's commit, the file(s) read, every Switch cvar, and every cvar
+  // of any category that is not at its default.
+  // Report() cuts a line at 768 bytes: the lists go out in pieces.
+  {
+#if THEFT4_NX_VULKAN
+    constexpr const char* kNroKind = "Vulkan";
+#else
+    constexpr const char* kNroKind = "null GPU only";
+#endif
+    GAME_INFO("build: commit %s, %s NRO; config read: %s", THEFT4_BUILD_COMMIT, kNroKind,
+              loaded.empty() ? "none (all defaults)" : loaded.c_str());
+    const auto log_list = [](const char* title, const std::vector<std::string>& names) {
+      std::string line;
+      int part = 1;
+      for (const std::string& name : names) {
+        line += " " + name + "=" + rex::cvar::GetFlagByName(name);
+        if (line.size() > 560) {
+          GAME_INFO("%s (%d):%s", title, part++, line.c_str());
+          line.clear();
+        }
+      }
+      if (!line.empty() || part == 1) {
+        GAME_INFO("%s (%d):%s", title, part, line.empty() ? " none" : line.c_str());
+      }
+    };
+    log_list("build: Switch cvars", rex::cvar::ListFlagsByCategory("Switch"));
+    log_list("build: cvars not at the default", rex::cvar::ListModifiedFlags());
+  }
   StartLogWriter();
   GAME_INFO("log: %s", g_log_buffered
                            ? "buffered, written once a second by its own thread and at once on "
@@ -2301,6 +2445,114 @@ struct AbSchedule {
   }
 };
 AbSchedule g_ab;
+
+// Run 26 (B.1): where the host heap goes, by subsystem, and how much each
+// part grew per minute since the last line. The guest pool is one
+// aligned_alloc at Setup; Vulkan memory is counted at vkAllocateMemory (by
+// kind, nx_gpu_counters.h); nvmap bytes minus Vulkan bytes is NVK's own
+// memory (command buffers, shader heaps, descriptors); what is in use in the
+// heap besides the pool and the nvmaps is the rest of the process (ReXGlue,
+// Mesa's compilers, the game's file buffers, thread stacks).
+struct MemBeat {
+  bool valid = false;
+  u64 tick = 0;
+  int64_t heap = 0, vk = 0, nvk = 0, rest = 0, textures = 0, upload = 0;
+  int64_t kinds[4] = {};
+};
+MemBeat g_mem_beat;
+
+void LogMemoryAccounts() {
+  auto& c = rex::graphics::nx_gpu_counters();
+  const auto a = rex::memory::nx::GetGuestArenaStats();
+  const struct mallinfo mi = mallinfo();
+  const int64_t pool = int64_t(a.pool_blocks) * (2 << 20);
+  const int64_t heap = int64_t(mi.uordblks);
+  int64_t kinds[4], vk = 0, live = 0;
+  for (int k = 0; k < 4; ++k) {
+    kinds[k] = c.vk_bytes[k].load(std::memory_order_relaxed);
+    vk += kinds[k];
+    live += c.vk_live[k].load(std::memory_order_relaxed);
+  }
+  const int64_t nvmap = g_nv.map_bytes.load(std::memory_order_relaxed);
+  const int64_t nvk = nvmap - vk;
+  const int64_t rest = heap - pool - nvmap;
+  const int64_t textures = c.texture_bytes.load(std::memory_order_relaxed);
+  const int64_t upload = c.upload_bytes.load(std::memory_order_relaxed);
+  const u64 now = armGetSystemTick();
+  // MiB per minute since the last line.
+  const double minutes = g_mem_beat.valid ? double(armTicksToNs(now - g_mem_beat.tick)) / 60e9 : 0;
+  auto rate = [&](int64_t now_bytes, int64_t then_bytes) {
+    return minutes > 0 ? double(now_bytes - then_bytes) / double(1 << 20) / minutes : 0.0;
+  };
+  constexpr int kMiB = 20;
+  GAME_INFO("mem: heap in use %" PRId64 " MiB (%+.1f/min) = guest pool %" PRId64 " (%zu of %zu "
+            "blocks used, peak %zu) + nvmaps %" PRId64 " + rest %" PRId64 " (%+.1f/min); "
+            "nvmaps = vulkan %" PRId64 " (%+.1f/min) + NVK's own %" PRId64 " (%+.1f/min)",
+            heap >> kMiB, rate(heap, g_mem_beat.heap), pool >> kMiB, a.mapped_blocks,
+            a.pool_blocks, a.peak_mapped_blocks, nvmap >> kMiB, rest >> kMiB,
+            rate(rest, g_mem_beat.rest), vk >> kMiB, rate(vk, g_mem_beat.vk), nvk >> kMiB,
+            rate(nvk, g_mem_beat.nvk));
+  GAME_INFO("mem: vulkan %" PRId64 " allocations: dedicated images %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min), dedicated host buffers %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min), dedicated device buffers %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min), other (VMA blocks) %" PRId64 " = %" PRId64
+            " MiB (%+.1f/min); %" PRIu64 " allocated, %" PRIu64 " freed, %" PRIu64 " failed",
+            live, c.vk_live[0].load(std::memory_order_relaxed), kinds[0] >> kMiB,
+            rate(kinds[0], g_mem_beat.kinds[0]), c.vk_live[1].load(std::memory_order_relaxed),
+            kinds[1] >> kMiB, rate(kinds[1], g_mem_beat.kinds[1]),
+            c.vk_live[2].load(std::memory_order_relaxed), kinds[2] >> kMiB,
+            rate(kinds[2], g_mem_beat.kinds[2]), c.vk_live[3].load(std::memory_order_relaxed),
+            kinds[3] >> kMiB, rate(kinds[3], g_mem_beat.kinds[3]),
+            c.vk_allocs.load(std::memory_order_relaxed), c.vk_frees.load(std::memory_order_relaxed),
+            c.vk_alloc_failures.load(std::memory_order_relaxed));
+  GAME_INFO("mem: texture cache %" PRId64 " textures, %" PRId64 " MiB (%+.1f/min; limits soft %d, "
+            "hard %d MiB), destroyed by the limits %" PRIu64 " (%" PRIu64 " MiB); upload pages %" PRId64
+            " = %" PRId64 " MiB (%+.1f/min); low-memory trims %" PRIu64 " (%" PRIu64
+            " textures, %" PRIu64 " MiB); packets skipped on bad_alloc %" PRIu64,
+            c.textures_live.load(std::memory_order_relaxed), textures >> kMiB,
+            rate(textures, g_mem_beat.textures),
+            REXCVAR_GET(texture_cache_memory_limit_soft),
+            REXCVAR_GET(texture_cache_memory_limit_hard),
+            c.textures_evicted.load(std::memory_order_relaxed),
+            c.texture_bytes_evicted.load(std::memory_order_relaxed) >> kMiB,
+            c.upload_pages.load(std::memory_order_relaxed), upload >> kMiB,
+            rate(upload, g_mem_beat.upload), c.trims.load(std::memory_order_relaxed),
+            c.trim_textures.load(std::memory_order_relaxed),
+            c.trim_bytes.load(std::memory_order_relaxed) >> kMiB,
+            c.bad_alloc_packets.load(std::memory_order_relaxed));
+  g_mem_beat.valid = true;
+  g_mem_beat.tick = now;
+  g_mem_beat.heap = heap;
+  g_mem_beat.vk = vk;
+  g_mem_beat.nvk = nvk;
+  g_mem_beat.rest = rest;
+  g_mem_beat.textures = textures;
+  g_mem_beat.upload = upload;
+  for (int k = 0; k < 4; ++k) {
+    g_mem_beat.kinds[k] = kinds[k];
+  }
+}
+
+// Run 26 (B.4): once a second, tell the backend whether the host heap is
+// under nx_mem_warn_mib (the texture cache trims while it is). The heartbeat's
+// memory line still reports it every 10 s.
+void UpdateMemoryLowFlag() {
+  static u64 last = 0;
+  const u64 now = armGetSystemTick();
+  if (last && armTicksToNs(now - last) < 1'000'000'000ull) {
+    return;
+  }
+  last = now;
+  const struct mallinfo mi = mallinfo();
+  const char* top = static_cast<const char*>(sbrk(0));
+  const uint64_t sbrk_left =
+      fake_heap_end && top && fake_heap_end > top ? uint64_t(fake_heap_end - top) : 0;
+  const uint64_t headroom = sbrk_left + uint64_t(mi.fordblks);
+  g_heap_headroom.store(headroom, std::memory_order_relaxed);
+  const uint64_t warn = uint64_t(std::max(0, REXCVAR_GET(nx_mem_warn_mib))) << 20;
+  rex::graphics::nx_gpu_counters().host_memory_low.store(headroom < warn,
+                                                          std::memory_order_relaxed);
+}
 #endif  // THEFT4_NX_VULKAN
 
 // Every 10 s: one line; every 60 s: the call count of each export; at 5, 20,
@@ -2317,7 +2569,7 @@ struct Heartbeat {
   u64 last_line_tick = 0;
   u64 last_rates_s = 0;
   uint64_t last_log_lines = 0, last_log_writes = 0, last_log_ns = 0;
-  uint64_t last_faults = 0;
+  uint64_t last_faults = 0, last_fault_ticks = 0;
 
   void Tick() {
     const u64 now_tick = armGetSystemTick();
@@ -2338,14 +2590,30 @@ struct Heartbeat {
       const std::string clocks = theft4::nx_clocks::Describe(theft4::nx_clocks::Read());
       GAME_INFO("clocks: %s", clocks.c_str());
       {
-        const uint64_t faults = g_faults.load(std::memory_order_relaxed);
-        GAME_INFO("faults: %" PRIu64 " access violations since start, %" PRIu64
-                  " in the window (handled ones are the Vulkan write watch on guest memory)",
-                  faults, faults - last_faults);
-        last_faults = faults;
+        // Run 24 (B): counted by the exception entry (handled = the Vulkan
+        // write watch on guest memory), with the time in the dispatcher.
+        const RexNxResumeStats* r = rex_nx_resume_stats();
+        const RexNxPhysicalFaultStats* p = rex_nx_physical_fault_stats();
+        const uint64_t handled = r->handled;
+        const uint64_t ticks = r->handled_ticks;
+        const uint64_t window_faults = handled - last_faults;
+        const uint64_t window_ticks = ticks - last_fault_ticks;
+        const uint64_t max_ns = armTicksToNs(rex_nx_take_fault_ticks_max());
+        const double fault_window_s = double(seconds - last_line_s);
+        GAME_INFO("faults: %" PRIu64 " handled since start, %" PRIu64
+                  " in the window (%.1f/s); time per handled fault in the window: mean %" PRIu64
+                  " ns, max %" PRIu64 " ns; since start mean %" PRIu64
+                  " ns; unhandled %" PRIu64 "; physical: stale protection recovered %" PRIu64
+                  ", unexplained %" PRIu64,
+                  handled, window_faults,
+                  fault_window_s > 0 ? double(window_faults) / fault_window_s : 0.0,
+                  window_faults ? armTicksToNs(window_ticks) / window_faults : 0, max_ns,
+                  handled ? armTicksToNs(ticks) / handled : 0, r->unhandled, p->stale_recovered,
+                  p->unhandled);
+        last_faults = handled;
+        last_fault_ticks = ticks;
         // Run 23 (D.2): the faults the exception entry resumed, and whether
         // the sp / pc it resumed with ever differed from the ones it got.
-        const RexNxResumeStats* r = rex_nx_resume_stats();
         GAME_INFO("resume: %" PRIu64 " faults resumed since start; sp/pc changed in the handler "
                   "%" PRIu64 ", frame read back wrong %" PRIu64 ", repaired %" PRIu64
                   " (nx_resume_guard %d)",
@@ -2422,6 +2690,7 @@ struct Heartbeat {
 #if THEFT4_NX_VULKAN
       LogVulkan(window_s);
       g_ab.Step(window_s);
+      LogMemoryAccounts();
 #endif
       {
         char when[64];
@@ -2435,6 +2704,14 @@ struct Heartbeat {
         theft4::nx_input::GetCounters(&published, &reads);
         GAME_INFO("input: %" PRIu64 " pad states published, %" PRIu64 " XamInputGetState reads",
                   published, reads);
+        // Run 26 (C): what the game read, when its buttons changed.
+        theft4::nx_input::DrainReads(
+            [](uint64_t tick, uint16_t buttons, uint16_t latched, uint32_t packet) {
+              GAME_INFO("input read at %.3f s: 360 buttons 0x%04x (latched 0x%04x), packet %u",
+                        double(armTicksToNs(tick - g_start_tick)) / 1e9, buttons, latched,
+                        packet);
+            },
+            [](uint32_t count) { GAME_INFO("input reads: %u changes lost (ring full)", count); });
       }
       if (REXCVAR_GET(nx_audio)) {
         // Run 2's sound came in bursts: real time is 187.5 frames of 256
@@ -2770,9 +3047,9 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
 
   StartLogging();
   CaptureTerminations();
-  if (REXCVAR_GET(nx_fault_count_handler)) {
-    rex::arch::ExceptionHandler::Install(FaultCountHandler, nullptr);
-  }
+  // The crash log for a fault before Runtime::Setup (no runtime handler yet);
+  // moved behind the runtime's handlers right after Setup (run 24, B: always,
+  // the guest code that takes handled faults starts only after Setup).
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
 #if THEFT4_NX_VULKAN
   g_nv_count.store(REXCVAR_GET(nx_nv_wrap), std::memory_order_relaxed);
@@ -2797,12 +3074,13 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   GAME_INFO("C2 sync fast paths: object lookup %d, notify one %d; A/B sync modes %d",
             int(REXCVAR_GET(nx_sync_fast_lookup)), int(REXCVAR_GET(nx_sync_notify_one)),
             int(REXCVAR_GET(nx_ab_sync_modes)));
-  GAME_INFO("run 21 pieces: nx_apm_clock %d, nx_nv_wrap %d, nx_fault_count_handler %d, "
-            "nx_crash_log_after_setup %d, nx_profile %d, nx_vk_mesa_messenger (in the SDK) on "
-            "unless set false; nx_mount_cache %d",
+  GAME_INFO("run 21 pieces: nx_apm_clock %d, nx_nv_wrap %d, nx_profile %d, "
+            "nx_vk_mesa_messenger (in the SDK) on unless set false; nx_mount_cache %d",
             int(REXCVAR_GET(nx_apm_clock)), int(REXCVAR_GET(nx_nv_wrap)),
-            int(REXCVAR_GET(nx_fault_count_handler)), int(REXCVAR_GET(nx_crash_log_after_setup)),
             int(REXCVAR_GET(nx_profile)), int(REXCVAR_GET(nx_mount_cache)));
+  GAME_INFO("run 24 pieces: handled faults recorded in memory only (fault ring of %d, written "
+            "on an unhandled fault, abort or exit); runtime handlers first, ours after Setup",
+            REX_NX_FAULT_RING_SIZE);
   GAME_INFO("run 23 pieces: vector registers saved first in the exception entry (always), "
             "crash record with threads and stacks (always), nx_stack_watch %d, "
             "nx_resume_guard %d",
@@ -2962,12 +3240,11 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     WaitForPlusAndExit(&g_pad);
   }
   LogArena("after Setup");
-  // Setup installed the MMIO handler (and the write watch); the crash log goes
-  // after it again, so that it sees only the faults nobody handled.
-  if (REXCVAR_GET(nx_crash_log_after_setup)) {
-    rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
-    rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
-  }
+  // Setup installed the MMIO handler (and the write watch); the crash log and
+  // the crash record go after it, so that they see only the faults nobody
+  // handled (run 24, B: always, no cvar).
+  rex::arch::ExceptionHandler::Uninstall(CrashLogHandler, nullptr);
+  rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
   // Run 23 (D.2): last of all, only for the faults nobody handled.
   rex::arch::ExceptionHandler::Install(CrashFinalHandler, nullptr);
 #if THEFT4_NX_VULKAN
@@ -3078,6 +3355,7 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     }
     heartbeat.Tick();
 #if THEFT4_NX_VULKAN
+    UpdateMemoryLowFlag();
     CheckVulkanStall();
     CheckFrameCaptures(heartbeat.start);
     if (g_ui_context) {

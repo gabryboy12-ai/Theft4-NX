@@ -26,6 +26,24 @@ std::atomic<uint64_t> g_hi{0};  // ly, rx, ry
 std::atomic<uint32_t> g_packet{0};
 std::atomic<uint64_t> g_published{0};
 std::atomic<uint64_t> g_reads{0};
+// Run 26 (C): buttons pressed since the last GetState. The game reads the pad
+// once per frame, and a frame took 2-10 s in run 25: a press of 0.1-0.3 s
+// fell between two reads and the game never saw it. A press now stays in the
+// published state until one read has returned it.
+std::atomic<uint16_t> g_latched{0};
+// Run 26 (C): every read whose buttons differ from the previous read's, with
+// the read's tick, for the heartbeat (a ring of 64; older entries are lost
+// when the heartbeat does not drain them in time, and counted).
+struct ReadEvent {
+  uint64_t tick;
+  uint16_t buttons, latched;
+  uint32_t packet;
+};
+constexpr uint32_t kReadRing = 64;
+ReadEvent g_read_ring[kReadRing];
+std::atomic<uint32_t> g_read_head{0};
+uint32_t g_read_tail = 0;  // UI thread only
+std::atomic<uint16_t> g_last_read_buttons{0};
 
 Packed Load() {
   const uint64_t lo = g_lo.load(std::memory_order_acquire);
@@ -79,8 +97,17 @@ class PadInputSystem final : public rex::system::IInputSystem {
     if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;
     g_reads.fetch_add(1, std::memory_order_relaxed);
     if (out_state) {
-      out_state->packet_number = g_packet.load(std::memory_order_acquire);
-      Fill(&out_state->gamepad, Load());
+      Packed p = Load();
+      const uint16_t latched = g_latched.exchange(0, std::memory_order_acq_rel);
+      const uint16_t extra = uint16_t(latched & ~p.buttons);
+      p.buttons |= latched;
+      out_state->packet_number = g_packet.load(std::memory_order_acquire) + (extra ? 1 : 0);
+      Fill(&out_state->gamepad, p);
+      if (g_last_read_buttons.exchange(p.buttons, std::memory_order_relaxed) != p.buttons) {
+        const uint32_t i = g_read_head.fetch_add(1, std::memory_order_acq_rel);
+        g_read_ring[i % kReadRing] = {armGetSystemTick(), p.buttons, extra,
+                                      out_state->packet_number};
+      }
     }
     return X_ERROR_SUCCESS;
   }
@@ -127,6 +154,9 @@ void Publish(const PadState* pad, bool muted) {
     for (const Map& m : kMap) {
       if (b & m.nx) p.buttons |= m.x;
     }
+    if (p.buttons) {
+      g_latched.fetch_or(p.buttons, std::memory_order_acq_rel);
+    }
     p.left_trigger = (b & HidNpadButton_ZL) ? 0xFF : 0;
     p.right_trigger = (b & HidNpadButton_ZR) ? 0xFF : 0;
     const HidAnalogStickState l = padGetStickPos(pad, 0);
@@ -146,6 +176,20 @@ void Publish(const PadState* pad, bool muted) {
     g_packet.fetch_add(1, std::memory_order_release);
   }
   g_published.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DrainReads(void (*line)(uint64_t tick, uint16_t buttons, uint16_t latched,
+                               uint32_t packet),
+                void (*lost)(uint32_t count)) {
+  const uint32_t head = g_read_head.load(std::memory_order_acquire);
+  if (head - g_read_tail > kReadRing) {
+    lost(head - g_read_tail - kReadRing);
+    g_read_tail = head - kReadRing;
+  }
+  for (; g_read_tail != head; ++g_read_tail) {
+    const ReadEvent& e = g_read_ring[g_read_tail % kReadRing];
+    line(e.tick, e.buttons, e.latched, e.packet);
+  }
 }
 
 void GetCounters(uint64_t* published, uint64_t* reads) {
