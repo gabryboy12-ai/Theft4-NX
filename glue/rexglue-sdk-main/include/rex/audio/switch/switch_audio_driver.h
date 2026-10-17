@@ -7,16 +7,16 @@
  *
  * Switch audio driver using libnx audren (audio renderer) API.
  * Uses the high-level AudioDriver wrapper from libnx for voice-based PCM
- * output with double-buffered wave buffers for gapless playback.
+ * output with eight-buffered wave buffers for gapless playback.
  */
 
 #pragma once
 
 #if REX_PLATFORM_NX
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
-#include <queue>
-#include <stack>
 
 #include <rex/audio/audio_driver.h>
 #include <rex/thread.h>
@@ -28,6 +28,15 @@ extern "C" {
 
 namespace rex::audio::nx {
 
+// Since start, for switch-game's heartbeat (run 2's sound came in bursts).
+struct NxAudioCounters {
+  std::atomic<uint64_t> frames{0};   // frames handed to the renderer
+  std::atomic<uint64_t> starved{0};  // frames that found nothing queued: the output had run dry
+  std::atomic<uint64_t> dropped{0};  // frames dropped after a 500 ms wait for a buffer
+  std::atomic<uint64_t> wait_ns{0};  // waiting for a free buffer (the game was ahead)
+};
+NxAudioCounters& nx_audio_counters();
+
 class SwitchAudioDriver : public AudioDriver {
  public:
   SwitchAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore);
@@ -36,6 +45,9 @@ class SwitchAudioDriver : public AudioDriver {
   bool Initialize();
   void SubmitFrame(uint32_t frame_ptr) override;
   void Shutdown();
+  uint32_t RecommendedInitialCredits(uint32_t maximum) const override {
+    return maximum < kWaveBufCount ? maximum : kWaveBufCount;
+  }
 
  protected:
   rex::thread::Semaphore* semaphore_ = nullptr;
@@ -46,6 +58,7 @@ class SwitchAudioDriver : public AudioDriver {
   bool audren_service_initialized_ = false;
   bool audren_driver_initialized_ = false;
   bool voice_initialized_ = false;
+  bool owns_renderer_ = false;
   // Serializes access to audrv* calls (audrvUpdate is NOT thread-safe).
   std::mutex audren_mutex_ = {};
 
@@ -64,21 +77,17 @@ class SwitchAudioDriver : public AudioDriver {
   static const uint32_t kOutputFrameSize =
       kChannelSamples * kOutputChannels * kOutputSampleBytes;
 
-  // Double-buffer wave buffers for gapless playback.
-  static const int kWaveBufCount = 2;
+  // Eight-buffer wave buffers for gapless playback.
+  static const int kWaveBufCount = 8;
   AudioDriverWaveBuf wavebufs_[kWaveBufCount] = {};
   int16_t* pcm_buffers_[kWaveBufCount] = {};
   int current_buf_ = 0;
   uint64_t slot_wait_timeouts_ = 0;  // frames dropped by WaitForCurrentSlotReusable
+  uint64_t update_failures_ = 0;     // audren_mutex_ protects this counter
 
   // Aligned memory pool registered with audren.
   void* mempool_ptr_ = nullptr;
   size_t mempool_size_ = 0;
-
-  // Queue of frames received from the guest, awaiting consumption.
-  std::queue<float*> frames_queued_ = {};
-  std::stack<float*> frames_unused_ = {};
-  std::mutex frames_mutex_ = {};
 
   void ConvertAndSubmit(const float* input);
 

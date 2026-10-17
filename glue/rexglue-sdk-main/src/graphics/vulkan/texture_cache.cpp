@@ -29,6 +29,7 @@
 #include <rex/graphics/vulkan/texture_cache.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/ui/vulkan/gpu_only_allocation.h>
 #include <rex/ui/vulkan/mem_alloc.h>
 #include <rex/ui/vulkan/ui_samplers.h>
 #include <rex/ui/vulkan/util.h>
@@ -1190,6 +1191,8 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
 
   VkImage image;
   VmaAllocation allocation;
+  // Texture memory is only touched by the GPU (loads go through staging).
+  ui::vulkan::GpuOnlyAllocationScope gpu_only(true);
   if (vmaCreateImage(vma_allocator_, &image_create_info, &allocation_create_info, &image,
                      &allocation, nullptr)) {
     return nullptr;
@@ -1605,7 +1608,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                           &load_constants.host_offset);
       }
       command_processor_.SubmitBarriers(true);
-      command_buffer.CmdVkDispatch(group_count_x, group_count_y, load_constants.size_blocks[2]);
+      command_buffer.CmdVkDispatch(group_count_x, group_count_y, load_constants.size_blocks[2], DeferredCommandBuffer::GpuOperation::kTextureLoad);
       load_constants.guest_offset += level_array_slice_stride_bytes_scaled;
       load_constants.host_offset += uint32_t(level_host_layout.slice_size_bytes);
     }
@@ -1706,7 +1709,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         }
         command_processor_.SubmitBarriers(true);
         command_buffer.CmdVkDispatch(group_count_x, group_count_y,
-                                     load_constants_float_convert.size_blocks[2]);
+                                     load_constants_float_convert.size_blocks[2], DeferredCommandBuffer::GpuOperation::kTextureConvert);
         load_constants_float_convert.guest_offset += level_array_slice_stride_bytes;
         load_constants_float_convert.host_offset += level_array_slice_stride_bytes;
       }
@@ -1988,6 +1991,7 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
 
     VkImage image_2d;
     VmaAllocation allocation_2d;
+    ui::vulkan::GpuOnlyAllocationScope gpu_only(true);
     if (vmaCreateImage(vulkan_texture_cache.vma_allocator_, &image_create_info,
                        &allocation_create_info, &image_2d, &allocation_2d, nullptr) != VK_SUCCESS) {
       REXGPU_ERROR("VulkanTextureCache: Failed to create 3D-as-2D wrapper image");

@@ -42,6 +42,7 @@
 REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
                       "Vulkan render target implementation path")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DECLARE(bool, vulkan_device_uniform_buffers);
 REXCVAR_DEFINE_BOOL(
     vulkan_ownership_transfer_diagnostics, false, "GPU/Vulkan",
     "Count standalone render-target ownership-transfer work for bounded "
@@ -749,7 +750,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   }
   direct_host_resolve_constants_pool_ =
       std::make_unique<ui::vulkan::VulkanUploadBufferPool>(
-          vulkan_device, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+          vulkan_device, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+          ui::GraphicsUploadBufferPool::kDefaultPageSize,
+          REXCVAR_GET(vulkan_device_uniform_buffers));
 #endif
 
   // Resolve copy pipelines.
@@ -1288,6 +1291,13 @@ void VulkanRenderTargetCache::EndSubmission() {
   }
 }
 
+ui::vulkan::VulkanUploadBufferPool::DeviceUploadStats
+VulkanRenderTargetCache::RecordDeviceUniformUploads(VkCommandBuffer command_buffer) {
+  if (!direct_host_resolve_constants_pool_) return {};
+  return direct_host_resolve_constants_pool_->RecordDeviceUploads(
+      command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+}
+
 void VulkanRenderTargetCache::ResetTraceDownload() {
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -1688,7 +1698,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 sizeof(copy_shader_constants), &copy_shader_constants);
           }
           command_processor_.SubmitBarriers(true);
-          command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
+          command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1, DeferredCommandBuffer::GpuOperation::kResolveCopy);
 
           // Invalidate textures and mark the range as scaled if needed.
           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
@@ -1748,7 +1758,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                             sizeof(depth_clear_constants), &depth_clear_constants);
           command_processor_.SubmitBarriers(true);
-          command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1);
+          command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1, DeferredCommandBuffer::GpuOperation::kEdramClear);
         }
         if (clear_color) {
           command_processor_.BindExternalComputePipeline(
@@ -1768,7 +1778,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 sizeof(color_clear_constants), &color_clear_constants);
           }
           command_processor_.SubmitBarriers(true);
-          command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1);
+          command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1, DeferredCommandBuffer::GpuOperation::kEdramClear);
         }
         MarkEdramBufferModified();
         cleared = true;
@@ -5400,7 +5410,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             uint32_t(offsetof(HostDepthStoreConstants, rectangle)),
             sizeof(host_depth_store_rectangle_constant), &host_depth_store_rectangle_constant);
         command_processor_.SubmitBarriers(true);
-        command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
+        command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1, DeferredCommandBuffer::GpuOperation::kEdramClear);
         MarkEdramBufferModified();
       }
     }
@@ -7314,7 +7324,7 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
           uint32_t(rex::countof(descriptor_sets)), descriptor_sets, 0, nullptr);
       command_processor_.SubmitBarriers(true);
       command_buffer.CmdVkDispatch((constants.thread_count_x + 7) >> 3,
-                                   (constants.thread_count_y + 7) >> 3, 1);
+                                   (constants.thread_count_y + 7) >> 3, 1, DeferredCommandBuffer::GpuOperation::kResolveDirect);
     }
   }
 
@@ -7456,7 +7466,7 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
           (draw_resolution_scale_y() * xenos::kEdramTileHeightSamples * dispatch.height_tiles +
            (kDumpSamplesPerGroupY - 1)) /
               kDumpSamplesPerGroupY,
-          1);
+          1, DeferredCommandBuffer::GpuOperation::kEdramDump);
     }
     MarkEdramBufferModified();
   }

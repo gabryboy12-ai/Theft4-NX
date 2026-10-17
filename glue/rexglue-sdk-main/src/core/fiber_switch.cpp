@@ -40,7 +40,7 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
   stack_size = (stack_size + 15) & ~size_t(15);
 
   // newlib declares posix_memalign but libnx/newlib does not provide it.
-  void* stack = std::aligned_alloc(16, stack_size);
+  void* stack = ::aligned_alloc(16, stack_size);
   if (!stack) return nullptr;
 
   auto* f = new Fiber();

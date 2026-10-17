@@ -986,6 +986,17 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       device->memory_types_.host_cached |= memory_type_bit;
     }
   }
+  for (uint32_t heap_index = 0; heap_index < memory_properties.memoryHeapCount; ++heap_index) {
+    REXLOG_INFO("Vulkan memory heap {}: {} MiB, flags 0x{:X}", heap_index,
+                memory_properties.memoryHeaps[heap_index].size >> 20,
+                uint32_t(memory_properties.memoryHeaps[heap_index].flags));
+  }
+  for (uint32_t memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount;
+       ++memory_type_index) {
+    REXLOG_INFO("Vulkan memory type {}: heap {}, flags 0x{:X}", memory_type_index,
+                memory_properties.memoryTypes[memory_type_index].heapIndex,
+                uint32_t(memory_properties.memoryTypes[memory_type_index].propertyFlags));
+  }
 
   return device;
 }

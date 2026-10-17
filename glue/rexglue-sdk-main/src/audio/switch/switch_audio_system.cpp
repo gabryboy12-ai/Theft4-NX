@@ -24,7 +24,7 @@ std::unique_ptr<AudioSystem> SwitchAudioSystem::Create(
 SwitchAudioSystem::SwitchAudioSystem(runtime::FunctionDispatcher* function_dispatcher)
     : AudioSystem(function_dispatcher) {}
 
-SwitchAudioSystem::~SwitchAudioSystem() {}
+SwitchAudioSystem::~SwitchAudioSystem() { Shutdown(); }
 
 void SwitchAudioSystem::Initialize() {
   AudioSystem::Initialize();

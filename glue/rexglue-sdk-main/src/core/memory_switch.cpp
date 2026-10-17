@@ -449,7 +449,7 @@ bool ReserveGuestArena(GuestArena* out) {
   const size_t pool_blocks =
       size_t(std::max<int32_t>(REXCVAR_GET(nx_guest_pool_mib), 2)) / 2;
   uint8_t* pool =
-      static_cast<uint8_t*>(std::aligned_alloc(kNxBlockSize, pool_blocks * kNxBlockSize));
+      static_cast<uint8_t*>(::aligned_alloc(kNxBlockSize, pool_blocks * kNxBlockSize));
   if (!pool) {
     REXSYS_ERROR("memory_switch: cannot allocate the {} MiB guest pool (cvar nx_guest_pool_mib)",
                  pool_blocks * 2);
@@ -599,7 +599,7 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
                  base_address);
     return nullptr;
   }
-  void* memory = std::aligned_alloc(kNxPageSize, page_len);
+  void* memory = ::aligned_alloc(kNxPageSize, page_len);
   if (memory) {
     std::memset(memory, 0, page_len);
   }

@@ -12,6 +12,7 @@
 
 #include <rex/ui/graphics_upload_buffer_pool.h>
 #include <rex/ui/vulkan/device.h>
+#include <vector>
 
 namespace rex {
 namespace ui {
@@ -20,7 +21,19 @@ namespace vulkan {
 class VulkanUploadBufferPool : public GraphicsUploadBufferPool {
  public:
   VulkanUploadBufferPool(const VulkanDevice* vulkan_device, VkBufferUsageFlags usage,
-                         size_t page_size = kDefaultPageSize);
+                         size_t page_size = kDefaultPageSize,
+                         bool device_local_mirror = false);
+
+  struct DeviceUploadStats {
+    uint64_t copies = 0;
+    uint64_t bytes = 0;
+  };
+  // Call after FlushWrites, outside any render pass, before commands using
+  // returned buffers. CPU mappings remain staging-only; mirrors are never
+  // mapped, so GPU caching does not break host coherence on the Switch.
+  DeviceUploadStats RecordDeviceUploads(VkCommandBuffer command_buffer,
+                                       VkPipelineStageFlags consumer_stages);
+  void ClearCache();
 
   uint8_t* Request(uint64_t submission_index, size_t size, size_t alignment, VkBuffer& buffer_out,
                    VkDeviceSize& offset_out);
@@ -36,13 +49,16 @@ class VulkanUploadBufferPool : public GraphicsUploadBufferPool {
   struct VulkanPage : public Page {
     // Takes ownership of the buffer and its memory and mapping.
     VulkanPage(const VulkanDevice* vulkan_device, VkBuffer buffer, VkDeviceMemory memory,
-               void* mapping)
-        : vulkan_device_(vulkan_device), buffer_(buffer), memory_(memory), mapping_(mapping) {}
+               void* mapping, VkBuffer device_buffer, VkDeviceMemory device_memory)
+        : vulkan_device_(vulkan_device), buffer_(buffer), memory_(memory), mapping_(mapping),
+          device_buffer_(device_buffer), device_memory_(device_memory) {}
     ~VulkanPage() override;
     const VulkanDevice* vulkan_device_;
     VkBuffer buffer_;
     VkDeviceMemory memory_;
     void* mapping_;
+    VkBuffer device_buffer_;
+    VkDeviceMemory device_memory_;
   };
 
   const VulkanDevice* vulkan_device_;
@@ -53,6 +69,13 @@ class VulkanUploadBufferPool : public GraphicsUploadBufferPool {
   uint32_t memory_type_ = UINT32_MAX;
 
   VkBufferUsageFlags usage_;
+  bool device_local_mirror_;
+  struct PendingDeviceUpload {
+    VkBuffer source;
+    VkBuffer destination;
+    VkBufferCopy region;
+  };
+  std::vector<PendingDeviceUpload> pending_device_uploads_;
 };
 
 }  // namespace vulkan

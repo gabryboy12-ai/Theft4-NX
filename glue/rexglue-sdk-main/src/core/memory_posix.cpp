@@ -367,14 +367,26 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
       return kFileMappingHandleInvalid;
   }
   oflag |= O_CREAT;
+#if defined(REX_LOCAL_FILE_BACKING_DIRECTORY)
+  auto full_path = std::string(REX_LOCAL_FILE_BACKING_DIRECTORY) + "/" + path.filename().string();
+#else
   auto full_path = MakeShmName(path);
+#endif
+#if defined(REX_LOCAL_FILE_BACKING_DIRECTORY)
+  int ret = open(full_path.c_str(), oflag | O_EXCL | O_NOFOLLOW, 0600);
+#else
   int ret = shm_open(full_path.c_str(), oflag, 0777);
+#endif
   if (ret < 0) {
     return kFileMappingHandleInvalid;
   }
   if (ftruncate64(ret, static_cast<off_t>(length)) != 0) {
     close(ret);
+    #if defined(REX_LOCAL_FILE_BACKING_DIRECTORY)
+    unlink(full_path.c_str());
+#else
     shm_unlink(full_path.c_str());
+#endif
     return kFileMappingHandleInvalid;
   }
   return static_cast<FileMappingHandle>(ret);
@@ -384,8 +396,16 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
 void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
   close(static_cast<int>(handle));
 #if !REX_PLATFORM_ANDROID
+#if defined(REX_LOCAL_FILE_BACKING_DIRECTORY)
+  auto full_path = std::string(REX_LOCAL_FILE_BACKING_DIRECTORY) + "/" + path.filename().string();
+#else
   auto full_path = MakeShmName(path);
-  shm_unlink(full_path.c_str());
+#endif
+  #if defined(REX_LOCAL_FILE_BACKING_DIRECTORY)
+    unlink(full_path.c_str());
+#else
+    shm_unlink(full_path.c_str());
+#endif
 #endif
 }
 

@@ -14,11 +14,18 @@
 #include <rex/assert.h>
 #include <rex/math.h>
 #include <rex/ui/vulkan/device.h>
+#include <rex/ui/vulkan/gpu_only_allocation.h>
 #include <rex/ui/vulkan/util.h>
 
 namespace rex {
 namespace ui {
 namespace vulkan {
+
+bool& GpuOnlyAllocation() {
+  thread_local bool gpu_only = false;
+  return gpu_only;
+}
+
 namespace util {
 
 void FlushMappedMemoryRange(const VulkanDevice* const vulkan_device, const VkDeviceMemory memory,
@@ -91,6 +98,7 @@ bool CreateDedicatedAllocationBuffer(const VulkanDevice* const vulkan_device,
     memory_dedicated_allocate_info.buffer = buffer;
   }
   VkDeviceMemory memory;
+  GpuOnlyAllocationScope gpu_only(memory_purpose == MemoryPurpose::kDeviceLocal);
   if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &memory) != VK_SUCCESS) {
     dfn.vkDestroyBuffer(device, buffer, nullptr);
     return false;
@@ -156,6 +164,7 @@ bool CreateDedicatedAllocationImage(const VulkanDevice* const vulkan_device,
     memory_dedicated_allocate_info.buffer = VK_NULL_HANDLE;
   }
   VkDeviceMemory memory;
+  GpuOnlyAllocationScope gpu_only(memory_purpose == MemoryPurpose::kDeviceLocal);
   if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &memory) != VK_SUCCESS) {
     dfn.vkDestroyImage(device, image, nullptr);
     return false;

@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -25,11 +26,32 @@ class VulkanCommandProcessor;
 
 class DeferredCommandBuffer {
  public:
+  // Diagnostic boundaries use BOTTOM_OF_PIPE on both sides. They partition
+  // completion times without adding barriers or waiting for the GPU. Adjacent
+  // work may overlap, so these are scheduling costs, not isolated benchmarks.
+  enum class GpuOperation : uint32_t {
+    kRender, kTextureLoad, kTextureConvert, kResolveCopy, kResolveDirect,
+    kEdramDump, kEdramClear, kPresent, kDownscale, kTransfer, kBarrier,
+    kOther, kCount
+  };
+  struct OperationTimestamps {
+    static constexpr uint32_t kMaxSegments = 512;
+    static constexpr uint32_t kQueryCount = kMaxSegments + 3;
+    struct Segment {
+      GpuOperation operation = GpuOperation::kOther;
+      uint64_t commands = 0;
+      uint64_t work_items = 0;
+    };
+    std::array<Segment, kMaxSegments> segments{};
+    uint32_t segment_count = 0;
+    uint64_t overflow_commands = 0;
+  };
   DeferredCommandBuffer(const VulkanCommandProcessor& command_processor,
                         size_t initial_size_bytes = 1024 * 1024);
 
   void Reset();
-  void Execute(VkCommandBuffer command_buffer);
+  void Execute(VkCommandBuffer command_buffer, VkQueryPool timestamp_pool = VK_NULL_HANDLE,
+               OperationTimestamps* timestamps = nullptr);
 
   // render_pass_begin->pNext of all barriers must be null.
   void CmdVkBeginRenderPass(const VkRenderPassBeginInfo* render_pass_begin,
@@ -224,12 +246,14 @@ class DeferredCommandBuffer {
     args.flags = flags;
   }
 
-  void CmdVkDispatch(uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) {
+  void CmdVkDispatch(uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z,
+                     GpuOperation operation = GpuOperation::kOther) {
     auto& args = *reinterpret_cast<ArgsVkDispatch*>(
         WriteCommand(Command::kVkDispatch, sizeof(ArgsVkDispatch)));
     args.group_count_x = group_count_x;
     args.group_count_y = group_count_y;
     args.group_count_z = group_count_z;
+    args.operation = operation;
   }
 
   void CmdVkDraw(uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
@@ -502,6 +526,7 @@ class DeferredCommandBuffer {
     uint32_t group_count_x;
     uint32_t group_count_y;
     uint32_t group_count_z;
+    GpuOperation operation;
   };
 
   struct ArgsVkDraw {

@@ -85,7 +85,7 @@ std::unique_ptr<MappedMemory> MappedMemory::Open(const std::filesystem::path& pa
   // aligned_alloc requires a size that is a multiple of the alignment.
   const size_t alloc_size =
       ((map_length ? map_length : 1) + kBufferAlignment - 1) & ~(kBufferAlignment - 1);
-  void* data = std::aligned_alloc(kBufferAlignment, alloc_size);
+  void* data = ::aligned_alloc(kBufferAlignment, alloc_size);
   if (!data) {
     REXLOG_ERROR("MappedMemory::Open({}): cannot allocate {} bytes", path.string(), alloc_size);
     std::fclose(file);

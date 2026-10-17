@@ -25,6 +25,7 @@
 #include <rex/cvar.h>
 #include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
+#include <rex/logging/default_level.h>
 #include <rex/platform.h>
 #include <rex/platform/env.h>
 
@@ -400,6 +401,11 @@ void SetAllLevels(spdlog::level::level_enum level) {
     if (entry.logger)
       entry.logger->set_level(level);
   }
+}
+
+void SetDefaultLevel(spdlog::level::level_enum level) {
+  g_config.default_level = level;
+  SetAllLevels(level);
 }
 
 void SetRootLevel(LogCategoryId root, spdlog::level::level_enum level) {

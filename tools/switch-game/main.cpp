@@ -91,6 +91,7 @@
 #include <rex/filesystem.h>
 #include <rex/kernel/init.h>
 #include <rex/logging.h>
+#include <rex/logging/default_level.h>
 #include <rex/memory/utils.h>
 #include <rex/platform/nx_fault_record.h>
 #include <rex/runtime.h>
@@ -98,6 +99,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xfile.h>
 #include <rex/audio/null_audio_system.h>
+#include <rex/audio/switch/switch_audio_driver.h>
+#include <rex/audio/switch/switch_audio_system.h>
 #include <rex/system/null_graphics_system.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
@@ -112,11 +115,13 @@
 #include "nx_exit.h"
 #include "nx_input.h"
 #include "nx_profiler.h"
+#include "nx_perf_csv.h"
 #include "nx_threads.h"
 
 #if THEFT4_NX_VULKAN
 #include <rex/graphics/nx_gpu_counters.h>
 #include <rex/graphics/vulkan/graphics_system.h>
+#include <rex/ui/vulkan/gpu_only_allocation.h>
 #include <rex/ui/vulkan/provider.h>
 #include <rex/ui/window_nx.h>
 #include <rex/ui/windowed_app_context_nx.h>
@@ -129,7 +134,7 @@ REXCVAR_DEFINE_BOOL(nx_null_gpu, true, "Switch",
 REXCVAR_DEFINE_BOOL(nx_input, true, "Switch",
                     "Give the game the Switch controller as its 360 pad (nx_input.h). false: "
                     "no input system, XamInputGetState says not connected (run 14)");
-REXCVAR_DEFINE_STRING(nx_gpu, "null", "Switch",
+REXCVAR_DEFINE_STRING(nx_gpu, "vulkan", "Switch",
                       "GPU: null = the null GPU (nx_null_gpu = false: none); vulkan = ReXGlue's "
                       "Vulkan backend on NVK, presenting on the default NWindow with the console "
                       "closed (only in a build with THEFT4_SWITCH_GAME_VULKAN; 06 section 24)");
@@ -138,7 +143,7 @@ REXCVAR_DEFINE_BOOL(nx_log_durable, false, "Switch",
                     "close on the thread that logs: slow on the SD, for crash hunting); false: a "
                     "writer thread appends the lines once a second, and the exit steps, "
                     "terminations, the stop and faults write them at once (run 19)");
-REXCVAR_DEFINE_BOOL(nx_trace_exports, true, "Switch",
+REXCVAR_DEFINE_BOOL(nx_trace_exports, false, "Switch",
                     "Trace every export (counts, first calls, the export each thread is inside "
                     "for the snapshots); false for measurement runs (export_stubs.h)");
 REXCVAR_DEFINE_BOOL(nx_disable_auto_sleep, true, "Switch",
@@ -148,10 +153,12 @@ REXCVAR_DEFINE_INT32(nx_nvmap_mb, 0, "Switch",
                      "nx_gpu = vulkan: MB of libnx's nvdrv transfer memory "
                      "(__nx_nv_transfermem_size, bookkeeping of every GPU allocation; libnx 8). 0 = "
                      "leave libnx's (nfsmw-nx: 0x235C SharedMemoryTooSmall when it runs out)");
+REXCVAR_DEFINE_BOOL(nx_audio, true, "Switch", "Native stereo sound via the Switch audio renderer");
+REXCVAR_DEFINE_BOOL(nx_vk_capture_frames, false, "Switch", "Diagnostic GPU readback and pixel statistics; may stall rendering");
 REXCVAR_DEFINE_BOOL(nx_vk_dump_frames, false, "Switch",
                     "nx_gpu = vulkan: also write the guest output captured at 20, 40, 60, 120 "
                     "and 240 s as PPM files in sdmc:/switch/theft4/frames (the capture and its "
-                    "pixel statistics are logged in any case)");
+                    "pixel statistics require nx_vk_capture_frames or nx_vk_dump_frames)");
 REXCVAR_DEFINE_BOOL(nx_mount_cache, false, "Switch",
                     "Mount cache: and cache1: on the SD (run 12). Default false since run 21: "
                     "the game then reads everything from game: as a 360 without a hard disk "
@@ -163,6 +170,46 @@ REXCVAR_DEFINE_BOOL(nx_apm_clock, true, "Switch",
                     "460.8 MHz, memory 1331.2, CPU 1020) through apm, at start and on every "
                     "dock/handheld change; docked is left alone. No boost, no overclock; the "
                     "clocks read back are in the heartbeat (nx_clocks.h)");
+REXCVAR_DEFINE_BOOL(nx_perf_csv, false, "Switch",
+                    "Write a separate performance CSV for each run, once per Vulkan heartbeat; "
+                    "records frames, draws, CPU time, fence waits and pipeline creation")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Run 3: run 2 was CPU-bound at 1020 MHz (pipeline compilation, the game's
+// threads, its audio mixer); these are sys-clk's job done in the game, with
+// Nintendo's own top steps only (nx_clocks.h).
+REXCVAR_DEFINE_INT32(nx_cpu_mhz, 1785, "Switch",
+                     "CPU clock set through clkrst on top of the apm configuration, in MHz "
+                     "(0 = keep 1020; at most 1785, the boost-mode clock)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nx_gpu_mhz, 768, "Switch",
+                     "GPU clock set through clkrst, in MHz (0 = keep 460.8; at most 768, the "
+                     "docked clock; above 460.8 in handheld mode only on Mariko consoles)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nx_emc_mhz, 1600, "Switch",
+                     "Memory clock set through clkrst, in MHz (0 = keep 1331.2; at most 1600)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_shader_storage, true, "Switch",
+                    "Keep the guest shaders, the pipeline descriptions and NVK's compiled "
+                    "pipelines in sdmc:/switch/theft4/runtime-cache/shaders, and build them "
+                    "before the first draw of the next run (run 2 compiled ~290 pipelines at "
+                    "0.3-1 s each, every run)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nx_gpu_l2, 2, "Switch",
+                     "GPU L2 caching of NVK's mappings (__wrap_nvioctlNvhostAsGpu_MapBufferEx): "
+                     "0 = as NVK maps them, all uncached; 1 = block-linear images cached "
+                     "(textures, render targets); 2 = also all memory the renderer never maps "
+                     "(shared memory and EDRAM buffers, texture and render target memory). "
+                     "If the picture breaks or the GPU hangs, try 1, then 0")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_direct_resolve, true, "Switch",
+                    "Resolve supported host render targets directly into guest memory, "
+                    "avoiding intermediate EDRAM dumps; unsupported cases use the existing path")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_log_debug, false, "Switch",
+                    "true: the SDK's debug lines in game.log too. Run 2 wrote one per finished "
+                    "file read and one per frame, ~10000 SD writes competing with the game's "
+                    "own streaming; false: info and above")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(nx_profile, false, "Switch",
                     "Sample the busy threads once a millisecond (pause, read pc/lr/frames, "
                     "resume) and log a histogram every 10 s; where.py --profile sums it per "
@@ -197,7 +244,7 @@ REXCVAR_DEFINE_STRING(nx_exit_mode, "D", "Switch",
 namespace {
 
 constexpr const char* kRootDir = "sdmc:/switch/theft4";
-constexpr const char* kGameDir = "sdmc:/switch/theft4/game";
+constexpr const char* kGameDir = "sdmc:/LibertyRecomp/game";
 constexpr const char* kLogPath = "sdmc:/switch/theft4/game.log";
 constexpr const char* kPreviousLogPath = "sdmc:/switch/theft4/game.prev.log";
 constexpr const char* kCrashPath = "sdmc:/switch/theft4/game-crash.log";
@@ -828,6 +875,7 @@ void StartLogging() {
   g_logging_ready = true;
   rex::InitLogging(config);
   GAME_INFO("switch-game: log %s, crash log %s", kLogPath, kCrashPath);
+  GAME_INFO("build: nx-perf-20261012-r7 (GPU-only cached uniform buffers; native audio)");
   if (!policy_ok) {
     GAME_ERROR("diagnostics::Configure(logging): %s", policy_error.c_str());
   }
@@ -845,6 +893,11 @@ void StartLogging() {
   rex::cvar::FinalizeInit();
   GAME_INFO("cvars from argv, then %s and %s; nx_gpu = %s", kConfigPath, kAltConfigPath,
             REXCVAR_GET(nx_gpu).c_str());
+  // SetDefaultLevel, not SetAllLevels: run 3 still had the kernel's debug
+  // lines, from a category logger created after this point.
+  rex::SetDefaultLevel(REXCVAR_GET(nx_log_debug) ? spdlog::level::debug : spdlog::level::info);
+  GAME_INFO("SDK log level: %s (cvar nx_log_debug)",
+            REXCVAR_GET(nx_log_debug) ? "debug" : "info");
   StartLogWriter();
   GAME_INFO("log: %s", g_log_buffered
                            ? "buffered, written once a second by its own thread and at once on "
@@ -896,6 +949,38 @@ bool CheckGameFiles() {
                kGameDir);
     return false;
   }
+  // Stream the XEX before allocating guest memory. Region alone cannot identify
+  // a revision: running a different image against these functions is unsafe.
+  std::FILE* executable = std::fopen((game / "default.xex").c_str(), "rb");
+  if (!executable) {
+    GAME_ERROR("cannot read default.xex for executable verification (errno %d)", errno);
+    return false;
+  }
+  Sha256Context sha;
+  sha256ContextCreate(&sha);
+  uint8_t buffer[16 * 1024];
+  size_t read;
+  while ((read = std::fread(buffer, 1, sizeof(buffer), executable)) != 0) {
+    sha256ContextUpdate(&sha, buffer, read);
+  }
+  const bool read_failed = std::ferror(executable) != 0;
+  const bool close_failed = std::fclose(executable) != 0;
+  if (read_failed || close_failed) {
+    GAME_ERROR("default.xex verification failed: file read error");
+    return false;
+  }
+  uint8_t digest[SHA256_HASH_SIZE];
+  sha256ContextGetHash(&sha, digest);
+  char actual[SHA256_HASH_SIZE * 2 + 1];
+  for (size_t i = 0; i < sizeof(digest); ++i) {
+    std::snprintf(actual + i * 2, 3, "%02x", unsigned(digest[i]));
+  }
+  if (std::strcmp(actual, THEFT4_EXPECTED_XEX_SHA256) != 0) {
+    GAME_ERROR("default.xex SHA256 %s does not match this build (%s); generate a matching build",
+               actual, THEFT4_EXPECTED_XEX_SHA256);
+    return false;
+  }
+  GAME_INFO("default.xex matches the executable used for code generation (%s)", actual);
   return true;
 }
 
@@ -1407,6 +1492,7 @@ struct VulkanBeat {
   uint64_t presents = 0, draws = 0, submits = 0;
   uint64_t submit_ns = 0, present_ns = 0, fence_waits = 0, fence_wait_ns = 0;
   uint64_t nv_kickoffs = 0, nv_waits = 0, nv_wait_ns = 0, nv_queries = 0;
+  uint64_t nv_wait_success = 0, nv_wait_timeout = 0, nv_wait_error = 0;
   uint64_t submit_failures = 0, present_failures = 0;
   uint64_t pipelines = 0, pipeline_ns = 0, pipelines_cp = 0, pipeline_ns_cp = 0;
   uint64_t shaders = 0, shader_ns = 0, shaders_cp = 0, shader_ns_cp = 0;
@@ -1422,11 +1508,21 @@ struct NvCalls {
   std::atomic<uint64_t> kickoffs{0};
   std::atomic<uint64_t> fence_waits{0}, fence_wait_ns{0};  // nvFenceWait with a timeout
   std::atomic<uint64_t> fence_queries{0};                  // nvFenceWait(…, 0)
+  std::atomic<uint64_t> wait_success{0}, wait_timeout{0}, wait_error{0};
+  std::atomic<uint64_t> wait_max_ns{0};  // maximum since the previous heartbeat
+  std::atomic<int32_t> wait_timeout_min{INT32_MAX}, wait_timeout_max{INT32_MIN};
+  std::atomic<uint64_t> wait_infinite{0};
+  std::atomic<uint32_t> wait_last_rc{0}, wait_last_id{0}, wait_last_value{0};
+  std::atomic<int32_t> wait_last_timeout{0};
+  std::atomic<uint64_t> wait_last_caller{0};
   std::atomic<uint64_t> maps_created{0}, maps_closed{0};
   std::atomic<int64_t> map_bytes{0};                       // live nvmap bytes
+  std::atomic<uint64_t> gpu_maps{0}, gpu_maps_cached{0};   // GPU VA mappings since start
+  std::atomic<uint64_t> gpu_cached_bytes{0};
 };
 NvCalls g_nv;
 std::atomic<bool> g_nv_count{true};  // cvar nx_nv_wrap: false = pure passthrough
+std::atomic<int32_t> g_gpu_l2_level{0};  // cvar nx_gpu_l2
 
 // VkResults that mean memory or the device: a crash-log entry (D.2).
 const char* VkFailureName(int32_t result) {
@@ -1459,9 +1555,32 @@ Result __wrap_nvFenceWait(NvFence* f, s32 timeout_us) {
   }
   const u64 start = armGetSystemTick();
   const Result rc = __real_nvFenceWait(f, timeout_us);
-  g_nv.fence_wait_ns.fetch_add(armTicksToNs(armGetSystemTick() - start),
-                               std::memory_order_relaxed);
+  const uint64_t elapsed = armTicksToNs(armGetSystemTick() - start);
+  g_nv.fence_wait_ns.fetch_add(elapsed, std::memory_order_relaxed);
   g_nv.fence_waits.fetch_add(1, std::memory_order_relaxed);
+  auto& result_count = R_SUCCEEDED(rc) ? g_nv.wait_success
+      : R_VALUE(rc) == MAKERESULT(Module_LibnxNvidia, LibnxNvidiaError_Timeout)
+          ? g_nv.wait_timeout : g_nv.wait_error;
+  result_count.fetch_add(1, std::memory_order_relaxed);
+  uint64_t max_ns = g_nv.wait_max_ns.load(std::memory_order_relaxed);
+  while (elapsed > max_ns && !g_nv.wait_max_ns.compare_exchange_weak(
+      max_ns, elapsed, std::memory_order_relaxed)) {}
+  if (timeout_us < 0) {
+    g_nv.wait_infinite.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    int32_t minimum = g_nv.wait_timeout_min.load(std::memory_order_relaxed);
+    while (timeout_us < minimum && !g_nv.wait_timeout_min.compare_exchange_weak(
+        minimum, timeout_us, std::memory_order_relaxed)) {}
+    int32_t maximum = g_nv.wait_timeout_max.load(std::memory_order_relaxed);
+    while (timeout_us > maximum && !g_nv.wait_timeout_max.compare_exchange_weak(
+        maximum, timeout_us, std::memory_order_relaxed)) {}
+  }
+  g_nv.wait_last_rc.store(rc, std::memory_order_relaxed);
+  g_nv.wait_last_timeout.store(timeout_us, std::memory_order_relaxed);
+  g_nv.wait_last_id.store(f ? f->id : 0, std::memory_order_relaxed);
+  g_nv.wait_last_value.store(f ? f->value : 0, std::memory_order_relaxed);
+  g_nv.wait_last_caller.store(reinterpret_cast<uint64_t>(__builtin_return_address(0)),
+                            std::memory_order_relaxed);
   return rc;
 }
 Result __wrap_nvGpuChannelKickoff(NvGpuChannel* c) {
@@ -1486,6 +1605,80 @@ void __wrap_nvMapClose(NvMap* m) {
     g_nv.map_bytes.fetch_sub(int64_t(m->size), std::memory_order_relaxed);
   }
   __real_nvMapClose(m);
+}
+
+// Run 3: NVK's Switch port (nvkmd_nvgpu_va_bind_mem) maps every allocation
+// into the GPU with flags 1 (FixedOffset) only, without
+// NvMapBufferFlags_IsCacheable: all GPU traffic bypasses the GPU's L2. Its
+// memory is CPU-uncached too (nvkmd_nvgpu_alloc_tiled_mem passes
+// is_cpu_cacheable = 0 to nvMapCreate), which keeps the CPU's view right
+// without any L2 maintenance. So only what the CPU never touches is cached
+// here (cvar nx_gpu_l2): block-linear images (kind != 0: textures, render
+// targets; the CPU can only read pitch-linear ones) and, at level 2, the
+// memory the renderer allocates as device-local and never maps.
+// nvgpu flushes and invalidates the L2 when a mapping goes away.
+Result __real_nvioctlNvhostAsGpu_MapBufferEx(u32 fd, u32 flags, u32 kind, u32 nvmap_handle,
+                                             u32 page_size, u64 buffer_offset,
+                                             u64 mapping_size, u64 input_offset, u64* offset);
+Result __wrap_nvioctlNvhostAsGpu_MapBufferEx(u32 fd, u32 flags, u32 kind, u32 nvmap_handle,
+                                             u32 page_size, u64 buffer_offset,
+                                             u64 mapping_size, u64 input_offset, u64* offset) {
+  const int32_t level = g_gpu_l2_level.load(std::memory_order_relaxed);
+  const bool block_linear = kind != 0;
+  // Run 4: marked by the SDK around vkAllocateMemory/vmaCreateImage for
+  // memory it never maps (gpu_only_allocation.h): the shared memory and EDRAM
+  // buffers, render target and texture memory. Run 3 matched only the 512 MiB
+  // buffer by its size and left the EDRAM buffer that 42 resolves a frame
+  // read and write uncached.
+  const bool gpu_only = rex::ui::vulkan::GpuOnlyAllocation();
+  const bool cached = (level >= 1 && block_linear) || (level >= 2 && gpu_only);
+  if (cached) {
+    flags |= NvMapBufferFlags_IsCacheable;
+  }
+  const Result rc = __real_nvioctlNvhostAsGpu_MapBufferEx(
+      fd, flags, kind, nvmap_handle, page_size, buffer_offset, mapping_size, input_offset, offset);
+  if (R_SUCCEEDED(rc)) {
+    g_nv.gpu_maps.fetch_add(1, std::memory_order_relaxed);
+    if (cached) {
+      g_nv.gpu_maps_cached.fetch_add(1, std::memory_order_relaxed);
+      g_nv.gpu_cached_bytes.fetch_add(mapping_size, std::memory_order_relaxed);
+    }
+  }
+  return rc;
+}
+
+// Run 3 ended in VK_ERROR_DEVICE_LOST with nothing from NVK about why. NVK
+// asks libnx for the channel's error notification when it checks the channel;
+// a success means the GPU reported an error, and its code says which kind:
+// a watchdog timeout, an MMU fault (a bad or stale address), a semaphore
+// timeout, a pushbuffer error.
+Result __real_nvGpuChannelGetErrorNotification(NvGpuChannel* c, NvNotification* notif);
+Result __wrap_nvGpuChannelGetErrorNotification(NvGpuChannel* c, NvNotification* notif) {
+  const Result rc = __real_nvGpuChannelGetErrorNotification(c, notif);
+  if (R_SUCCEEDED(rc) && notif) {
+    const char* name = "unknown";
+    switch (notif->info32) {
+      case NvNotificationType_FifoErrorIdleTimeout: name = "FIFO idle timeout (watchdog)"; break;
+      case NvNotificationType_GrErrorSwNotify: name = "GR software notify error"; break;
+      case NvNotificationType_GrSemaphoreTimeout: name = "GR semaphore timeout"; break;
+      case NvNotificationType_GrIllegalNotify: name = "GR illegal notify"; break;
+      case NvNotificationType_FifoErrorMmuErrFlt: name = "MMU fault"; break;
+      case NvNotificationType_PbdmaError: name = "PBDMA error"; break;
+      case NvNotificationType_ResetChannelVerifError: name = "reset channel verif error"; break;
+      case NvNotificationType_PbdmaPushbufferCrcMismatch: name = "pushbuffer CRC mismatch"; break;
+      default: break;
+    }
+    NvError error{};
+    const Result info_rc = nvGpuChannelGetErrorInfo(c, &error);
+    Report(true,
+           "GPU channel error: %s (notification info32 %u, info16 0x%X, status 0x%X, timestamp "
+           "%" PRIu64 "); error info rc 0x%X type %u info %08X %08X %08X %08X %08X %08X "
+           "(cvar nx_gpu_l2 %d)",
+           name, notif->info32, notif->info16, notif->status, notif->timestamp, info_rc,
+           error.type, error.info[0], error.info[1], error.info[2], error.info[3], error.info[4],
+           error.info[5], int(g_gpu_l2_level.load(std::memory_order_relaxed)));
+  }
+  return rc;
 }
 }
 #endif
@@ -1552,7 +1745,9 @@ void LogVulkan(double window_s) {
             "ms per present, %" PRIu64 " blocking fence waits of the command processor %.0f ms "
             "(%.0f ms per frame); GPU Commands thread %.0f ms of CPU = %.0f us per draw, %.0f "
             "draws per frame; nvdrv: %" PRIu64 " kickoffs, %" PRIu64 " fence waits %.0f ms, %" PRIu64
-            " fence queries, nvmaps %" PRIu64 " live (%" PRId64 " MiB), %" PRIu64 " created",
+            " fence queries, nvmaps %" PRIu64 " live (%" PRId64 " MiB), %" PRIu64 " created; GPU "
+            "mappings %" PRIu64 " since start, %" PRIu64 " L2-cached (%" PRIu64 " MiB, cvar "
+            "nx_gpu_l2 %d)",
             new_submits ? double(submit_ns - g_vk_beat.submit_ns) * ms / double(new_submits) : 0.0,
             new_presents ? double(present_ns - g_vk_beat.present_ns) * ms / double(new_presents)
                          : 0.0,
@@ -1567,10 +1762,36 @@ void LogVulkan(double window_s) {
             g_nv.maps_created.load(std::memory_order_relaxed) -
                 g_nv.maps_closed.load(std::memory_order_relaxed),
             g_nv.map_bytes.load(std::memory_order_relaxed) >> 20,
-            g_nv.maps_created.load(std::memory_order_relaxed));
-  // Run 22 (C.2): pipeline creation and shader translation in the window. No
-  // pipeline or shader storage on disk exists on Switch (Runtime never calls
-  // InitializeShaderStorage there; Mesa's cache is off): every one is new.
+            g_nv.maps_created.load(std::memory_order_relaxed),
+            g_nv.gpu_maps.load(std::memory_order_relaxed),
+            g_nv.gpu_maps_cached.load(std::memory_order_relaxed),
+            g_nv.gpu_cached_bytes.load(std::memory_order_relaxed) >> 20,
+            int(g_gpu_l2_level.load(std::memory_order_relaxed)));
+  const uint64_t nv_success = g_nv.wait_success.load(std::memory_order_relaxed);
+  const uint64_t nv_timeout = g_nv.wait_timeout.load(std::memory_order_relaxed);
+  const uint64_t nv_error = g_nv.wait_error.load(std::memory_order_relaxed);
+  const int32_t timeout_min = g_nv.wait_timeout_min.exchange(INT32_MAX, std::memory_order_relaxed);
+  const int32_t timeout_max = g_nv.wait_timeout_max.exchange(INT32_MIN, std::memory_order_relaxed);
+  const uint64_t wait_caller = g_nv.wait_last_caller.load(std::memory_order_relaxed);
+  GAME_INFO("nvdrv wait results: success %" PRIu64 ", timeout %" PRIu64 ", error %" PRIu64
+            "; max %.2f ms; requested timeout %d..%d us, infinite %" PRIu64
+            "; last rc 0x%X timeout %d fence %u/%u caller +0x%" PRIx64,
+            nv_success - g_vk_beat.nv_wait_success, nv_timeout - g_vk_beat.nv_wait_timeout,
+            nv_error - g_vk_beat.nv_wait_error,
+            double(g_nv.wait_max_ns.exchange(0, std::memory_order_relaxed)) * ms,
+            timeout_max == INT32_MIN ? 0 : timeout_min,
+            timeout_max == INT32_MIN ? 0 : timeout_max,
+            g_nv.wait_infinite.exchange(0, std::memory_order_relaxed),
+            g_nv.wait_last_rc.load(std::memory_order_relaxed),
+            g_nv.wait_last_timeout.load(std::memory_order_relaxed),
+            g_nv.wait_last_id.load(std::memory_order_relaxed),
+            g_nv.wait_last_value.load(std::memory_order_relaxed),
+            wait_caller >= g_module_base ? wait_caller - g_module_base : 0);
+  g_vk_beat.nv_wait_success = nv_success;
+  g_vk_beat.nv_wait_timeout = nv_timeout;
+  g_vk_beat.nv_wait_error = nv_error;
+  // Pipeline creation and shader translation in this window. The renderer's
+  // own shader storage is distinct from Mesa's environment-controlled cache.
   {
     const uint64_t pipelines = c.pipelines.load(std::memory_order_relaxed);
     const uint64_t pipeline_ns = c.pipeline_ns.load(std::memory_order_relaxed);
@@ -1585,7 +1806,7 @@ void LogVulkan(double window_s) {
               "vkCreateGraphicsPipelines, %.1f ms each), of which %" PRIu64 " on GPU Commands "
               "(%.0f ms); shaders: %" PRIu64 " translated (%.0f ms, %.1f ms each), %" PRIu64
               " on GPU Commands (%.0f ms); since start %" PRIu64 " pipelines, %" PRIu64
-              " shaders; disk storage: none on Switch",
+              " shaders; disk storage configured: %s",
               np, window_s > 0 ? double(np) / window_s : 0.0,
               double(pipeline_ns - g_vk_beat.pipeline_ns) * ms,
               np ? double(pipeline_ns - g_vk_beat.pipeline_ns) * ms / double(np) : 0.0,
@@ -1594,7 +1815,31 @@ void LogVulkan(double window_s) {
               double(shader_ns - g_vk_beat.shader_ns) * ms,
               ns_ ? double(shader_ns - g_vk_beat.shader_ns) * ms / double(ns_) : 0.0,
               shaders_cp - g_vk_beat.shaders_cp,
-              double(shader_ns_cp - g_vk_beat.shader_ns_cp) * ms, pipelines, shaders);
+              double(shader_ns_cp - g_vk_beat.shader_ns_cp) * ms, pipelines, shaders,
+              REXCVAR_GET(nx_shader_storage) ? "enabled" : "disabled");
+    // Keep all periodic I/O on the UI thread. The CSV stores counts and the
+    // exact window duration, so analysis can weight runs correctly at low FPS.
+    if (REXCVAR_GET(nx_perf_csv)) {
+      static theft4::PerfCsv csv;
+      static bool failed = false;
+      static double elapsed_s = 0;
+      elapsed_s += window_s;
+      if (!failed) {
+        const theft4::PerfSample sample{
+            elapsed_s, window_s, new_presents, new_draws, new_submits,
+            double(fence_wait_ns - g_vk_beat.fence_wait_ns) * ms,
+            double(g_cp_window_ns) * ms, double(submit_ns - g_vk_beat.submit_ns) * ms,
+            double(present_ns - g_vk_beat.present_ns) * ms,
+            np, double(pipeline_ns - g_vk_beat.pipeline_ns) * ms,
+            ns_, double(shader_ns - g_vk_beat.shader_ns) * ms,
+            c.submit_failures.load(std::memory_order_relaxed),
+            c.present_failures.load(std::memory_order_relaxed)};
+        if (!csv.Open(kRootDir) || !csv.Write(sample)) {
+          GAME_ERROR("Performance CSV write failed; disabling it for this run");
+          failed = true;
+        }
+      }
+    }
     g_vk_beat.pipelines = pipelines;
     g_vk_beat.pipeline_ns = pipeline_ns;
     g_vk_beat.pipelines_cp = pipelines_cp;
@@ -1703,7 +1948,8 @@ void CaptureFrame(uint64_t seconds) {
 void CheckFrameCaptures(u64 start_tick) {
   static const uint64_t kTimes[] = {20, 40, 60, 120, 240};
   static size_t next = 0;
-  if (!g_vulkan_graphics || next >= std::size(kTimes)) {
+  if ((!REXCVAR_GET(nx_vk_capture_frames) && !REXCVAR_GET(nx_vk_dump_frames)) ||
+      !g_vulkan_graphics || next >= std::size(kTimes)) {
     return;
   }
   const uint64_t seconds = armTicksToNs(armGetSystemTick() - start_tick) / 1'000'000'000ull;
@@ -1791,7 +2037,7 @@ struct Heartbeat {
       LogBootSequencer();
       const double window_s = double(seconds - last_line_s);
       last_line_s = seconds;
-      if (REXCVAR_GET(nx_null_audio)) {
+      if (!REXCVAR_GET(nx_audio) && REXCVAR_GET(nx_null_audio)) {
         // Run 17: 187 callbacks a second up to 120 s, then 45-100: the window
         // rate, how long the guest callback takes and how often the worker
         // fell more than 100 ms behind say whether the callback is slow.
@@ -1869,6 +2115,28 @@ struct Heartbeat {
         theft4::nx_input::GetCounters(&published, &reads);
         GAME_INFO("input: %" PRIu64 " pad states published, %" PRIu64 " XamInputGetState reads",
                   published, reads);
+      }
+      if (REXCVAR_GET(nx_audio)) {
+        // Run 2's sound came in bursts: real time is 187.5 frames of 256
+        // samples a second. "Ran dry" counts frames that found nothing queued
+        // (the game's mixer was late); waiting for a buffer means it was ahead.
+        static uint64_t last_frames = 0, last_starved = 0, last_dropped = 0, last_wait_ns = 0;
+        auto& audio = rex::audio::nx::nx_audio_counters();
+        const uint64_t frames = audio.frames.load(std::memory_order_relaxed);
+        const uint64_t starved = audio.starved.load(std::memory_order_relaxed);
+        const uint64_t dropped = audio.dropped.load(std::memory_order_relaxed);
+        const uint64_t wait_ns = audio.wait_ns.load(std::memory_order_relaxed);
+        const double real_time = window_s > 0 ? window_s * 187.5 : 1.0;
+        GAME_INFO("audio: %" PRIu64 " frames in the window (%.0f%% of real time), output ran dry "
+                  "%" PRIu64 " times, %" PRIu64 " frames dropped, %.0f ms waiting for a free "
+                  "buffer; since start %" PRIu64 " frames",
+                  frames - last_frames, 100.0 * double(frames - last_frames) / real_time,
+                  starved - last_starved, dropped - last_dropped,
+                  double(wait_ns - last_wait_ns) / 1e6, frames);
+        last_frames = frames;
+        last_starved = starved;
+        last_dropped = dropped;
+        last_wait_ns = wait_ns;
       }
     }
     // Every minute the count of each export, as pc-eu-base does, so the two
@@ -2048,7 +2316,7 @@ void StopFileIo() {
 // (c) The null audio worker (a host XThread that runs the guest callback
 // every 5.333 ms) stops at its next period: flag, then at most 2 s.
 void StopNullAudioWorker() {
-  if (!REXCVAR_GET(nx_null_audio)) {
+  if (REXCVAR_GET(nx_audio) || !REXCVAR_GET(nx_null_audio)) {
     return;
   }
   ExitStep("stopping the null audio worker (flag, at most 2 s)");
@@ -2178,7 +2446,7 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   padInitializeDefault(&g_pad);
   svcGetThreadId(&g_host_main_thread_id, CUR_THREAD_HANDLE);
   g_start_tick = armGetSystemTick();
-  ConsolePrint("Theft4 switch-game (no graphics)\n\n");
+  ConsolePrint("Theft4 Switch nx-perf-20261012-r7\n\n");
 
   StartLogging();
   CaptureTerminations();
@@ -2188,6 +2456,11 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
 #if THEFT4_NX_VULKAN
   g_nv_count.store(REXCVAR_GET(nx_nv_wrap), std::memory_order_relaxed);
+  g_gpu_l2_level.store(std::clamp<int32_t>(REXCVAR_GET(nx_gpu_l2), 0, 2),
+                       std::memory_order_relaxed);
+  GAME_INFO("GPU L2: level %d (cvar nx_gpu_l2: 0 = NVK's uncached mappings, 1 = block-linear "
+            "images cached, 2 = and all memory the renderer never maps)",
+            int(g_gpu_l2_level.load(std::memory_order_relaxed)));
 #endif
   GAME_INFO("run 21 pieces: nx_apm_clock %d, nx_nv_wrap %d, nx_fault_count_handler %d, "
             "nx_crash_log_after_setup %d, nx_profile %d, nx_vk_mesa_messenger (in the SDK) on "
@@ -2199,6 +2472,8 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
             "crash record with threads and stacks (always), nx_stack_watch %d, "
             "nx_resume_guard %d",
             int(REXCVAR_GET(nx_stack_watch)), int(REXCVAR_GET(nx_resume_guard)));
+  theft4::nx_clocks::SetTargets(REXCVAR_GET(nx_cpu_mhz), REXCVAR_GET(nx_gpu_mhz),
+                                REXCVAR_GET(nx_emc_mhz));
   theft4::nx_clocks::Start(REXCVAR_GET(nx_apm_clock), ClockLog);
   if (REXCVAR_GET(nx_profile)) {
     theft4::nx_profiler::Start(g_module_base, g_module_text_size, ProfileLog);
@@ -2267,6 +2542,13 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     // Mesa's environment, read when NVK starts (nfsmw-nx does both): no shader
     // cache on the SD; nvdrv's transfer memory only if nx_nvmap_mb says so.
     setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
+#if THEFT4_NX_DIRECT_RESOLVE
+    setenv("THEFT4_DIRECT_RESOLVE", REXCVAR_GET(nx_direct_resolve) ? "1" : "0", 1);
+    GAME_INFO("direct host resolves: %s (cvar nx_direct_resolve); unsupported cases fall back",
+              REXCVAR_GET(nx_direct_resolve) ? "enabled" : "disabled");
+#else
+    GAME_INFO("direct host resolves: not compiled in this NRO");
+#endif
     if (REXCVAR_GET(nx_nvmap_mb) > 0) {
       __nx_nv_transfermem_size = uint32_t(REXCVAR_GET(nx_nvmap_mb)) << 20;
     }
@@ -2310,7 +2592,12 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   }
   // Runs 13-16: XAudioRegisterRenderDriverClient failed with C0000002 (no
   // audio system), and the first boot screen waits for its sound (06 §19).
-  if (REXCVAR_GET(nx_null_audio)) {
+  if (REXCVAR_GET(nx_audio)) {
+    config.audio_factory = [](rex::runtime::FunctionDispatcher* dispatcher) {
+      return rex::audio::nx::SwitchAudioSystem::Create(dispatcher);
+    };
+    GAME_INFO("audio: native Switch renderer, 48 kHz stereo PCM16");
+  } else if (REXCVAR_GET(nx_null_audio)) {
     config.audio_factory = [](rex::runtime::FunctionDispatcher* dispatcher) {
       return rex::audio::CreateNullAudioSystem(dispatcher);
     };
@@ -2387,6 +2674,27 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     GAME_ERROR("PrepareModuleLaunch failed");
     WaitForPlusAndExit(&g_pad);
   }
+#if THEFT4_NX_VULKAN
+  // Run 3: the desktop app's shader storage (rex_app.cpp), which the Switch
+  // build never started. The GPU thread loads it before its first command:
+  // the shaders and pipelines of earlier runs are built then, from NVK's
+  // pipeline cache file when it has them, instead of in the middle of a scene.
+  if (want_vulkan && REXCVAR_GET(nx_shader_storage) && runtime->graphics_system()) {
+    // std::filesystem::create_directories would throw on a failure; mkdir the
+    // levels here so the SDK finds them all.
+    const std::string cache_dir = std::string(kRootDir) + "/runtime-cache";
+    mkdir(cache_dir.c_str(), 0777);
+    mkdir((cache_dir + "/shaders").c_str(), 0777);
+    mkdir((cache_dir + "/shaders/shareable").c_str(), 0777);
+    GAME_INFO("shader storage: %s/shaders, title %08X; loaded by the GPU thread before its "
+              "first command (cvar nx_shader_storage)",
+              cache_dir.c_str(), module->title_id());
+    runtime->graphics_system()->InitializeShaderStorage(runtime->cache_root(),
+                                                        module->title_id(), false);
+  } else {
+    GAME_INFO("shader storage: off (cvar nx_shader_storage = false or no Vulkan)");
+  }
+#endif
   GAME_INFO("about to resume the main guest thread '%s' at %08X", thread->name().c_str(),
             module->entry_point());
   LogClock();

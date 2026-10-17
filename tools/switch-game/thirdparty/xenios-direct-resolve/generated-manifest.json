@@ -1,0 +1,1667 @@
+{
+  "repository": "https://github.com/xenios-jp/XeniOS",
+  "commit": "87b176a078c316fde3adf67a217f0c44615b0e0d",
+  "optimized_and_validated": true,
+  "shader_target": "Vulkan 1.0 / SPIR-V 1.0",
+  "optimizer_passes": [
+    "-O",
+    "-O",
+    "--canonicalize-ids"
+  ],
+  "tool_source_pins": {
+    "glslang": "f4f1d8a352ca1908943aea2ad8c54b39b4879080",
+    "spirv-tools": "04d0b166dcd62e29509bf2aac3ca0c5ccdcb6929",
+    "spirv-headers": "04f10f650d514df88b76d25e83db360142c7b174"
+  },
+  "sources": [
+    {
+      "path": "CMakeLists.txt",
+      "git_blob": "089b4c90c892d80f9155564b730a910bf1060c13",
+      "sha256": "ac6d117147bd41282beb10734432b80d31e1661a8867f7ec8a27eae368c29665"
+    },
+    {
+      "path": "LICENSE",
+      "git_blob": "bc759869a1975823a4e1b1c78cb4e5356cadb7bf",
+      "sha256": "369ea6b0f7ba57544067e9d470ca82a927da787fb0a749b11cb55f1fd0ba47ae"
+    },
+    {
+      "path": "cmake/XeniaHelpers.cmake",
+      "git_blob": "cb9ac7c0e96a3df9beb87378510b921ca6430229",
+      "sha256": "f6603648564f3090ce5af7926f3b884b6db7a3c0a77ba8c10f3a5833f5960f8b"
+    },
+    {
+      "path": "src/xenia/gpu/CMakeLists.txt",
+      "git_blob": "0f266d48e169758331d49037448205df867278b5",
+      "sha256": "018d1f2bab5d08179b6334347bb6ad6550d5264d323ac921cd41591b8ff37e57"
+    },
+    {
+      "path": "src/xenia/gpu/shader_compiler_main.cc",
+      "git_blob": "17207cfa5756206c501c6735e954aa4cf22b3206",
+      "sha256": "41c9db1e017fc847a62d5aa3a8819e0aa2504aee8849a9d5d15da73b22e5cfa3"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/adaptive_quad.hs.glsl",
+      "git_blob": "6cb5fb44dba9f7e3c22b2ad53baebcdc0d2b0230",
+      "sha256": "567a561a17a1dbc201989e7109ba56ea7263eaed03dcd84d139b7418dbac73d9"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/adaptive_quad.hs.hlsl",
+      "git_blob": "74a942392fdc32878d13ea107de56451e3bb23bb",
+      "sha256": "2d4e58f4fdcc9df0a9d474b9346bd20c1deb7c588174255ee937331892a675b1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/adaptive_triangle.hs.glsl",
+      "git_blob": "9db4018e8b4e13396379bca802de77763ae5384f",
+      "sha256": "dc29698514577ad67df2310429585602cbe108723fa58922d6114a96ed06a288"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/adaptive_triangle.hs.hlsl",
+      "git_blob": "ce78e312603ead9a0a6ba96a4b814b459dc5e3fb",
+      "sha256": "8be77c14bfa31c87e36194be57eb61cbc3ffbcd346cdae3feaa100b499d96358"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_pwl.cs.xesl",
+      "git_blob": "81a1199a21dfe4a04dea0e0a25e929c76eb7af0d",
+      "sha256": "e91d0744b91a57dc8b50fe0e3d0dc5a6aa019d0706821c65883bd3ad723940f4"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_pwl.ps.xesl",
+      "git_blob": "c301214eabd739be342232ffa67be4fcf524cb87",
+      "sha256": "37d723897202933e9d48b5e26d46832ab2197c5b91c56901739b8935aabeb8fb"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_pwl.xesli",
+      "git_blob": "d733ecabff81f9007ffcece536725525704c3b04",
+      "sha256": "9a980c863783ce679e8bcb937463b424a4c862bf237179e84d270836ea5e8d79"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_pwl_fxaa_luma.cs.xesl",
+      "git_blob": "36f215d257bded999482e6aec42283d0a6dead85",
+      "sha256": "2859e711a113e60c25220b293ae87dc0743417f87ebcf7faec4ddd119d47e45e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_pwl_fxaa_luma.ps.xesl",
+      "git_blob": "dc6d1caf006b921224a674ddd8b5d385be25d0d1",
+      "sha256": "56bccad1937293b8604aacc21906a5fb908fbb78fa3aa7a59694eeb9b84965c8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_table.cs.xesl",
+      "git_blob": "873316e30a1d98777fac26dbdb241f1b9138ae04",
+      "sha256": "722d126be60f342f2752ff8432ee2f165c67d0938a29a1e3e4b4d12d171546b9"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_table.ps.xesl",
+      "git_blob": "e548b3099599f718042a14e0ea894460db92802e",
+      "sha256": "b074cd2c1c3bbe808793615aa35ea93ee7b54fb30df4bae675800203f6174fea"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_table.xesli",
+      "git_blob": "f4d3207ed70355ba27b8efb03ffc7ae693057f0d",
+      "sha256": "feca14ccd8832ee3e1cb7c4c3b8b0e6fbc495206f7d726d50af485d38d2803c9"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_table_fxaa_luma.cs.xesl",
+      "git_blob": "94c81226d0659f2946b3c24d1362035ac3926f96",
+      "sha256": "4bb15f6a464259a3d4a69b6ae27d607e367f4bcbd6bfc4af58a025d47eb58294"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/apply_gamma_table_fxaa_luma.ps.xesl",
+      "git_blob": "eb3de69e34cfe22a2cf385d303b10cc0b90ff2b1",
+      "sha256": "a6c568c1e818a90989f3b70a35e15e8cdb4a82048fb5b52093a7c3bc5e4f22c5"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/clear_uint2.ps.hlsl",
+      "git_blob": "df68b527fa88bb23817ea39cc885418ca0b0d1d2",
+      "sha256": "3591f09af94590080b864c453a40a50548048388c7c5bd9be6cbb63352fd907c"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_quad.hlsli",
+      "git_blob": "a0aa08c73b656e98b01124de3edad9e8dc9c51e2",
+      "sha256": "90bebaf1405433df241ebf6651a337153551aade49cd5fd51b6fd241b16768da"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_quad_1cp.hs.glsl",
+      "git_blob": "11a77e875657754b07cc55eb4b124ac8fbc4549a",
+      "sha256": "938e1b95e0af01e454b9bee3b51292ead9859e5fffbdf7d52fffae8f9ee4711f"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_quad_1cp.hs.hlsl",
+      "git_blob": "d109b11c4d21605f110b8d04755b912f352e3760",
+      "sha256": "ace8cfdbf992625340bd690470f37ee0a8ffb3371f6aac7cb8ad58a8c1b51dc3"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_quad_4cp.hs.glsl",
+      "git_blob": "885d6bfd4e6ca910c4bbd49c63ea9d2b1adb2e1b",
+      "sha256": "8eb82e21ea6dcad03d7d8addc3e490137e216467b0f75df67ab121d988bf2a73"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_quad_4cp.hs.hlsl",
+      "git_blob": "824c6ae65cf593e25eb024500a1d5826d0f8b7d0",
+      "sha256": "7ebb4068263c7415799a1cda9ad529d477a73a489b2a0c79c8c4a6cf4aa0245a"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_triangle.hlsli",
+      "git_blob": "bb8058be63438de734578b371973ff427372b602",
+      "sha256": "0f15db44cb43f8d7827ace3570f894a10d8fbd032275b3d4c6c8c30a6d4588c2"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_triangle_1cp.hs.glsl",
+      "git_blob": "f5f9429adfd1b3c48c035699e2db23b631ce4174",
+      "sha256": "cc5d7486a56c4fcac1b8c67a563a58b38fece611f78a9f3619c281640050b49c"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_triangle_1cp.hs.hlsl",
+      "git_blob": "bafbbb0b99130a71803f75ba120da55915b161e2",
+      "sha256": "ffea60beb92aa54ca23d9f11db81327f2cdd098b5e1db99473d3b4e026b83c35"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_triangle_3cp.hs.glsl",
+      "git_blob": "f3040725d2d7b309bb0e798e1f0ae9452a2ae9d2",
+      "sha256": "243e91014efd8f4128af5f9ae457fb1ca45c36b4e5b85ddf01cb50d15f5b81cd"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/continuous_triangle_3cp.hs.hlsl",
+      "git_blob": "7c8bbb979eb022400549b767d3d2452810fc64dd",
+      "sha256": "e9dfaacf631e62b10c91d1fd86266f7f682251985dda96e0da5a4d70513c51b8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_quad.hlsli",
+      "git_blob": "3e54340d1534397bbbbc13ff65f77ae9133644e8",
+      "sha256": "6687a298f8a0efeca6ad6b83c95530ae65862d786b7cf0b988f4bcfc2d364296"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_quad_1cp.hs.glsl",
+      "git_blob": "73fe803f6dbccbc3734998df647d29b3f9d7e004",
+      "sha256": "f9dc6a8b00d4f3c9c40d1fca78662cb3f9b18b4d055e52be8bc2d5ec0192b892"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_quad_1cp.hs.hlsl",
+      "git_blob": "ba6bacaa135ed11ba7abc62054f24da53310feb2",
+      "sha256": "117c20b6442512607faada9bdb7da75a612e3b716b4033e34132ee17f88a61dd"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_quad_4cp.hs.glsl",
+      "git_blob": "9b1e3dce968979c5dd2154342888c0e0bac5dac5",
+      "sha256": "8cb2d1d3e2cfe291786c4150b03f5b54983371f7c51e584b73826796a0066eac"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_quad_4cp.hs.hlsl",
+      "git_blob": "0c770792a3a93ac91a951d004709a9ee6caffec4",
+      "sha256": "42736276fa3bcd060e57d12895970551d1861a40d8ec9e5917b40402dace7b4e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_triangle.hlsli",
+      "git_blob": "2364049861717b30bc52b9a9a5acabb40ea3255a",
+      "sha256": "0de344a4163156eb87882c82d3bf2729baf4d76934ff49ca3f43d8de4f28a19d"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_triangle_1cp.hs.glsl",
+      "git_blob": "43ebaa68a92f02b94c037aecdb70a8249f187bbd",
+      "sha256": "b21f18eeed568645bfd86876a226c436f9013bcfe482a6ad94536c3fb85e2bb6"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_triangle_1cp.hs.hlsl",
+      "git_blob": "7550091a5e41a20b42270770b5e360423cb6a3fb",
+      "sha256": "7fb798bfa1e45ecbe6577af5f8db2148f1e0446df03abfa9991e0a980d3b06ec"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_triangle_3cp.hs.glsl",
+      "git_blob": "d08381848bc2f8ac8f70567c3c0320e6b414c101",
+      "sha256": "3c75a7a9b1b4d1da876e649a5ce217545370c05b8ca7d7b0cd172ed542d6d09c"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/discrete_triangle_3cp.hs.hlsl",
+      "git_blob": "26c86519d4cbd93cf89645afc30d111619abf303",
+      "sha256": "bd5df575cb6a2aa76eb1eeab448f3f23143dfa9430d448420a0309816d0598b6"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/edram.xesli",
+      "git_blob": "a306c45fa24f2a76222a5f56f15fdf735de03004",
+      "sha256": "7674150fd591f3600e21affb297e0570aaaf62fddba643d41899de8e6d606c09"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/endian.xesli",
+      "git_blob": "7d8b37f5a20bc859f472d529846a700e96de72cf",
+      "sha256": "a2bae617ba27371d6b881808ab1fc29621ef043c83bde0ded8b70e2642743108"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/float24_round.ps.hlsl",
+      "git_blob": "e142b1c5c7d0bb5beaf9e9ee53b01cf4f8d0581e",
+      "sha256": "5f981454b0b4891fa7f45ee3090d39642946c3a2d7e8b1857d60a3028bdda829"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/float24_truncate.ps.hlsl",
+      "git_blob": "110215e51401c2d4cb97de15208589736d811a73",
+      "sha256": "a1502b13f23d2cf533029670b866a5e300764310fa987ec1cee34c66f7307e6a"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/fullscreen_cw.vs.xesl",
+      "git_blob": "b927292b0be8411965a71b0bb31f4c6969d68739",
+      "sha256": "010f3219952321714933a9ad02e1d316ddce2e5925c24a645b1b5e416db0134d"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/fxaa.cs.glsl",
+      "git_blob": "ca5114a41ce5990fbaa4fd5a11b82461e7d97810",
+      "sha256": "6bfe909a224252934d8abd35f0d14e686388c8455ca75550dc96dacb3ce55188"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/fxaa.cs.hlsl",
+      "git_blob": "b7a7c4e094a991d628736364da907a4cdd587a31",
+      "sha256": "3599173f8a105eafcd2870409b35c96a43c00e4d0d4bdc80085d3c4c22f525bf"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/fxaa.hlsli",
+      "git_blob": "364898556d1a17abf99ccb1acb982710bf155f68",
+      "sha256": "351d1e68e1a4c83726516593fb8d20196dcd039fd0c79fc75b33a5770d65d469"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/fxaa_extreme.cs.glsl",
+      "git_blob": "1c9316a7f0a66427b7e37f89c15d43c78cee74fa",
+      "sha256": "42c95515636377e383c0941fb41794efe594ee6558381230e7d25d158fa0dc9b"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/fxaa_extreme.cs.hlsl",
+      "git_blob": "0ca174c57b4c77c1e0d52d21be25533e0206d064",
+      "sha256": "7ef52549d9a52e654d0bb2568ce8c6653ddeae5909779006cba97a98ffdaa4da"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/host_depth_store.xesli",
+      "git_blob": "f55d59fcb5b06f873c6a363093619404b70826e7",
+      "sha256": "7c23699cb06202ca457ce256dffaa6d309e98c672e21655821750d1f52591bfe"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/host_depth_store_1xmsaa.cs.xesl",
+      "git_blob": "17c568960a96f5dee265a2e3182f6d8089ae220f",
+      "sha256": "14d075760bb375976e505be8905539c015180cfe2d4620b54a6a221fcdd7db58"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/host_depth_store_2xmsaa.cs.xesl",
+      "git_blob": "ed11fa50796ecc293b5eb2b90f72ac41449a4c06",
+      "sha256": "383a73c32f81040ae495cea4ed7feaebad406f536e9b43ddb5d8882a9f3986af"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/host_depth_store_4xmsaa.cs.xesl",
+      "git_blob": "f7433488a7c6dbe34f3b7f928020a98b955f85e8",
+      "sha256": "e4758983b61a44a7d3e6a90755faebec19d266192a181f59a341abd4bde166c1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/mip_generate.cs.hlsl",
+      "git_blob": "533aeeb670f1c35b8bf39043693707c6bee0eb6a",
+      "sha256": "ff452e3829062915720bf74e7781da4073c3b4c88d2d209aeb050169cb380023"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/mip_generate_3d.cs.hlsl",
+      "git_blob": "d353b46ed8ddb3addfce0fa75f07a9f098f1fa1e",
+      "sha256": "8458aaa47edb7e9e09638455812dff3f2302700e5cc86078e763a152942d7f86"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/passthrough_position_xy.vs.xesl",
+      "git_blob": "a47a2a2d777397a220a9c0e4f43ae7287bcb1d8d",
+      "sha256": "af567254c12d6b9f4a03f07c377909752d8a6dd944e09c17df1fc3461371af13"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/pixel_formats.xesli",
+      "git_blob": "3f6350848d985cdd8c82f992f346072e8e788714",
+      "sha256": "a445f37570f47bb4a21ce60c012376fcd680d32df2c190526c7859e33f60f3b8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/placeholder.ps.glsl",
+      "git_blob": "d47ca76ba47583061f1b267f223b6cd7a57c7274",
+      "sha256": "62065cde4af83edce789dbaabb87b2f7724bfd1f4e7b27f1ea8f7ad0d8768de7"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve.xesli",
+      "git_blob": "4585be29bfcf9360ad47912e263e0ce4d70ef30e",
+      "sha256": "b6517cd08cbc259c0be88ce973db3a930bfd0aa4e5cf09da0ac486c3b7af18a1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_clear_32bpp.cs.xesl",
+      "git_blob": "af495023cb7f0f8998d7e56b66cd1c55e6eab98b",
+      "sha256": "50d3b8b5862548a6a707f752e3da71f1eda6af338538ce53c897edf5b9494049"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_clear_32bpp.xesli",
+      "git_blob": "8117436c1cd2bb26e0b44d4f2af0f295aac8946e",
+      "sha256": "f26308d6d39ce8f7ca1c05e022e311ea42d714f2ab5abca306d8ac85f2370569"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_clear_32bpp_scaled.cs.xesl",
+      "git_blob": "ae797a1a477f0567bba34d9f8aa3542e5e36e354",
+      "sha256": "d236beeb925e0406b6704ac727483dba918a9dc0754c57f0f012b5531f8eae31"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_clear_64bpp.cs.xesl",
+      "git_blob": "047501a7191a4b342128d73bf69c158d04c228b8",
+      "sha256": "50b0bd05bff59a5fc0c08278b26218930f76622777b88eb9fd393504807c00e2"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_clear_64bpp.xesli",
+      "git_blob": "cfb755fb6b0a5e3f3a7725b43e38cf9dbd9c813f",
+      "sha256": "c638365d8b6189f10fe04f2affe156ad60f0eadd6b991522da5baab17f496b4f"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_clear_64bpp_scaled.cs.xesl",
+      "git_blob": "9770420130bd3c78f89c6da56b018da37e0202f4",
+      "sha256": "bfa6ceb4eb8bb23a8e755e6bb0382d8c8eacb1cc44aaa18b14e862ac9e3425f0"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_downscale.cs.xesl",
+      "git_blob": "74fc1439571fbf2cc8961cf2b592a9a18557f5dd",
+      "sha256": "f63d27bfc68867d1f02920e71ce39e093ddb9e2d479359812fee3874de0ce574"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_32bpp_1x2xmsaa.cs.xesl",
+      "git_blob": "8ab3e1d72cbdbb0816a6c350aadeda67b772dc78",
+      "sha256": "11b62039afaf418012f67aec069562d24d7bbc41ec8cd72b3a162f7170111153"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_32bpp_1x2xmsaa.xesli",
+      "git_blob": "06a49a13ea2aae89cd5faa70479fd8b95cd60942",
+      "sha256": "d99d7415fa4f04f551bf35b4e0923cdc1d76dfbae8e93914671257f4fb92b578"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_32bpp_1x2xmsaa_scaled.cs.xesl",
+      "git_blob": "8e540cbbc0894dfc9baf5c31c6aa5228a49268a6",
+      "sha256": "8460ef487e525ed0c1e7babb91a97165c597b1b9412ed18aab7e8e12a2948239"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_32bpp_4xmsaa.cs.xesl",
+      "git_blob": "adabeeb4cdb75726df1a7d397c4c0b419afdc417",
+      "sha256": "416893f51cd55a8882d96bd96442911077a09c02f4e0e4c5afd46b7cf7f40545"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_32bpp_4xmsaa.xesli",
+      "git_blob": "7901033e8d318de5489e56c4c480ff9b325822e3",
+      "sha256": "cd7a917d89750c6b466e398e5bad79213a94f507f793e3cab050561b1ecfba87"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_32bpp_4xmsaa_scaled.cs.xesl",
+      "git_blob": "9fc353bef76b23199be567839dca8d8f109d2787",
+      "sha256": "6220a8ec9a5939202298fbef36f881fa043316091210d9e0173a9e824e64a4d3"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_64bpp_1x2xmsaa.cs.xesl",
+      "git_blob": "5c0064c4be8912eb7adb1fd4db1d5dcfdf9e4198",
+      "sha256": "68755b180f1846f05fb79cebad5155ac3f0ea05ba1e0328664a0365d122cb614"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_64bpp_1x2xmsaa.xesli",
+      "git_blob": "a00280b323892001299d185dd74e9975ccad2334",
+      "sha256": "10225512245698630a6e540590fd6e140c27540c026e4a5b6c5bf53a0e567d93"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_64bpp_1x2xmsaa_scaled.cs.xesl",
+      "git_blob": "f1de90efd2b14d9b8991169a60f00fe76a784b27",
+      "sha256": "42a7c62c7d1fa4098f0f4c04b88ab287394c3ff8eec983a5ed2bcc3a52a955b2"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_64bpp_4xmsaa.cs.xesl",
+      "git_blob": "1d6646f9670466e250d2988b82d50e05696076d0",
+      "sha256": "0f41c2bb1643948de639a565056a95d259bdbc5c3cb7efc2e86f9e01fe06031e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_64bpp_4xmsaa.xesli",
+      "git_blob": "4a7ef067ec11e5473ae8bcacb1c2c7583a7e56a0",
+      "sha256": "904d91da6242ed3c403d8c6e6d722310694a4b58198fa036ccd959b21726d318"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_fast_64bpp_4xmsaa_scaled.cs.xesl",
+      "git_blob": "9d10b15e512318fea0795ee81026b60fc6fd2753",
+      "sha256": "d088d4ef5792c1ba8f9f45775526dcaa310a02e381c33c343cf46a064f63ca28"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_128bpp.cs.xesl",
+      "git_blob": "c83a852494331fccb159d9b29cf5824a6ce6c9a8",
+      "sha256": "b4b8f3705e06a1d6cc715db831f4d86bc7e32937202355051f671a5b0e6b6c84"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_128bpp.xesli",
+      "git_blob": "398aa0801c0b5ae9f9ef0955fcdc8c3a11a9fbd4",
+      "sha256": "7756d2b94ae4ede4c76eadf7f77937760b04574fae6912638dc42279401b8c51"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_128bpp_scaled.cs.xesl",
+      "git_blob": "435bb5f04c025a68c290b44aa17db94f9d2d5602",
+      "sha256": "22b5884f3a28bc62261f2d73b0e8d6632d21e8cee1a21517ddb459b1a2664aca"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_16bpp.cs.xesl",
+      "git_blob": "37d406cada331f9ab1ce445f7d4751a00ec02fc6",
+      "sha256": "d41c96b94fc593aae8ac0000fed868610c2954bd2c844ab5b2656dfc189cbb70"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_16bpp.xesli",
+      "git_blob": "b5bc1af4f35acbc50b8d5cfb1bd1b8ff53fa93c4",
+      "sha256": "fec46367f86e85998ddca38dec2dd3dce969ee4c26ca5b45b63fc2378031ead8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_16bpp_scaled.cs.xesl",
+      "git_blob": "abf78d4238d42829bee9a04f2a425d3988e54ea8",
+      "sha256": "cbd2090b68f6760a02305f10ffe1cb36cc64cbb7a0c8310975f55a374660aed7"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_32bpp.cs.xesl",
+      "git_blob": "54fc8d16207e69b6e17f436f564f6e2a37d3f184",
+      "sha256": "19246f74831ed204d0969f75e112556ff1682440679eca17dadd88dcca4e3d3e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_32bpp.xesli",
+      "git_blob": "ae3e18fc360d07a981961b71f523a80ec64d65ef",
+      "sha256": "c539942a71da1ae35910549ebe5d19253f30995698bebd9a11ff6d818cff6b28"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_32bpp_scaled.cs.xesl",
+      "git_blob": "3e2d60a3c060acd16469c66e7647e378626284a9",
+      "sha256": "3404e0d812eaa14946dd390cb2405e253ee9b86d92d6c79fb7bf4e82b6a1ba49"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_64bpp.cs.xesl",
+      "git_blob": "a2b9cc99613fac45a01f0f669839ebd7097c7a5d",
+      "sha256": "b73b2880f4cfa959e0630aae239fa5e05aac2f7407c2728ba6a6d213b37a7307"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_64bpp.xesli",
+      "git_blob": "63a0fd4e3b414e8cc5df80fa27fcd2ca97bb0539",
+      "sha256": "4d746a321cfd034fe3dfa91726fa5b6f0e570afee669b1f52bd31c127ed4bd3e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_64bpp_scaled.cs.xesl",
+      "git_blob": "ba6c0555bde46fff3479759359a6a9c92f202e2b",
+      "sha256": "056e9c5f0bd5ff76773dedebc8ce4ecc85ccc4ff4aa92ca4c7308aeeb1a1ff8b"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_8bpp.cs.xesl",
+      "git_blob": "c27141854e394cf7128401cd57ba56978f01cf69",
+      "sha256": "2fa2b0fbdf5ae4700ec616a60284ee3d30e4127f78b1fdbd2dbf6ddcc03d5254"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_8bpp.xesli",
+      "git_blob": "29224d9637276745623b0c0c366f195ae6034a29",
+      "sha256": "bc8c2a0dfb5e0ed96989814572c3b0177d6d796319803d2a406f37c82985e314"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_full_8bpp_scaled.cs.xesl",
+      "git_blob": "6d3cac90df905c6c5653b07d6322b2a20872a2f4",
+      "sha256": "a1bdd159c569edd9d5718b3aaed34c97fdf5e4b9b533a8863fa080bd70166e25"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_host_color.xesli",
+      "git_blob": "13df18e97f0d838b08ca4da4e3e62eb8a9978593",
+      "sha256": "c7af7698ea878e784c10e352a0e29c5fc286b5600a03fa2992af2563df187f7b"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_host_color_entry.xesli",
+      "git_blob": "d56f81088679dc16cc98b64e7b9e039988ac0b4e",
+      "sha256": "21a4622a2678e62c71c1a4b30805e8117c4e0c8e271c35be42a7ad6beeb3e6d7"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_host_color_full_entry.xesli",
+      "git_blob": "187c75b743c43cfc2b512f6b836a5fc9039a7ead",
+      "sha256": "ef0b9eb8a07c401fa2f1c288476fee993b6e8268b15915fb9524c52fec16036e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_host_depth.xesli",
+      "git_blob": "c0e47df0e8c2423722251a551b164daef94bc085",
+      "sha256": "d10630addd92a932fe0c1b3aa7bba56f8b36138e8722960ce506539800a152e0"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/resolve_host_depth_entry.xesli",
+      "git_blob": "0043edf3bb6a0d931dc2277683ec77efe631a9e5",
+      "sha256": "29e93c46dde518de98993b57e775b7091edf5dc7ddd240ecb0a58ee92929bbea"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/tesc.spv",
+      "git_blob": "7df38c87325e3ca47197a690bb8c0af3dfb36d53",
+      "sha256": "de59ceb6dd4a1d26efe7b5b38b8de17f05381bc709c047a302fe4c47b3d76768"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/tessellation_adaptive.vs.glsl",
+      "git_blob": "2b4e523c495d2cbaf3f82af334f99de7e0bd6c64",
+      "sha256": "0df7ccfe24f3e314a8c410de8b6f093518e0c95debe8799dbd3e000d6e87321e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/tessellation_adaptive.vs.hlsl",
+      "git_blob": "38027ef9fa3650be61c4ce98b811a68db61a2473",
+      "sha256": "384e456de4d37345e98af9a04ed1c62954e1cfca4762ace1dc92e8e54bb002c0"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/tessellation_indexed.vs.glsl",
+      "git_blob": "cbac9f70df7426ea099dabed11871524e8574823",
+      "sha256": "ad71202d68167c4f37dc0c1b1b03d6dcbb2017fdb777f5c31ca4f44af25a1d1a"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/tessellation_indexed.vs.hlsl",
+      "git_blob": "ac1fba6a55ac9cd3885de3a852800cebd3a33f47",
+      "sha256": "3c28c9054591cceb0c1423bccc377dd0fd28f8c9529041a583eaea516e0d7b0f"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/testing/util/depth_pattern.frag",
+      "git_blob": "aa0147946eae8b0c4453a0fcbbc46ab2a384bdb5",
+      "sha256": "b0cc8164a19d283e9e0365292c1f37042c27b551f5e67e546b50bdb725e20d91"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/testing/util/depth_pattern.vert",
+      "git_blob": "53a811a93b790e812706e9d9059cf940eb09b7b9",
+      "sha256": "054fdc84f30572cb17c1c731d6925fa651cd8e2bad26c9dd63e6b989f1b14da1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/testing/util/depth_pattern_frag.spv",
+      "git_blob": "1d647ed36549704e2d4529ef797b60ed0a1df041",
+      "sha256": "7795cc76303efc533dace3c6a8f80d967fb2326fb94cbc5c967a580c49989b07"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/testing/util/depth_pattern_shaders.h",
+      "git_blob": "3ffb16a18502334ce14ecad10939a22cbf0b89a3",
+      "sha256": "85ccdc31f01e8af7c2f4642f9d6ed5f85a3afded29ef690631f7ac9d2e6c037e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/testing/util/depth_pattern_vert.spv",
+      "git_blob": "6ca7e1abc33d7362dff37a9d80366a95a2076c84",
+      "sha256": "9dc91f2b8dedbb5ccf81f3789a87313e11cc4f0507e0dce0eb386a596de9b3f5"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_address.xesli",
+      "git_blob": "4b76fb4788ea611b49ce285e23a5306fd4fb059e",
+      "sha256": "f72d04cb599cf9f607dff66b7e677b7cd8ac261ad2e29fb8556821c57fea4fd1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load.xesli",
+      "git_blob": "967f6169dda0c1694175de98c04c0350f9fbcda8",
+      "sha256": "e5b30c29137fe7acbe16cb0344feaa958557f835d06082fdc514a5a9f1367480"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_128bpb.cs.xesl",
+      "git_blob": "94d960806d8a6a0a4255f23adb5ec30703794558",
+      "sha256": "9eda48d9786162783dc101d025653b0f4f68c1cf3d4631c2876a59b8c541c6b8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_128bpb.xesli",
+      "git_blob": "ed451f2281b356efd97125640d2e50f7eb3a5e9c",
+      "sha256": "c4736dc399b48ee09dc0f75afab86bcfdc30c4cda19ccc56016cecdcf77fbf89"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_128bpb_scaled.cs.xesl",
+      "git_blob": "10c9a85232557a4d9000648f510c50bc66a3e913",
+      "sha256": "46701dc86bfad1e5539a309c5e3a43e12468badd61e0787bdc972fbc14aa1914"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_16bpb.cs.xesl",
+      "git_blob": "1d45d73a7fdabd898e446a5a121eddeccdbf1120",
+      "sha256": "61209a524b94da94b76e18e39e2d2e5e44626700ccdfe5e859038881eaaebb24"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_16bpb.xesli",
+      "git_blob": "37212163de0c5eeba3e21a358dd011fec283cf7f",
+      "sha256": "0b00ddc1f61589fd4040f520a57fd31bd76b5924147559f2a3296bf2e37eac46"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_16bpb_scaled.cs.xesl",
+      "git_blob": "12c2c2852007b47b5c5c088d20339915db2f72ac",
+      "sha256": "cab00b960ef3e506f9f17d47124f74151830758088bb91fdd5221db8923612f6"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_32bpb.cs.xesl",
+      "git_blob": "9748446df2d9ac7f0c3b6244150e00628191911f",
+      "sha256": "3375e5668a978b2bb4c0fb9954826d3d6f17023f7ad7749902c3b68e07daace7"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_32bpb.xesli",
+      "git_blob": "45fdc29321a1c8de6161aa038fb657b69da800b5",
+      "sha256": "c08ea3524b37da0e309addaa22d3e7421e2f623b472192373b6786c83eba5648"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_32bpb_64bpb.xesli",
+      "git_blob": "04324939a3a790be6e547806bd3e6a41f39353a5",
+      "sha256": "891e20a8ef3be2d1143c26589572ee9a8dfe5cd9e49c144bed937a0028079f1c"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_32bpb_scaled.cs.xesl",
+      "git_blob": "bc566e3c6f52682aa6c5b2a39d330376d60e4bf9",
+      "sha256": "2714b95c9b10600bf98ac4b7b132d42e2fbf8b356b8952316149fc980e89db30"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_64bpb.cs.xesl",
+      "git_blob": "9203c8abff9f1490be388cd9cfa24011f122a81e",
+      "sha256": "1b47dcd409ced0de29e31f776ef596453b4244072ebafa8b9658c17b2cca6e39"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_64bpb.xesli",
+      "git_blob": "df449ab2ca5882fa00574c7e2381bf9f29aff71a",
+      "sha256": "8cc73891a5537ed9362b9194959a6a6cf3fcf70cede37bf07e656381600afb2e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_64bpb_scaled.cs.xesl",
+      "git_blob": "052309d6c9f37f7ed8b8675d0d92da0f9d9e44e7",
+      "sha256": "d8e39f5d7397dbe07ed72906ee6fadf68ec292ff6616cbdf259a29e2af7f8b5c"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_8bpb.cs.xesl",
+      "git_blob": "e97b599e062ed2eff8319aa3a16770d09270eefb",
+      "sha256": "60a815204f96ba905be288a535d3c75f02a7306fdf60e252e3dbbb28984fa048"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_8bpb.xesli",
+      "git_blob": "92112d5a657feab763d5bcf46c838714bf1df354",
+      "sha256": "bc370332d90cd1e1dedf2e7274fb8b29ac63943062fff1914e8cec25f9e3aba6"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_8bpb_scaled.cs.xesl",
+      "git_blob": "166e0efae425934888fe58f0c3ff3c53ecd9d725",
+      "sha256": "15e15ebbe71e80893d105033043fdd1bd29b4590bf90d37f3931f0e6e5fac4c3"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_bgrg8_rgb8.cs.xesl",
+      "git_blob": "eb4559008d983ab080d77584a58c3e12184a55c3",
+      "sha256": "e368bfb30fa29cf1a1626845f329cf39ebf9df77d1025da124ee2bade94e3096"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_bgrg8_rgbg8.cs.xesl",
+      "git_blob": "de18bc28ce384e499fd6beea8bfbe6e4d232d0af",
+      "sha256": "ac28544800051a92308b33b627cedf9bb8f2ae494e2ee8dca9a8d99d55237dc2"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_ctx1.cs.xesl",
+      "git_blob": "6eb6832696e0ecea6509516e0e17879c238934fd",
+      "sha256": "492885a69084ebcc22a280f62247bb5452eba7d6e6cff6758e794c1b7ee02823"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_depth_float.cs.xesl",
+      "git_blob": "eddc1e54ed546d31df835529b3edb0230edffd7c",
+      "sha256": "0a22e52c6b9bb98d4725da511d1a33fb6696bcf3f7a6511e7ff2576397d73ae7"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_depth_float_scaled.cs.xesl",
+      "git_blob": "05526a5dc557c5bbec9424293016b53c318f0815",
+      "sha256": "00290ad3e908a8f907f6b7929c0bcbe68d4b87e922cf3fa7732b4b1e67130a97"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_depth_unorm.cs.xesl",
+      "git_blob": "1b01af19ebc3087766dcaf5ee08698d1964b0ef4",
+      "sha256": "9d0fe827268b769d7e04756671aaa88c002c8588a8dd751c4311e2b46618b223"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_depth_unorm_scaled.cs.xesl",
+      "git_blob": "a13d2a3557481552c28b90ffcee61b709a9864ff",
+      "sha256": "e1223b5b3e3629a4ddc27570735f12798f1ea07989ffbd47e62dc54be97d0d2b"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxn_rg8.cs.xesl",
+      "git_blob": "4326886330f9be1ed5770786556eb6272011f6d4",
+      "sha256": "96321e3339fee9beebb22d9b933a6b86f06b4a038ad2df645049c3d8b9ed9c38"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt1_rgba8.cs.xesl",
+      "git_blob": "439f56a708e14c087b57f05ebbcc8efa6b67cc4a",
+      "sha256": "254c5c05a8bdab1b9372e689ce54fdc38c4efd5f25d7b68ac546f7e9fc64b34a"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt3_rgba8.cs.xesl",
+      "git_blob": "077bd916a6ddb02086ac204b786f92fb016b9735",
+      "sha256": "cc8123b699424a56325c10cb6c65cb2843bf3c08edce2bdb6d2aa4d244ffe3c0"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt3a.cs.xesl",
+      "git_blob": "c2015253f50bf4e3b852698f04c30724e741b741",
+      "sha256": "a7a291981e9bade09860039ab527d66e343aefcaba6a71b6cb5cd4cfa35169a1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt3aas1111.xesli",
+      "git_blob": "7ea57e61016324787cb888f1b89a0a3a2bac5d99",
+      "sha256": "0231a45ba32b2e269f5145ac7c64b832ceeb7deaf75d305fcab390a51b454124"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt3aas1111_argb4.cs.xesl",
+      "git_blob": "a11df016bed8b6ece225501135016f908f361a90",
+      "sha256": "4ea4e609fdd12a971393539ba8eada5d2cf4d8aec8a8ef22a05f5cded0e8fee2"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt3aas1111_bgra4.cs.xesl",
+      "git_blob": "8e8554b4134259a29eceb42aa6bada69c20dc35d",
+      "sha256": "cc7bd6d906457563ea44993e9e350c61f0099e14e98a0e0c3dc54ebbce211240"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt5_rgba8.cs.xesl",
+      "git_blob": "5b935c740044f32696ef2318302177144793150f",
+      "sha256": "be2a0975322f6d966142537eed2baa43eb931ac1f12d30d6a60c4fe03cb62644"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_dxt5a_r8.cs.xesl",
+      "git_blob": "b601557bb33934ca735cc29e9849a4c9e1b44d06",
+      "sha256": "959c47826c03af7e9451611e99a4c49cfffe3b70719fa2864f04bd3335fa4655"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_gbgr8_grgb8.cs.xesl",
+      "git_blob": "67702b9b20bd0989d9ccd5568c0e64d117dd5022",
+      "sha256": "ce045d2e46b5ac6b57daefa337ff2c0bf626d10485b73580ad1370a951d0a0b0"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_gbgr8_rgb8.cs.xesl",
+      "git_blob": "5d86a7a8796d8bec26363faa78a890a72bd77826",
+      "sha256": "fab283e2c53111d51fa36a1be1f1a76e140e88db5039229bd5779d5644be0231"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r10g11b11_rgba16.cs.xesl",
+      "git_blob": "b8f0c8f52af17aa3e41ec7bd976cca2b6a79610b",
+      "sha256": "e2041f34dcf07e39b0fd1d8fbbef57eae70ea24915872014612795550f5be4f8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r10g11b11_rgba16_scaled.cs.xesl",
+      "git_blob": "4432ebefb6cbbdf1ffc1bd5d85170b89357b0516",
+      "sha256": "e822b6b38b06bdd06d31f56590700185d3b804c5444fb0876ee3d0ac842f4961"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r10g11b11_rgba16_snorm.cs.xesl",
+      "git_blob": "28bd7ef6bec499206816b697ffc27b9d20f4b425",
+      "sha256": "a0e6802af5b7f5dd421e600854313ac0c24a13a6bc1bbe86ac5060d0595b8ff1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r10g11b11_rgba16_snorm_scaled.cs.xesl",
+      "git_blob": "fe03b5a828f1596e6e59a1ee53b4e456de6696b6",
+      "sha256": "242ff2927ea97d6f5f42fe251e48294ab4a95a7b494ecf60fe2d5c5450366616"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r11g11b10_rgba16.cs.xesl",
+      "git_blob": "792bc5a64f5c570b6c23903e7f7168f3a3f253f8",
+      "sha256": "c6cdf86a807fd65d7d1983da1136d450a8f33327f2f30b3f3cff2e335cbe6593"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r11g11b10_rgba16_scaled.cs.xesl",
+      "git_blob": "08dbb429dcb1492ac654b81a8595de4ace717de1",
+      "sha256": "35e77decac85582ea76ec4616f77e28b51d735e2b971c8833a8ed7a311061301"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r11g11b10_rgba16_snorm.cs.xesl",
+      "git_blob": "32e878c3aff2d5d8a94ab4738d66e330d857b5f6",
+      "sha256": "3ef9687e05a4f6652bb135fc8c93ad4fa2ea2c056e49074abb9983a9aacaafbc"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r11g11b10_rgba16_snorm_scaled.cs.xesl",
+      "git_blob": "5f5bf3b6c7fca429bbb5f43aba7307e4625bddf0",
+      "sha256": "eb369aaf667b631ff9e83fb092fa90a61d148115fe9ec412c361b9cf963d7545"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r16_snorm_float.cs.xesl",
+      "git_blob": "b88c9dbe1d3ac32468d1a3b3900e78606a8ed9cd",
+      "sha256": "4760edaba5d670f978b049e8af3029e39230f12e93d4c28e8b4d1952bdc205d4"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r16_snorm_float_scaled.cs.xesl",
+      "git_blob": "1c4d67a205e7768c32dad8db5eb158274e11bac4",
+      "sha256": "77c106c4e3957f8d6b9e58668789e5e047c03db55009d2054f97cd86bebcb25c"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r16_unorm_float.cs.xesl",
+      "git_blob": "97767411400d32ab797fa486fcedeb26b6ae14db",
+      "sha256": "d7b2688c050b0ebaafdb58940b3e7c7a24675981327b39deeb708c9d0bdcdb22"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r16_unorm_float_scaled.cs.xesl",
+      "git_blob": "3418e3ec437053432934a17e741a466ac2977936",
+      "sha256": "28b731c125a174baf9a8e5cbd5987d968ae28f0ae38b917c478c22c8c7a8265d"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r4g4b4a4_a4r4g4b4.cs.xesl",
+      "git_blob": "09a57f7af43aad7870e5457c8638128fff0df6a6",
+      "sha256": "610d72fa5407a990ca8c77757ff9acf6e7fe597228ad2a6919b90a8c82aab96d"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r4g4b4a4_a4r4g4b4_scaled.cs.xesl",
+      "git_blob": "94526aa2b6ab1fa53e90b7b4fb74ff882120fe41",
+      "sha256": "dca254354a930b2f72b65e29d0686c0c7fba797afa1464163daecfe8cdb70c84"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r4g4b4a4_b4g4r4a4.cs.xesl",
+      "git_blob": "66012efcb38fcb02f2cd46705bc5110a0ba46e15",
+      "sha256": "1bbbc059a43df1dfb12ba5fa96f178df3c3dc34682ad61362c985c8286a8db68"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r4g4b4a4_b4g4r4a4_scaled.cs.xesl",
+      "git_blob": "3ba2c2e993d0985e28a2856b857060b5a065afa2",
+      "sha256": "3931a97655b44d0148769caae583923718d4c3dc7d8168206428e6dc6390d905"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r5g5b5a1_b5g5r5a1.cs.xesl",
+      "git_blob": "b803cadf99c5c8cd58e832e87a696f7f4f81bac7",
+      "sha256": "c0baaaf30e716b1092632f7b80622bd5a72ffc3542972cc246b3943d72527adc"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r5g5b5a1_b5g5r5a1_scaled.cs.xesl",
+      "git_blob": "d344be91ef7a1e95f23476002ff022b2c757a3f9",
+      "sha256": "9c4039e4b83f8dbbaa6ea41681b1f8fddeba66f1688c0720a635a4b96032d021"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r5g5b6_b5g6r5_swizzle_rbga.cs.xesl",
+      "git_blob": "d14d9e231926080648d3912da52943e42758b5e8",
+      "sha256": "fb3a2a6759565b648adf6a8af23a35084d908a6439de84c2e550b272b5d9e3d8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r5g5b6_b5g6r5_swizzle_rbga_scaled.cs.xesl",
+      "git_blob": "9a6a2e3a1b95dc34b96c4d9a4ed1e212e54844da",
+      "sha256": "3438a508aeb2db58cdfb75f7fc4678a46f99253590812eceb3a23a0274719a18"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r5g6b5_b5g6r5.cs.xesl",
+      "git_blob": "e2fa4eb3cdcc63724fed2b01747fad58a065e1e0",
+      "sha256": "5270d9cd5ef42b7767f2d459a50ff369d4f8ad347ee467341ea11df37cd7a54e"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_r5g6b5_b5g6r5_scaled.cs.xesl",
+      "git_blob": "e1abb3cf1a8fcd8fd922f132099405d7bfdbb8a5",
+      "sha256": "5a68dee3dcf8cad78d100166b71060163cd42cdbe0a9574e66a7c28feb6af7c0"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rg16_snorm_float.cs.xesl",
+      "git_blob": "1ef784f990b2bcc7731e67ef6e4768dc8bd61de6",
+      "sha256": "011da89f71fb73bdeaa7c731749d9160ae9549dc8680672f617aef66c7423b09"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rg16_snorm_float_scaled.cs.xesl",
+      "git_blob": "78f331c21ed8622409053d88163add0025b809b0",
+      "sha256": "0c1989f8c3add26c014dd650b759ce30259981efc3167985bd922b5fd38497e7"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rg16_unorm_float.cs.xesl",
+      "git_blob": "e350e6712b50dab11a9752e149dcaa88c87a401e",
+      "sha256": "31c25ffbb3c2b3aafcbf86234d536e90ba631594316adba3e6bd8a3cb5572fda"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rg16_unorm_float_scaled.cs.xesl",
+      "git_blob": "c4763ac066f106c7ddcf80606e3c7850fe80f4be",
+      "sha256": "66fe18c60836cb9860b0e41241e67c07a7cc0eaff1676c9cfdf877736e1329c3"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rgba16_snorm_float.cs.xesl",
+      "git_blob": "7abc3cdb18e4dd07647200cbd78bb957b911dc60",
+      "sha256": "44ff32d9f67ab3d0e8544bc0f9135e16aa16d4fde6a6676a0dd330bebda655ea"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rgba16_snorm_float_scaled.cs.xesl",
+      "git_blob": "b607eecf9e2080ac998e94247465061ac6967f4e",
+      "sha256": "8a5e301a9070c1914cb6f3bc66f4438b08406820669243ef1fc93ce2a5f8fbc8"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rgba16_unorm_float.cs.xesl",
+      "git_blob": "82508e26872efa203ab887c9859ababc86982e54",
+      "sha256": "a553c63d2291da9114b3d5164a30a703078f4d1126ea1a62dc62285994aab8b1"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_load_rgba16_unorm_float_scaled.cs.xesl",
+      "git_blob": "306d98a4d7e272b12e2271b1588526d142aee7a2",
+      "sha256": "a9b7e7312406dd45d26a83e9ca3954c2af583435507746ad7239e42d249e4ae6"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/texture_upload_repack.metal",
+      "git_blob": "cf7dcedbf94aa13c4942c3c458d5fec7056c17c9",
+      "sha256": "d4b92faa8e42a4479a259203ccc585cc3e4fb3f897fa3934f770be5528fabd80"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/vert.spv",
+      "git_blob": "c16f29e5bde94da48702699ee99d8add2529a08d",
+      "sha256": "2fffb9711b8d3594d2e2296ec7681b2038e044ac896f65d8da93dfcfbd052359"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/xenos_draw.glsli",
+      "git_blob": "407b8e0857d8080fb72fd2d4f6c58debafefee07",
+      "sha256": "2a37038429a73a44b2258deedd481e5e0d49bedd76ef54d4c26f5c8cf4a56fbe"
+    },
+    {
+      "path": "src/xenia/gpu/shaders/xenos_draw.hlsli",
+      "git_blob": "a866ad4607cc76356b787188921f2c7d20020d8c",
+      "sha256": "d22e69bac3b448beb442c29d2e9271ddaf3daa3b8c9fce5d77aaa87fa75f042c"
+    },
+    {
+      "path": "src/xenia/gpu/vulkan/CMakeLists.txt",
+      "git_blob": "6b29efffcee0d52b7a21ee10aeffa3eb60b0ec8c",
+      "sha256": "9e328c7bb7f346051b98c5891104dd96a49e7eb4daaea3c610073a4a32b2a4cc"
+    },
+    {
+      "path": "src/xenia/ui/shaders/xesl.xesli",
+      "git_blob": "49a19dda09d8889f26a3bb32833d26526f6aa566",
+      "sha256": "5f251e6449fc95292f04d0736059ef9cb9ad6f4bf70cdbc3476e76d17ebcf127"
+    },
+    {
+      "path": "tools/build/shader_cc.cc",
+      "git_blob": "9c4f68d4025a3af1e53904e66e0aa4838d79f72c",
+      "sha256": "0bef1fa0991bb77249454e9dae2c415345c86f46d957f6ff8eee7288b323ae2b"
+    },
+    {
+      "path": "xenia-build.py",
+      "git_blob": "db269865b21ed0e075eae1533d2768ba82fcbb87",
+      "sha256": "ec7cf424be81a1591c24193b5e6c185176f47f13feab94e6d4d9ed084c82c1d2"
+    }
+  ],
+  "modules": [
+    {
+      "identifier": "resolve_host_color_32bpp_1xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 1,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 0
+      },
+      "source_entry": "resolve_host_color_entry.xesli",
+      "bytes": 35624,
+      "sha256": "3620208f47492d0fb43f91752f3ce7ea74de8e5e7a3cecf452ee704c88da0f9a",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_uint_32bpp_1xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 1,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 1
+      },
+      "source_entry": "resolve_host_color_entry.xesli",
+      "bytes": 13212,
+      "sha256": "043271c72a53f0c991e875dc7a414227041177762e941f14c7815a208c774b89",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_32bpp_2xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 2,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 0
+      },
+      "source_entry": "resolve_host_color_entry.xesli",
+      "bytes": 37564,
+      "sha256": "6f470a143444f67d1cce413f4abe9fefafc723e48244bc8b978b22e4fcf7d2b6",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_uint_32bpp_2xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 2,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 1
+      },
+      "source_entry": "resolve_host_color_entry.xesli",
+      "bytes": 15152,
+      "sha256": "c37de8cbd2c4dda6f224bdf5aea4c7a10bd05b66aef464b432620023cc7d6cb7",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_32bpp_2xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 2,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 0
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 126440,
+      "sha256": "205eb7896ffada03daf272f49eef2baffb3abe7ce41b76fc9d40a63378e166bc",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_uint_32bpp_2xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 2,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 1
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 69832,
+      "sha256": "3e5b196a7cee7ae53c6a6b79c3b6d2e85e9af9601417886b2151dc6c7afd95a3",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_32bpp_4xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 4,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 0
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 121624,
+      "sha256": "9bd6a90e122de010f00ccf07ec7c0b46a741cddfe9c3ac85e6db7ad066635817",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_uint_32bpp_4xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 32,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 4,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 1
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 65016,
+      "sha256": "08452fe7df93044045fad68cbe7dcaeedb85f19120372e4feed72d5e6c28c75e",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_64bpp_1xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 64,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 1,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 0
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 115412,
+      "sha256": "1c813ed9627291bce813d861ff99142076135d4eeeb1bfe7268d1297a8112ad7",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_uint_64bpp_1xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 64,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 1,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 1
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 58680,
+      "sha256": "444fe9d2dea6a758f5f9685e91a0644544c72f5a6840dd6655a3654f1e390d1a",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_64bpp_4xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 64,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 4,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 0
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 117868,
+      "sha256": "451b4a24724b2ff75945650b366a890a91cbc46948e9ff6a86fdf910f24ff661",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_color_full_uint_64bpp_4xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP": 64,
+        "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES": 4,
+        "XE_RESOLVE_HOST_COLOR_SOURCE_UINT": 1
+      },
+      "source_entry": "resolve_host_color_full_entry.xesli",
+      "bytes": 61136,
+      "sha256": "626257bd224312c0a78beada90e535ed082af300383be6eaaedbc28745262236",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_depth_32bpp_1xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_DEPTH_MSAA_SAMPLES": 1
+      },
+      "source_entry": "resolve_host_depth_entry.xesli",
+      "bytes": 23420,
+      "sha256": "c46bc8d6ce36f590f39c9b47228806179fe1868c8a08183eaebaf86983fec32f",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            2,
+            1
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    },
+    {
+      "identifier": "resolve_host_depth_32bpp_2xmsaa_cs",
+      "defines": {
+        "XE_RESOLVE_HOST_DEPTH_MSAA_SAMPLES": 2
+      },
+      "source_entry": "resolve_host_depth_entry.xesli",
+      "bytes": 26812,
+      "sha256": "f097c4088e43ca6053042ac9dab252a14c7840e0caf912cc9507ad6d7931c598",
+      "abi": {
+        "local_size": [
+          8,
+          8,
+          1
+        ],
+        "descriptors": [
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            2,
+            1
+          ]
+        ],
+        "uniform_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          32,
+          36,
+          40
+        ],
+        "push_constant_offsets": [
+          0,
+          4,
+          8,
+          12,
+          16
+        ]
+      }
+    }
+  ]
+}

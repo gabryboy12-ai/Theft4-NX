@@ -19,6 +19,7 @@
 #if REX_PLATFORM_NX
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -30,6 +31,8 @@
 
 extern "C" {
 #include <switch/audio/driver.h>
+#include <switch/arm/cache.h>
+#include <switch/arm/counter.h>
 #include <switch/kernel/event.h>
 #include <switch/kernel/svc.h>
 #include <switch/kernel/thread.h>
@@ -43,16 +46,28 @@ static constexpr size_t kBufferAlign = AUDREN_BUFFER_ALIGNMENT;
 
 namespace rex::audio::nx {
 
+namespace { std::atomic<bool> renderer_claimed{false}; }
+
+NxAudioCounters& nx_audio_counters() {
+  static NxAudioCounters counters;
+  return counters;
+}
+
 SwitchAudioDriver::SwitchAudioDriver(memory::Memory* memory,
                                      rex::thread::Semaphore* semaphore)
     : AudioDriver(memory), semaphore_(semaphore) {}
 
-SwitchAudioDriver::~SwitchAudioDriver() {
-  assert_true(frames_queued_.empty());
-  assert_true(frames_unused_.empty());
-}
+SwitchAudioDriver::~SwitchAudioDriver() = default;
 
 bool SwitchAudioDriver::Initialize() {
+  // libnx owns one process-wide renderer session. Independent wrappers
+  // cannot update it without corrupting shared voice state.
+  bool expected = false;
+  if (!renderer_claimed.compare_exchange_strong(expected, true)) {
+    REXAPU_ERROR("Switch audio: a native render client is already active");
+    return false;
+  }
+  owns_renderer_ = true;
   // Configure audio renderer. Follows the libnx `audren_user` sample: minimal
   // voice/mix/sink counts. 1 voice (stereo PCM16 downmix of the guest 5.1),
   // 1 final mix with 2 mix buffers for stereo output, 1 device sink.
@@ -61,7 +76,9 @@ bool SwitchAudioDriver::Initialize() {
   // (uses the latest supported rev, currently AUDREN_REVISION_6).
   const AudioRendererConfig ar_config = {
       .output_rate     = AudioRendererOutputRate_48kHz,
-      .num_voices      = 1,
+      // libnx allocates channel slots from this capacity as well: a stereo
+      // voice needs two slots even though only voice ID 0 is active.
+      .num_voices      = static_cast<int>(kOutputChannels),
       .num_effects     = 0,
       .num_sinks       = 1,
       .num_mix_objs    = 1,
@@ -100,6 +117,7 @@ bool SwitchAudioDriver::Initialize() {
     return false;
   }
   std::memset(mempool_ptr_, 0, mempool_size_);
+  armDCacheFlush(mempool_ptr_, mempool_size_);
 
   // STEP 3 + 4: Register the PCM memory pool with audren and attach it.
   mempool_id_ = audrvMemPoolAdd(&audren_driver_, mempool_ptr_, mempool_size_);
@@ -218,83 +236,63 @@ bool SwitchAudioDriver::WaitForCurrentSlotReusable(
     svcSleepThread(kSliceNs);
     waited_ns += kSliceNs;
     drv_lock.lock();
-    audrvUpdate(&audren_driver_);
+    const Result rc = audrvUpdate(&audren_driver_);
+    if (R_FAILED(rc)) {
+      REXAPU_ERROR("Switch audio wait update failed: 0x{:08X}", rc);
+      return false;
+    }
   }
   return true;
 }
 
 void SwitchAudioDriver::SubmitFrame(uint32_t frame_ptr) {
-  const auto input_frame = memory_->TranslateVirtual<float*>(frame_ptr);
-  float* output_frame;
+  // Keep guest samples stable while waiting for the renderer. Fixed stack
+  // storage avoids allocating and maintaining a heap queue every 256 samples.
+  alignas(16) float frame[kFrameSamples];
+  std::memcpy(frame, memory_->TranslateVirtual<float*>(frame_ptr), sizeof(frame));
+  bool update_failed = false;
   {
-    std::unique_lock<std::mutex> guard(frames_mutex_);
-    if (frames_unused_.empty()) {
-      output_frame = new float[kFrameSamples];
+    std::unique_lock<std::mutex> guard(audren_mutex_);
+    const Result rc = audrvUpdate(&audren_driver_);
+    if (R_SUCCEEDED(rc)) {
+      NxAudioCounters& counters = nx_audio_counters();
+      // Nothing waiting, queued or playing: the output ran dry before this
+      // frame came (the game's mixer was late).
+      bool output_busy = false;
+      for (const AudioDriverWaveBuf& wavebuf : wavebufs_) {
+        output_busy |= wavebuf.state == AudioDriverWaveBufState_Waiting ||
+                       wavebuf.state == AudioDriverWaveBufState_Queued ||
+                       wavebuf.state == AudioDriverWaveBufState_Playing;
+      }
+      if (!output_busy && counters.frames.load(std::memory_order_relaxed)) {
+        counters.starved.fetch_add(1, std::memory_order_relaxed);
+      }
+      const u64 wait_start = armGetSystemTick();
+      const bool slot_free = WaitForCurrentSlotReusable(guard);
+      counters.wait_ns.fetch_add(armTicksToNs(armGetSystemTick() - wait_start),
+                                 std::memory_order_relaxed);
+      if (slot_free) {
+        ConvertAndSubmit(frame);
+        counters.frames.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        counters.dropped.fetch_add(1, std::memory_order_relaxed);
+      }
     } else {
-      output_frame = frames_unused_.top();
-      frames_unused_.pop();
-    }
-  }
-
-  std::memcpy(output_frame, input_frame, kFrameSamples * sizeof(float));
-
-  // Try to submit directly; if the current slot is still owned by the
-  // renderer (Queued/Waiting/Playing), queue the frame for drain below.
-  bool submitted_directly = false;
-  {
-    std::unique_lock<std::mutex> drv_guard(audren_mutex_);
-    // Refresh renderer-side buffer state.
-    audrvUpdate(&audren_driver_);
-    if (CurrentSlotIsReusable()) {
-      ConvertAndSubmit(output_frame);  // holds audren_mutex_
-      submitted_directly = true;
-    }
-  }
-
-  if (submitted_directly) {
-    {
-      std::unique_lock<std::mutex> guard(frames_mutex_);
-      frames_unused_.push(output_frame);
-    }
-    if (semaphore_) {
-      auto ret = semaphore_->Release(1, nullptr);
-      assert_true(ret);
-    }
-  } else {
-    std::unique_lock<std::mutex> guard(frames_mutex_);
-    frames_queued_.push(output_frame);
-  }
-
-  // Drain any queued frames into free buffer slots. CRITICAL: we must not
-  // overwrite pcm_buffers_[idx] while the hardware is still referencing it.
-  // WaitForCurrentSlotReusable blocks until state transitions to Done/Free.
-  while (true) {
-    float* queued = nullptr;
-    {
-      std::unique_lock<std::mutex> guard(frames_mutex_);
-      if (frames_queued_.empty()) break;
-      queued = frames_queued_.front();
-      frames_queued_.pop();
-    }
-
-    {
-      std::unique_lock<std::mutex> drv_guard(audren_mutex_);
-      // Block until the current slot is safe to overwrite (per libnx
-      // `audren_user` sample: do NOT write a wave buffer whose state is
-      // Queued / Waiting / Playing).
-      if (WaitForCurrentSlotReusable(drv_guard)) {
-        ConvertAndSubmit(queued);
+      update_failed = true;
+      if (++update_failures_ == 1 || !(update_failures_ % 128)) {
+        REXAPU_ERROR("Switch audio update failed: 0x{:08X} ({} failures)", rc,
+                     update_failures_);
       }
     }
-
-    {
-      std::unique_lock<std::mutex> guard(frames_mutex_);
-      frames_unused_.push(queued);
-    }
-    if (semaphore_) {
-      auto ret = semaphore_->Release(1, nullptr);
-      assert_true(ret);
-    }
+  }
+  // A failed service must not turn returned credits into an unbounded busy
+  // loop that starves rendering and floods the SD log.
+  if (update_failed) svcSleepThread(5'333'333);
+  // Return a producer credit even after a bounded renderer timeout so the
+  // guest callback can recover instead of permanently running out of credits.
+  if (semaphore_) {
+    auto released = semaphore_->Release(1, nullptr);
+    assert_true(released);
   }
 }
 
@@ -312,9 +310,12 @@ void SwitchAudioDriver::ConvertAndSubmit(const float* input) {
   for (size_t i = 0; i < total_samples; i++) {
     float sample = stereo_float[i];
     // Clamp to [-1.0, 1.0] then scale to int16 range.
-    sample = std::fmax(-1.0f, std::fmin(1.0f, sample));
+    sample = std::isfinite(sample) ? std::clamp(sample, -1.0f, 1.0f) : 0.0f;
     dest[i] = static_cast<int16_t>(sample * 32767.0f);
   }
+
+  // Publish CPU writes before the audio renderer reads the PCM memory pool.
+  armDCacheFlush(dest, kOutputFrameSize);
 
   // Prepare and submit the wave buffer.
   wavebufs_[current_buf_].state = AudioDriverWaveBufState_Free;
@@ -362,15 +363,9 @@ void SwitchAudioDriver::Shutdown() {
     free(mempool_ptr_);
     mempool_ptr_ = nullptr;
   }
-
-  std::unique_lock<std::mutex> guard(frames_mutex_);
-  while (!frames_unused_.empty()) {
-    delete[] frames_unused_.top();
-    frames_unused_.pop();
-  }
-  while (!frames_queued_.empty()) {
-    delete[] frames_queued_.front();
-    frames_queued_.pop();
+  if (owns_renderer_) {
+    owns_renderer_ = false;
+    renderer_claimed.store(false);
   }
 }
 

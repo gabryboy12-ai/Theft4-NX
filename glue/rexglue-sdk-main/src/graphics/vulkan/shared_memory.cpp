@@ -21,6 +21,7 @@
 #include <rex/graphics/vulkan/shared_memory.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/ui/vulkan/gpu_only_allocation.h>
 #include <rex/ui/vulkan/util.h>
 
 REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
@@ -67,9 +68,11 @@ bool VulkanSharedMemory::Initialize() {
     if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer_) == VK_SUCCESS) {
       VkMemoryRequirements buffer_memory_requirements;
       dfn.vkGetBufferMemoryRequirements(device, buffer_, &buffer_memory_requirements);
-      if (rex::bit_scan_forward(buffer_memory_requirements.memoryTypeBits &
-                                    vulkan_device->memory_types().device_local,
-                                &buffer_memory_type_)) {
+      // Device-local preferred; NVK on the Switch (no VRAM) may offer none.
+      buffer_memory_type_ = ui::vulkan::util::ChooseMemoryType(
+          vulkan_device->memory_types(), buffer_memory_requirements.memoryTypeBits,
+          ui::vulkan::util::MemoryPurpose::kDeviceLocal);
+      if (buffer_memory_type_ != UINT32_MAX) {
         uint32_t allocation_size_log2;
         rex::bit_scan_forward(std::max(uint64_t(buffer_memory_requirements.alignment), uint64_t(1)),
                               &allocation_size_log2);
@@ -114,15 +117,21 @@ bool VulkanSharedMemory::Initialize() {
     }
     VkMemoryRequirements buffer_memory_requirements;
     dfn.vkGetBufferMemoryRequirements(device, buffer_, &buffer_memory_requirements);
-    if (!rex::bit_scan_forward(
-            buffer_memory_requirements.memoryTypeBits & vulkan_device->memory_types().device_local,
-            &buffer_memory_type_)) {
+    // Device-local preferred; NVK on the Switch (no VRAM) may offer none.
+    buffer_memory_type_ = ui::vulkan::util::ChooseMemoryType(
+        vulkan_device->memory_types(), buffer_memory_requirements.memoryTypeBits,
+        ui::vulkan::util::MemoryPurpose::kDeviceLocal);
+    if (buffer_memory_type_ == UINT32_MAX) {
       REXGPU_ERROR(
-          "Shared memory: Failed to get a device-local Vulkan memory type for "
-          "the buffer");
+          "Shared memory: Failed to get a Vulkan memory type for the buffer "
+          "(supported types 0x{:X})",
+          buffer_memory_requirements.memoryTypeBits);
       Shutdown();
       return false;
     }
+    REXGPU_INFO("Shared memory: buffer memory type {} (supported 0x{:X}, device-local 0x{:X})",
+                buffer_memory_type_, buffer_memory_requirements.memoryTypeBits,
+                vulkan_device->memory_types().device_local);
     VkMemoryAllocateInfo buffer_memory_allocate_info;
     VkMemoryAllocateInfo* buffer_memory_allocate_info_last = &buffer_memory_allocate_info;
     buffer_memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -141,6 +150,8 @@ bool VulkanSharedMemory::Initialize() {
       buffer_memory_dedicated_allocate_info.buffer = buffer_;
     }
     VkDeviceMemory buffer_memory;
+    // Only the GPU reads and writes the buffer (uploads go through staging).
+    ui::vulkan::GpuOnlyAllocationScope gpu_only(true);
     if (dfn.vkAllocateMemory(device, &buffer_memory_allocate_info, nullptr, &buffer_memory) !=
         VK_SUCCESS) {
       REXGPU_ERROR(

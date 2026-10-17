@@ -1,4 +1,4 @@
-# switch-game: first NRO of the game on Nintendo Switch, without graphics
+# switch-game: experimental Nintendo Switch game runtime with native audio and Vulkan
 # (docs/switch-port/06-game-boot-plan.md section 4). Switch-only project like
 # tools/switch-smoke: the SDK as a subdirectory with the headless Switch
 # configuration, the generated code of the European base executable (option C)
@@ -27,15 +27,38 @@ if(NOT EXISTS "${THEFT4_GENERATED_DIR}/sources.cmake")
                         "config-eu-base/gta4_eu_base_manifest.toml from gta4-recomp first")
 endif()
 include("${THEFT4_GENERATED_DIR}/sources.cmake")  # GENERATED_SOURCES
+# A static recompilation must load precisely the executable it was generated from.
+set(THEFT4_EXPECTED_XEX_SHA256 "74d480d29b513793938b602e0db0b0885a19b102194da71a70db443648b18c9a"
+    CACHE STRING "SHA256 of default.xex used to generate THEFT4_GENERATED_DIR")
+string(LENGTH "${THEFT4_EXPECTED_XEX_SHA256}" _xex_hash_length)
+if(NOT _xex_hash_length EQUAL 64 OR NOT THEFT4_EXPECTED_XEX_SHA256 MATCHES "^[0-9a-fA-F]+$")
+    message(FATAL_ERROR "THEFT4_EXPECTED_XEX_SHA256 must be a 64-digit SHA256")
+endif()
+string(TOLOWER "${THEFT4_EXPECTED_XEX_SHA256}" THEFT4_EXPECTED_XEX_SHA256)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
 # Phase (a) of the renderer (06-game-boot-plan.md section 24): ReXGlue's Vulkan
 # backend (rexgpu-xenos-nx) and NVK linked in; the cvar nx_gpu picks it at run
-# time, the null GPU stays the default. Off for the run binaries: configure a
-# separate build directory with -DTHEFT4_SWITCH_GAME_VULKAN=ON.
-option(THEFT4_SWITCH_GAME_VULKAN "Link ReXGlue's Vulkan backend and NVK (cvar nx_gpu)" OFF)
+# time. Native Vulkan is the default; configure with
+# -DTHEFT4_SWITCH_GAME_VULKAN=OFF only for a headless diagnostic build.
+option(THEFT4_SWITCH_GAME_VULKAN "Link ReXGlue's Vulkan backend and NVK (cvar nx_gpu)" ON)
+set(THEFT4_SWITCH_VULKAN_LIBRARIES "vulkan;expat;zstd;z;nx" CACHE STRING
+    "Static Vulkan driver and dependencies; use vulkan;nx for a bundled NVK archive")
 set(REXGLUE_SWITCH_VULKAN ${THEFT4_SWITCH_GAME_VULKAN} CACHE BOOL "" FORCE)
 add_subdirectory("${THEFT4_ROOT}/glue/rexglue-sdk-main" rexglue-sdk)
+option(THEFT4_SWITCH_DIRECT_RESOLVE "Use pinned XeniOS host-image resolve shaders" ON)
+if(THEFT4_SWITCH_GAME_VULKAN AND THEFT4_SWITCH_DIRECT_RESOLVE)
+    set(_direct_resolve_include "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/xenios-direct-resolve/include")
+    if(NOT EXISTS "${_direct_resolve_include}/xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_host_color_32bpp_1xmsaa_cs.h")
+        message(FATAL_ERROR "Missing pinned direct-resolve shaders; see thirdparty/xenios-direct-resolve/README.md")
+    endif()
+    # Scope this to the resolve source, preserving the other backend objects.
+    set_source_files_properties(
+        "${THEFT4_ROOT}/glue/rexglue-sdk-main/src/graphics/vulkan/render_target_cache.cpp"
+        TARGET_DIRECTORY rexgpu-xenos-nx PROPERTIES
+        COMPILE_DEFINITIONS THEFT4_XENIOS_DIRECT_RESOLVE_SHADERS=1
+        INCLUDE_DIRECTORIES "${_direct_resolve_include}")
+endif()
 
 # Stubs for the imports the SDK does not define (missing_imports.py), from the
 # archives actually linked; regenerated when they or the generated header change.
@@ -64,6 +87,8 @@ add_executable(switch-game main.cpp nx_input.cpp nx_clocks.cpp nx_profiler.cpp n
     "${THEFT4_ROOT}/tools/switch-common/nx_exit.cpp"
     "${MISSING_IMPORTS_CPP}" ${GENERATED_SOURCES})
 target_compile_features(switch-game PRIVATE cxx_std_23)
+target_compile_definitions(switch-game PRIVATE
+    THEFT4_EXPECTED_XEX_SHA256="${THEFT4_EXPECTED_XEX_SHA256}")
 target_include_directories(switch-game PRIVATE
     "${THEFT4_GENERATED_DIR}"
     "${THEFT4_ROOT}/tools/switch-common"
@@ -82,6 +107,11 @@ target_compile_options(switch-game PRIVATE
 # Line tables only for the ~2 MB generated files: enough for addr2line on a
 # crash report, a fraction of the memory and time of full -g.
 set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-g1")
+# The registration routine contains ~37,000 consecutive virtual calls and only
+# runs at startup. GCC's -O3 processing of this single basic block takes minutes
+# and substantial memory; gameplay functions above retain their -O3 setting.
+set_source_files_properties("${THEFT4_GENERATED_DIR}/gta4_register.cpp"
+    PROPERTIES COMPILE_OPTIONS "-g1;-O1")
 
 target_link_libraries(switch-game PRIVATE
     -Wl,--start-group
@@ -106,7 +136,7 @@ if(THEFT4_SWITCH_GAME_VULKAN)
     # main.cpp only: the generated sources keep their flags and objects (the
     # backend is linked LINK_ONLY below, so its usage requirements stay out).
     set_source_files_properties(main.cpp PROPERTIES
-        COMPILE_DEFINITIONS "THEFT4_NX_VULKAN=1;REX_HAS_VULKAN=1"
+        COMPILE_DEFINITIONS "THEFT4_NX_VULKAN=1;REX_HAS_VULKAN=1;THEFT4_NX_DIRECT_RESOLVE=$<BOOL:${THEFT4_SWITCH_DIRECT_RESOLVE}>"
         INCLUDE_DIRECTORIES
             "$<TARGET_PROPERTY:Vulkan-Headers,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:VulkanMemoryAllocator,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>;${THEFT4_ROOT}/glue/rexglue-sdk-main/thirdparty/renderdoc")
     target_sources(switch-game PRIVATE "${THEFT4_ROOT}/tools/switch-smoke/nx_elf_stubs.c")
@@ -115,11 +145,12 @@ if(THEFT4_SWITCH_GAME_VULKAN)
     set_property(TARGET switch-game APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:rexgpu-xenos-nx>")
     target_link_directories(switch-game PRIVATE "${DEVKITPRO}/portlibs/switch/lib")
     target_link_libraries(switch-game PRIVATE $<LINK_ONLY:rexgpu-xenos-nx>
-        -Wl,--start-group vulkan expat zstd z nx -Wl,--end-group)
+        -Wl,--start-group ${THEFT4_SWITCH_VULKAN_LIBRARIES} -Wl,--end-group)
     # Run 21: NVK's nvdrv calls go through main.cpp's counters first (fence
     # waits and queries, kickoffs, nvmaps), as sa2-nx's switch_perf does.
+    # Run 3: and its GPU mappings, to turn the GPU's L2 on (cvar nx_gpu_l2).
     target_link_options(switch-game PRIVATE
-        "-Wl,--wrap=nvFenceWait,--wrap=nvGpuChannelKickoff,--wrap=nvMapCreate,--wrap=nvMapClose")
+        "-Wl,--wrap=nvFenceWait,--wrap=nvGpuChannelKickoff,--wrap=nvMapCreate,--wrap=nvMapClose,--wrap=nvioctlNvhostAsGpu_MapBufferEx,--wrap=nvGpuChannelGetErrorNotification")
 endif()
 # Every way out of the process goes through main.cpp's __wrap_* first, which
 # logs the code and the caller before the real function runs.
@@ -138,7 +169,9 @@ nx_generate_nacp(switch-game.nacp
     AUTHOR "Theft4"
     VERSION "${PROJECT_VERSION}"
 )
+set(THEFT4_SWITCH_NRO_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/switch-game.nro" CACHE FILEPATH
+    "Output NRO path (may use external build storage)")
 nx_create_nro(switch-game
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/switch-game.nro"
+    OUTPUT "${THEFT4_SWITCH_NRO_OUTPUT}"
     NACP switch-game.nacp
 )

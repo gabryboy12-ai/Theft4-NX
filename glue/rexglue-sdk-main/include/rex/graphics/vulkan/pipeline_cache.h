@@ -457,6 +457,18 @@ class VulkanPipelineCache {
   bool storage_write_thread_shutdown_ = false;
   std::unique_ptr<rex::thread::Thread> storage_write_thread_;
 
+  // The driver's own pipeline cache, kept next to the shader storage, so the
+  // next run reuses the compiled binaries instead of compiling every pipeline
+  // again (NVK on the Switch: 0.3-1 s per pipeline).
+  void LoadDriverPipelineCache(const std::filesystem::path& path);
+  // Writes the file when the cache grew; unless `final`, at most every 30 s.
+  void SaveDriverPipelineCache(bool final);
+  std::atomic<VkPipelineCache> driver_pipeline_cache_{VK_NULL_HANDLE};
+  std::mutex driver_pipeline_cache_save_lock_;
+  std::filesystem::path driver_pipeline_cache_path_;
+  size_t driver_pipeline_cache_saved_size_ = 0;
+  uint64_t driver_pipeline_cache_saved_ms_ = 0;
+
   mutable std::mutex creation_request_lock_;
   std::condition_variable creation_request_cond_;
   std::priority_queue<PipelineCreationArguments, std::vector<PipelineCreationArguments>,

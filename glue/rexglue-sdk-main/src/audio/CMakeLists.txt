@@ -4,9 +4,15 @@
 if(REXGLUE_CORE_ONLY)
     # Embedded shells provide their own final audio device, but XMA decoding
     # and MMIO must remain identical to the desktop runtime.
+    set(_embedded_audio_sources handoff_trace.cpp)
+    if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "switch")
+        set(_embedded_audio_sources
+            audio_driver.cpp audio_system.cpp
+            switch/switch_audio_system.cpp switch/switch_audio_driver.cpp)
+    endif()
     add_library(rexaudio OBJECT
-        handoff_trace.cpp
-        # Null audio system: drives the guest audio engine without output
+        ${_embedded_audio_sources}
+        # Native Switch output plus optional silent diagnostic backend.
         null_audio_system.cpp
         xma_context.cpp
         xma_decoder.cpp

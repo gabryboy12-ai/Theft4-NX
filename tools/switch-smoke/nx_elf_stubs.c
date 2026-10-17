@@ -22,3 +22,21 @@ char* elf_strptr(void* elf, size_t section, size_t offset) {
 }
 int elf_errno(void) { return 0; }
 const char* elf_errmsg(int error) { (void)error; return "libelf is not available on Switch"; }
+
+/*
+ * vkDestroyInstance for an NVK archive that exports only vkGetInstanceProcAddr
+ * (jhuz0/nvk-switch localizes every other entry point). vulkan_instance.cpp and
+ * vulkan_probe.cpp link vkDestroyInstance directly, as mesa-switch exports it.
+ * Weak, so an archive that does export it wins; the pointer comes from the
+ * driver's own dispatch, never from this function.
+ */
+typedef struct VkInstance_T* VkInstance;
+typedef void (*PFN_vkVoidFunction)(void);
+typedef void (*PFN_vkDestroyInstance)(VkInstance instance, const void* allocator);
+PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* name);
+
+__attribute__((weak)) void vkDestroyInstance(VkInstance instance, const void* allocator) {
+  PFN_vkDestroyInstance destroy =
+      (PFN_vkDestroyInstance)vkGetInstanceProcAddr(instance, "vkDestroyInstance");
+  if (destroy) destroy(instance, allocator);
+}

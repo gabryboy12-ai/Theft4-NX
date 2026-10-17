@@ -98,6 +98,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   void CompletedSubmissionUpdated();
   void EndSubmission();
+  ui::vulkan::VulkanUploadBufferPool::DeviceUploadStats RecordDeviceUniformUploads(
+      VkCommandBuffer command_buffer);
 
   Path GetPath() const override { return path_; }
 

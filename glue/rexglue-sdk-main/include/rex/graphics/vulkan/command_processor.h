@@ -301,7 +301,17 @@ class VulkanCommandProcessor : public CommandProcessor {
   struct CommandBuffer {
     VkCommandPool pool;
     VkCommandBuffer buffer;
+    // Kept with this command buffer until its existing submission fence has
+    // completed. Query results are never awaited separately.
+    VkQueryPool timestamp_pool = VK_NULL_HANDLE;
+    bool timestamp_recorded = false;
+    bool timestamp_closes_frame = false;
+    bool timestamp_operations_sampled = false;
+    DeferredCommandBuffer::OperationTimestamps operation_timestamps;
   };
+
+  void InitializeSubmissionTimestamps();
+  void CollectSubmissionTimestamps(const CommandBuffer& command_buffer);
 
   struct SparseBufferBind {
     VkBuffer buffer;
@@ -592,6 +602,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint64_t frame_flow_color_target_draws_[4] = {};
   uint64_t frame_flow_depth_only_draws_ = 0;
   uint64_t frame_flow_textured_draws_ = 0;
+  // Sets acquired for fresh contents (including free-pool recycling) versus
+  // unchanged immutable contents reused by a later draw in the submission.
+  uint64_t frame_flow_texture_descriptor_allocations_ = 0;
+  uint64_t frame_flow_texture_descriptor_reuses_ = 0;
   uint64_t frame_flow_no_effect_draws_ = 0;
   uint64_t frame_flow_converted_index_draws_ = 0;
   uint64_t frame_flow_strip_restart_draws_ = 0;
@@ -650,6 +664,28 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::vector<CommandBuffer> command_buffers_writable_;
   std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
   DeferredCommandBuffer deferred_command_buffer_;
+
+  bool submission_timestamps_enabled_ = false;
+  double submission_timestamp_period_ns_ = 0.0;
+  uint64_t submission_timestamp_mask_ = UINT64_MAX;
+  uint64_t submission_timestamp_window_start_ns_ = 0;
+  uint64_t submission_timestamp_fence_wait_start_ns_ = 0;
+  uint64_t submission_timestamp_completed_count_ = 0;
+  uint64_t submission_timestamp_completed_frames_ = 0;
+  uint64_t submission_timestamp_unavailable_count_ = 0;
+  double submission_timestamp_elapsed_ns_ = 0.0;
+  double submission_timestamp_max_elapsed_ns_ = 0.0;
+  static constexpr size_t kGpuOperationCount =
+      size_t(DeferredCommandBuffer::GpuOperation::kCount);
+  std::array<double, kGpuOperationCount> operation_timestamp_elapsed_ns_{};
+  std::array<uint64_t, kGpuOperationCount> operation_timestamp_commands_{};
+  std::array<uint64_t, kGpuOperationCount> operation_timestamp_work_items_{};
+  uint64_t operation_timestamp_overflow_commands_ = 0;
+  uint64_t operation_timestamp_unavailable_segments_ = 0;
+  uint64_t operation_timestamp_sampled_submissions_ = 0;
+  uint64_t operation_timestamp_sampled_frames_ = 0;
+  uint64_t uniform_device_upload_copies_ = 0;
+  uint64_t uniform_device_upload_bytes_ = 0;
 
   std::vector<VkSparseMemoryBind> sparse_memory_binds_;
   std::vector<SparseBufferBind> sparse_buffer_binds_;
@@ -917,6 +953,16 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Whether descriptor sets in current_graphics_descriptor_sets_ point to
   // up-to-date data.
   uint32_t current_graphics_descriptor_set_values_up_to_date_;
+  // Immutable texture/sampler descriptor contents of the preceding draw.
+  // Reused only within a submission: completed submissions may let the
+  // texture/sampler caches destroy resources and recycle their handle values.
+  struct TextureDescriptorBindingCache {
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    uint32_t texture_count = 0;
+    uint32_t sampler_count = 0;
+    std::vector<VkDescriptorImageInfo> images;
+  };
+  TextureDescriptorBindingCache texture_descriptor_binding_cache_[2];
   // Whether the descriptor sets currently bound to the command buffer - only
   // low bits for the descriptor set layouts that remained the same are kept
   // when changing the pipeline layout. May be out of sync with

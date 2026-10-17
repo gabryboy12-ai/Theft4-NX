@@ -53,6 +53,9 @@ REXCVAR_DEFINE_BOOL(ignore_thread_affinities, false, "Kernel",
 REXCVAR_DEFINE_BOOL(nx_hard_thread_affinity, false, "Kernel",
                     "Switch: pin a guest thread to the core of its CPU instead of preferring it "
                     "(soft affinity: ideal core plus every guest core)");
+REXCVAR_DEFINE_INT32(nx_xthread_stack_kib, 2048, "Kernel",
+                    "Switch: native XThread stack size in KiB (clamped to 512-16384); "
+                    "does not change the emulated guest stack");
 #else
 REXCVAR_DEFINE_BOOL(ignore_thread_affinities, true, "Kernel",
                     "Ignores game-specified thread affinities");
@@ -127,6 +130,19 @@ XThread::~XThread() {
 thread_local XThread* current_xthread_tls_ = nullptr;
 
 namespace {
+
+size_t XThreadHostStackSize(size_t explicit_host_request = 0) {
+#if REX_PLATFORM_NX
+  // The console run measured at most 118 KiB used, but reserved 16 MiB for
+  // each XThread (477 MiB total stacks). Keep 2 MiB by default with a 16 MiB
+  // fallback cvar; the PPC stack is separately allocated by AllocateStack.
+  const size_t configured =
+      size_t(std::clamp(REXCVAR_GET(nx_xthread_stack_kib), 512, 16384)) * 1024;
+  return std::max(configured, explicit_host_request);
+#else
+  return 16_MiB;
+#endif
+}
 
 XThread* GetBoundCurrentXThread() {
   return current_xthread_tls_;
@@ -445,7 +461,8 @@ X_STATUS XThread::Create() {
   RetainHandle();
 
   rex::thread::Thread::CreationParameters params;
-  params.stack_size = 16_MiB;  // Allocate a big host stack.
+  params.stack_size =
+      XThreadHostStackSize(is_guest_thread() ? 0 : creation_params_.stack_size);
   params.create_suspended = true;
   thread_ = rex::thread::Thread::Create(params, [this]() {
     rex::initialize_seh_thread();
@@ -1512,7 +1529,7 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state, stream::ByteStre
 
     rex::thread::Thread::CreationParameters params;
     params.create_suspended = true;  // Not done restoring yet.
-    params.stack_size = 16_MiB;
+    params.stack_size = XThreadHostStackSize();
     thread->thread_ = rex::thread::Thread::Create(params, [thread, state]() {
       // Set thread ID override. This is used by logging.
       rex::thread::set_current_thread_id(thread->handle());

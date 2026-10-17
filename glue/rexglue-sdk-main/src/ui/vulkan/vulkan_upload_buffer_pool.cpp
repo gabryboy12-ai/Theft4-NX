@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <rex/assert.h>
 
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -27,21 +28,24 @@ namespace vulkan {
 // try not to waste that padding.
 VulkanUploadBufferPool::VulkanUploadBufferPool(const VulkanDevice* const vulkan_device,
                                                const VkBufferUsageFlags usage,
-                                               const size_t page_size)
+                                               const size_t page_size,
+                                               const bool device_local_mirror)
     : GraphicsUploadBufferPool(size_t(
           rex::round_up(VkDeviceSize(page_size), vulkan_device->properties().nonCoherentAtomSize))),
       vulkan_device_(vulkan_device),
-      usage_(usage) {}
+      usage_(usage),
+      device_local_mirror_(device_local_mirror) {}
 
 uint8_t* VulkanUploadBufferPool::Request(uint64_t submission_index, size_t size, size_t alignment,
                                          VkBuffer& buffer_out, VkDeviceSize& offset_out) {
   size_t offset;
   const VulkanPage* page = static_cast<const VulkanPage*>(
-      GraphicsUploadBufferPool::Request(submission_index, size, alignment, offset));
+      GraphicsUploadBufferPool::Request(submission_index, size,
+          device_local_mirror_ ? std::max(alignment, size_t(4)) : alignment, offset));
   if (!page) {
     return nullptr;
   }
-  buffer_out = page->buffer_;
+  buffer_out = page->device_buffer_ != VK_NULL_HANDLE ? page->device_buffer_ : page->buffer_;
   offset_out = VkDeviceSize(offset);
   return reinterpret_cast<uint8_t*>(page->mapping_) + offset;
 }
@@ -51,11 +55,12 @@ uint8_t* VulkanUploadBufferPool::RequestPartial(uint64_t submission_index, size_
                                                 VkDeviceSize& offset_out, VkDeviceSize& size_out) {
   size_t offset, size_obtained;
   const VulkanPage* page = static_cast<const VulkanPage*>(GraphicsUploadBufferPool::RequestPartial(
-      submission_index, size, alignment, offset, size_obtained));
+      submission_index, size,
+      device_local_mirror_ ? std::max(alignment, size_t(4)) : alignment, offset, size_obtained));
   if (!page) {
     return nullptr;
   }
-  buffer_out = page->buffer_;
+  buffer_out = page->device_buffer_ != VK_NULL_HANDLE ? page->device_buffer_ : page->buffer_;
   offset_out = VkDeviceSize(offset);
   size_out = VkDeviceSize(size_obtained);
   return reinterpret_cast<uint8_t*>(page->mapping_) + offset;
@@ -75,7 +80,7 @@ GraphicsUploadBufferPool::Page* VulkanUploadBufferPool::CreatePageImplementation
   buffer_create_info.pNext = nullptr;
   buffer_create_info.flags = 0;
   buffer_create_info.size = VkDeviceSize(page_size_);
-  buffer_create_info.usage = usage_;
+  buffer_create_info.usage = usage_ | (device_local_mirror_ ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : 0);
   buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   buffer_create_info.queueFamilyIndexCount = 0;
   buffer_create_info.pQueueFamilyIndices = nullptr;
@@ -163,18 +168,84 @@ GraphicsUploadBufferPool::Page* VulkanUploadBufferPool::CreatePageImplementation
     return nullptr;
   }
 
-  return new VulkanPage(vulkan_device_, buffer, memory, mapping);
+  VkBuffer device_buffer = VK_NULL_HANDLE;
+  VkDeviceMemory device_memory = VK_NULL_HANDLE;
+  if (device_local_mirror_) {
+    // CreateDedicatedAllocationBuffer marks this allocation GPU-only. On NX
+    // this makes its GPU mapping L2-cacheable; it is never mapped by the CPU.
+    if (!util::CreateDedicatedAllocationBuffer(
+            vulkan_device_, VkDeviceSize(page_size_), usage_ | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            util::MemoryPurpose::kDeviceLocal, device_buffer, device_memory)) {
+      // Keep the original valid host buffer and its descriptor behavior. A
+      // failed optimization allocation must not drop any game draw.
+      REXLOG_WARN("Uniform device mirror unavailable; using the host upload page ({} bytes)",
+                   page_size_);
+    } else {
+      REXLOG_INFO("Uniform device mirror allocated: {} bytes; CPU writes staging memory only",
+                   page_size_);
+    }
+  }
+  return new VulkanPage(vulkan_device_, buffer, memory, mapping, device_buffer, device_memory);
 }
 
 void VulkanUploadBufferPool::FlushPageWrites(Page* page, size_t offset, size_t size) {
-  util::FlushMappedMemoryRange(vulkan_device_, static_cast<const VulkanPage*>(page)->memory_,
+  const auto* vulkan_page = static_cast<const VulkanPage*>(page);
+  util::FlushMappedMemoryRange(vulkan_device_, vulkan_page->memory_,
                                memory_type_, VkDeviceSize(offset), allocation_size_,
                                VkDeviceSize(size));
+  if (!size || vulkan_page->device_buffer_ == VK_NULL_HANDLE) return;
+  assert_zero(offset & 3);
+  assert_zero(size & 3);
+  if (!pending_device_uploads_.empty()) {
+    auto& previous = pending_device_uploads_.back();
+    if (previous.source == vulkan_page->buffer_ &&
+        previous.destination == vulkan_page->device_buffer_ &&
+        previous.region.srcOffset + previous.region.size == offset) {
+      previous.region.size += VkDeviceSize(size);
+      return;
+    }
+  }
+  pending_device_uploads_.push_back(
+      {vulkan_page->buffer_, vulkan_page->device_buffer_,
+       {VkDeviceSize(offset), VkDeviceSize(offset), VkDeviceSize(size)}});
+}
+
+VulkanUploadBufferPool::DeviceUploadStats VulkanUploadBufferPool::RecordDeviceUploads(
+    VkCommandBuffer command_buffer, VkPipelineStageFlags consumer_stages) {
+  DeviceUploadStats stats;
+  if (pending_device_uploads_.empty()) return stats;
+  assert_not_zero(consumer_stages);
+  const auto& dfn = vulkan_device_->functions();
+  for (const auto& upload : pending_device_uploads_) {
+    dfn.vkCmdCopyBuffer(command_buffer, upload.source, upload.destination, 1, &upload.region);
+    ++stats.copies;
+    stats.bytes += upload.region.size;
+  }
+  // These copies populate previously unused ranges, or pages reclaimed only
+  // after their frame/submission fence completes. Publish the writes to the
+  // uniform readers before any of this submission's deferred shader work.
+  VkMemoryBarrier barrier = {};
+  barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
+  dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           consumer_stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+  pending_device_uploads_.clear();
+  return stats;
+}
+
+void VulkanUploadBufferPool::ClearCache() {
+  pending_device_uploads_.clear();
+  GraphicsUploadBufferPool::ClearCache();
 }
 
 VulkanUploadBufferPool::VulkanPage::~VulkanPage() {
   const VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
+  if (device_buffer_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyBuffer(device, device_buffer_, nullptr);
+    dfn.vkFreeMemory(device, device_memory_, nullptr);
+  }
   dfn.vkDestroyBuffer(device, buffer_, nullptr);
   // Unmapping is done implicitly when the memory is freed.
   dfn.vkFreeMemory(device, memory_, nullptr);
