@@ -8,6 +8,8 @@
 
 #include <rex/platform.h>
 #include <rex/thread.h>
+#include <rex/thread/nx_multi_wait.h>
+#include <rex/thread/nx_guest_audio_role.h>
 
 static_assert(REX_PLATFORM_NX, "This file is Switch-only");
 
@@ -147,8 +149,25 @@ uint64_t nx_guest_core_mask() { return NxProcessCoreMask() & kNxGuestCores; }
 
 uint64_t nx_host_worker_core_mask() { return NxProcessCoreMask() & kNxHostWorkerCores; }
 
+namespace {
+NxGuestAudioRole g_nx_guest_audio_role;
+}
+
+void nx_set_audio_guest_entry(uint32_t entry) {
+  g_nx_guest_audio_role.SetEntry(entry);
+}
+
 int32_t nx_priority_for_thread(bool guest_thread, std::string_view name) {
+  return nx_priority_for_thread(guest_thread, name, 0);
+}
+
+int32_t nx_priority_for_thread(bool guest_thread, std::string_view name,
+                              uint32_t guest_entry) {
   if (guest_thread) {
+    // The game's dedicated mixer blocks on its processing event after each
+    // packet. Give it the same deadline band as the native audio producer;
+    // keep all ordinary or spinning guest workers in the time-sliced band.
+    if (g_nx_guest_audio_role.Matches(true, guest_entry)) return kNxPriorityAudio;
     return kNxPriorityGuest;
   }
   // Audio has the hardest deadline (a 10.7 ms packet ring in the game's XAudio
@@ -255,170 +274,7 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
          0;
 }
 
-class PosixConditionBase {
- public:
-  PosixConditionBase() {
-#if REX_PLATFORM_LINUX
-    // Use robust mutexes so waits can recover if owner thread terminates.
-    pthread_mutexattr_t attr;
-    if (pthread_mutexattr_init(&attr) == 0) {
-      if (pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST) == 0) {
-        auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
-        pthread_mutex_destroy(native_mutex);
-        pthread_mutex_init(native_mutex, &attr);
-      }
-      pthread_mutexattr_destroy(&attr);
-    }
-#endif
-  }
-
-  virtual ~PosixConditionBase() = default;
-  virtual bool Signal() = 0;
-
-  WaitResult Wait(std::chrono::milliseconds timeout) {
-    bool executed;
-    auto predicate = [this] { return this->signaled(); };
-#if REX_PLATFORM_LINUX
-    auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
-    int lock_result = pthread_mutex_lock(native_mutex);
-    if (lock_result == EOWNERDEAD) {
-      pthread_mutex_consistent(native_mutex);
-    } else if (lock_result != 0) {
-      return WaitResult::kFailed;
-    }
-    std::unique_lock<std::mutex> lock(mutex_, std::adopt_lock);
-#else
-    std::unique_lock<std::mutex> lock(mutex_);
-#endif
-    if (predicate()) {
-      executed = true;
-    } else {
-      if (timeout == std::chrono::milliseconds::max()) {
-        cond_.wait(lock, predicate);
-        executed = true;  // Did not time out;
-      } else {
-        executed = cond_.wait_for(lock, timeout, predicate);
-      }
-    }
-    if (executed) {
-      post_execution();
-      return WaitResult::kSuccess;
-    } else {
-      return WaitResult::kTimeout;
-    }
-  }
-
-  static std::pair<WaitResult, size_t> WaitMultiple(std::vector<PosixConditionBase*>&& handles,
-                                                    bool wait_all,
-                                                    std::chrono::milliseconds timeout) {
-    assert_true(!handles.empty());
-
-    if (handles.size() == 1) {
-      auto result = handles[0]->Wait(timeout);
-      return std::make_pair(result, 0);
-    }
-
-    auto start_time = std::chrono::steady_clock::now();
-    auto end_time = (timeout == std::chrono::milliseconds::max())
-                        ? std::chrono::steady_clock::time_point::max()
-                        : start_time + timeout;
-
-    while (true) {
-      size_t first_signaled = std::numeric_limits<size_t>::max();
-      bool condition_met = false;
-      bool all_locked = true;
-
-      std::vector<std::unique_lock<std::mutex>> locks;
-      locks.reserve(handles.size());
-
-      for (size_t i = 0; i < handles.size(); ++i) {
-#if REX_PLATFORM_LINUX
-        auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
-        int result = pthread_mutex_trylock(native_mutex);
-        if (result == 0 || result == EOWNERDEAD) {
-          if (result == EOWNERDEAD) {
-            pthread_mutex_consistent(native_mutex);
-          }
-          locks.emplace_back(handles[i]->mutex_, std::adopt_lock);
-        } else {
-          all_locked = false;
-          break;
-        }
-#else
-        locks.emplace_back(handles[i]->mutex_, std::try_to_lock);
-        if (!locks.back().owns_lock()) {
-          all_locked = false;
-          break;
-        }
-#endif
-      }
-
-      if (!all_locked) {
-        locks.clear();
-        std::this_thread::yield();
-        continue;
-      }
-
-      if (wait_all) {
-        bool all_signaled = true;
-        for (size_t i = 0; i < handles.size(); ++i) {
-          if (!handles[i]->signaled()) {
-            all_signaled = false;
-            break;
-          }
-          if (first_signaled == std::numeric_limits<size_t>::max()) {
-            first_signaled = i;
-          }
-        }
-        condition_met = all_signaled;
-      } else {
-        for (size_t i = 0; i < handles.size(); ++i) {
-          if (handles[i]->signaled()) {
-            first_signaled = i;
-            condition_met = true;
-            break;
-          }
-        }
-      }
-
-      if (condition_met) {
-        if (wait_all) {
-          for (size_t i = 0; i < handles.size(); ++i) {
-            handles[i]->post_execution();
-          }
-        } else {
-          handles[first_signaled]->post_execution();
-        }
-        return std::make_pair(WaitResult::kSuccess, first_signaled);
-      }
-
-      locks.clear();
-
-      auto now = std::chrono::steady_clock::now();
-      if (now >= end_time) {
-        return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
-      }
-
-      if (timeout == std::chrono::milliseconds::max()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      } else {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-        std::this_thread::sleep_for(sleep_time);
-      }
-    }
-  }
-
-  virtual void* native_handle() const {
-    return const_cast<std::condition_variable&>(cond_).native_handle();
-  }
-
- protected:
-  inline virtual bool signaled() const = 0;
-  inline virtual void post_execution() = 0;
-  std::condition_variable cond_;
-  std::mutex mutex_;
-};
+using PosixConditionBase = detail::NxConditionBase<WaitResult>;
 
 // There really is no native POSIX handle for a single wait/signal construct
 // pthreads is at a lower level with more handles for such a mechanism.
@@ -435,25 +291,33 @@ class PosixCondition<Event> : public PosixConditionBase {
   virtual ~PosixCondition() = default;
 
   bool Signal() override {
+    if (nx_sync::LockFreeRelease().load(std::memory_order_relaxed)) {
+      // C5: set without the mutex; wake only if someone may be waiting.
+      signal_.store(true, std::memory_order_seq_cst);
+      WakeSleepers(!manual_reset_);
+      return true;
+    }
     auto lock = std::unique_lock<std::mutex>(mutex_);
-    signal_ = true;
-    cond_.notify_all();
+    signal_.store(true, std::memory_order_seq_cst);
+    // An auto-reset event lets exactly one waiter through.
+    NotifySignaledLocked(!manual_reset_);
     return true;
   }
 
   void Reset() {
     auto lock = std::unique_lock<std::mutex>(mutex_);
-    signal_ = false;
+    signal_.store(false, std::memory_order_seq_cst);
   }
 
  private:
-  inline bool signaled() const override { return signal_; }
+  // Consumers (post_execution) run under mutex_; producers may not.
+  inline bool signaled() const override { return signal_.load(std::memory_order_seq_cst); }
   inline void post_execution() override {
     if (!manual_reset_) {
-      signal_ = false;
+      signal_.store(false, std::memory_order_seq_cst);
     }
   }
-  bool signal_;
+  std::atomic<bool> signal_;
   const bool manual_reset_;
 };
 
@@ -466,25 +330,50 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
   bool Signal() override { return Release(1, nullptr); }
 
   bool Release(uint32_t release_count, int* out_previous_count) {
+    if (nx_sync::LockFreeRelease().load(std::memory_order_relaxed)) {
+      // C5: GTA IV's job dispatcher (main thread) releases one count per job.
+      // It used to block on this mutex for half its time, behind job threads
+      // that had just woken on the same semaphore. Producers only add
+      // (atomically); consumers subtract under the mutex after checking the
+      // count there, so the count never underflows.
+      uint32_t count = count_.load(std::memory_order_relaxed);
+      do {
+        if (release_count > maximum_count_ - count) {
+          return false;
+        }
+      } while (!count_.compare_exchange_weak(count, count + release_count,
+                                             std::memory_order_seq_cst,
+                                             std::memory_order_relaxed));
+      if (out_previous_count) {
+        *out_previous_count = count;
+      }
+      WakeSleepers(release_count == 1);
+      return true;
+    }
     auto lock = std::unique_lock<std::mutex>(mutex_);
-    if (release_count > maximum_count_ - count_) {
+    const uint32_t count = count_.load(std::memory_order_relaxed);
+    if (release_count > maximum_count_ - count) {
       return false;
     }
     if (out_previous_count) {
-      *out_previous_count = count_;
+      *out_previous_count = count;
     }
-    count_ += release_count;
-    cond_.notify_all();
+    count_.fetch_add(release_count, std::memory_order_seq_cst);
+    NotifySignaledLocked(release_count == 1);
     return true;
   }
 
  private:
-  inline bool signaled() const override { return count_ > 0; }
+  inline bool signaled() const override { return count_.load(std::memory_order_seq_cst) > 0; }
   inline void post_execution() override {
-    count_--;
-    cond_.notify_all();
+    count_.fetch_sub(1, std::memory_order_seq_cst);
+    // The waiter that consumed a count passes the rest on (PassOnLocked); with
+    // the fast path off this is the original wake-everyone behaviour.
+    if (!nx_sync::NotifyOne().load(std::memory_order_relaxed)) {
+      cond_.notify_all();
+    }
   }
-  uint32_t count_;
+  std::atomic<uint32_t> count_;
   const uint32_t maximum_count_;
 };
 
@@ -506,7 +395,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
       --count_;
       // Free to be acquired by another thread
       if (count_ == 0) {
-        cond_.notify_all();
+        NotifySignaledLocked(true);
       }
       return true;
     }
@@ -538,7 +427,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
   bool Signal() override {
     std::lock_guard<std::mutex> lock(mutex_);
     signal_ = true;
-    cond_.notify_all();
+    NotifySignaledLocked(!manual_reset_);
     return true;
   }
 
@@ -804,7 +693,16 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   void set_nx_priority(int32_t hos_priority) {
     WaitStarted();
-    svcSetThreadPriority(nx_handle_, static_cast<u32>(hos_priority));
+    const Result set_rc = svcSetThreadPriority(nx_handle_, static_cast<u32>(hos_priority));
+    s32 actual_priority = -1;
+    const Result read_rc = svcGetThreadPriority(&actual_priority, nx_handle_);
+    REXSYS_INFO("NX scheduling: thread {:08X}, requested priority {:#x}, set rc {:#x}, "
+                "read rc {:#x}, actual priority {:#x}",
+                nx_handle_, hos_priority, set_rc, read_rc, actual_priority);
+    if (R_FAILED(set_rc) || R_FAILED(read_rc) || actual_priority != hos_priority) {
+      REXSYS_WARN("NX scheduling: priority assignment not verified for thread {:08X}",
+                  nx_handle_);
+    }
   }
 
   // Written once by the thread itself at start; INVALID_HANDLE (0) before.
@@ -924,7 +822,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
       exit_code_ = exit_code;
       signaled_ = true;
-      cond_.notify_all();
+      NotifySignaledLocked();
     }
     if (is_current_thread) {
       g_nx_threads_finished.fetch_add(1, std::memory_order_relaxed);
@@ -1423,7 +1321,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     std::unique_lock<std::mutex> lock(thread->handle_.mutex_);
     thread->handle_.exit_code_ = 0;
     thread->handle_.signaled_ = true;
-    thread->handle_.cond_.notify_all();
+    thread->handle_.NotifySignaledLocked();
   }
 
   current_thread_ = nullptr;

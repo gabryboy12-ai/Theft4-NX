@@ -129,10 +129,16 @@ constexpr int32_t kNxPriorityHost = 0x2C;   // vblank, kernel host tasks, other 
 constexpr int32_t kNxPriorityGpu = 0x2D;    // GPU command processor
 constexpr int32_t kNxPriorityGuest = 0x3B;  // guest threads and bulk host work
 
-// Horizon priority for a runtime thread: kNxPriorityGuest for guest threads,
+// Horizon priority for a runtime thread: kNxPriorityGuest for ordinary guests,
+// kNxPriorityAudio for a registered, audited guest mixer entry,
 // otherwise by the name its owner gave it (compared by prefix: XThread names
 // carry a " (F80000xx)" handle suffix).
+// Set only after the launcher has verified the matching executable. Zero
+// disables guest audio tagging. The entry must block between audio updates.
+void nx_set_audio_guest_entry(uint32_t entry);
 int32_t nx_priority_for_thread(bool guest_thread, std::string_view name);
+int32_t nx_priority_for_thread(bool guest_thread, std::string_view name,
+                              uint32_t guest_entry);
 #endif
 
 // Gets a stable thread-specific ID, but may not be. Use for informative

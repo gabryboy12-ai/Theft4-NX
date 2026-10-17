@@ -1,0 +1,304 @@
+draw records: 4179, state records: 4137, resolves: 42
+--- passes (consecutive draws with the same render-target setup) ---
+    1-    1 x   1  RESOLVE     C0@184:2_10_10_10_F_AS16
+    2-    3 x   2  depth       pitch=320 msaa=4x C0@0:8888 Z@0:D24FS8
+    4-    5 x   2  color_depth pitch=320 msaa=4x C0@184:2_10_10_10_F Z@0:D24FS8
+    6-  385 x 380  color_depth pitch=320 msaa=4x C0@184:2_10_10_10_F_AS16 Z@0:D24FS8
+  386-  402 x  17  color_depth pitch=320 msaa=4x C0@184:2_10_10_10_F Z@0:D24FS8
+  403-  425 x  23  color_depth pitch=320 msaa=4x C0@184:2_10_10_10_F_AS16 Z@0:D24FS8
+  426-  432 x   7  color_depth pitch=320 msaa=4x C0@184:2_10_10_10_F Z@0:D24FS8
+  433-  469 x  37  color_depth pitch=320 msaa=4x C0@184:2_10_10_10_F_AS16 Z@0:D24FS8
+  470-  470 x   1  RESOLVE     C0@184:2_10_10_10_F_AS16
+  471-  471 x   1  color_depth pitch=320 msaa=1x C0@0:8888
+  472-  472 x   1  RESOLVE     C0@0:8888
+  473-  474 x   2  depth       pitch=280 msaa=4x C0@0:8888 Z@0:D24FS8
+  475-  475 x   1  color_depth pitch=280 msaa=4x C0@224:2_10_10_10_F Z@0:D24FS8
+  476-  614 x 139  color_depth pitch=280 msaa=4x C0@224:2_10_10_10_F_AS16 Z@0:D24FS8
+  615-  615 x   1  RESOLVE     C0@224:2_10_10_10_F_AS16
+  616-  616 x   1  color_depth pitch=280 msaa=4x C0@224:2_10_10_10_F
+  617-  617 x   1  RESOLVE     C0@224:2_10_10_10_F
+  618-  618 x   1  color_depth pitch=280 msaa=4x C0@224:2_10_10_10_F
+  619-  619 x   1  RESOLVE     C0@224:2_10_10_10_F
+  620-  620 x   1  color_depth pitch=280 msaa=4x C0@224:2_10_10_10_F
+  621-  621 x   1  RESOLVE     C0@224:2_10_10_10_F
+  622-  622 x   1  depth       pitch=160 msaa=1x Z@0:D24FS8
+  623-  623 x   1  depth       pitch=80 msaa=4x Z@0:D24FS8
+  624-  753 x 130  color_depth pitch=160 msaa=1x Z@0:D24FS8
+  754-  754 x   1  RESOLVE     Z@0:D24FS8
+  755-  755 x   1  color_depth pitch=320 msaa=1x C0@0:8888
+  756-  756 x   1  RESOLVE     C0@0:8888
+  757-  780 x  24  color_depth pitch=320 msaa=1x 
+  781-  781 x   1  color_depth pitch=640 msaa=4x C0@512:8888 C1@1024:8888 C2@1536:8888 C3@0:8888 Z@0:D24FS8
+  782-  782 x   1  depth       pitch=640 msaa=4x C0@1024:8888 C1@1024:8888 C2@1536:8888 C3@0:8888 Z@1024:D24S8
+  783-  783 x   1  depth       pitch=640 msaa=4x C0@1536:8888 C1@1024:8888 C2@1536:8888 C3@0:8888 Z@1536:D24S8
+  784-  784 x   1  depth       pitch=640 msaa=4x C0@0:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+  785-  786 x   2  skip        predicate_skip
+  787- 1484 x 698  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1485- 1485 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 1486- 1486 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1487- 1487 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 1488- 1488 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1489- 1489 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 1490- 1570 x  81  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1571- 1572 x   2  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 1573- 1573 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1574- 1574 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 1575- 1575 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1576- 1583 x   8  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 1584- 1584 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1585- 1585 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 1586- 1609 x  24  color_depth pitch=1280 msaa=2x 
+ 1610- 1610 x   1  RESOLVE     Z@0:D24FS8
+ 1611- 1612 x   2  RESOLVE     C0@512:8888
+ 1613- 1613 x   1  color_depth pitch=1280 msaa=2x C2@1536:8888 Z@0:D24FS8
+ 1614- 1614 x   1  RESOLVE     C1@1024:8888
+ 1615- 1615 x   1  RESOLVE     C2@1536:8888
+ 1616- 1627 x  12  skip        predicate_skip
+ 1628- 1651 x  24  color_depth pitch=1280 msaa=2x 
+ 1652- 1652 x   1  skip        predicate_skip
+ 1653- 1653 x   1  depth       pitch=640 msaa=4x C0@0:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 1654- 1654 x   1  skip        predicate_skip
+ 1655- 2352 x 698  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2353- 2353 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 2354- 2354 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2355- 2355 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 2356- 2356 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2357- 2357 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 2358- 2438 x  81  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2439- 2440 x   2  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 2441- 2441 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2442- 2442 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 2443- 2443 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2444- 2451 x   8  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 2452- 2452 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2453- 2453 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 2454- 2477 x  24  color_depth pitch=1280 msaa=2x 
+ 2478- 2483 x   6  skip        predicate_skip
+ 2484- 2484 x   1  RESOLVE     Z@0:D24FS8
+ 2485- 2486 x   2  RESOLVE     C0@512:8888
+ 2487- 2487 x   1  color_depth pitch=1280 msaa=2x C2@1536:8888 Z@0:D24FS8
+ 2488- 2488 x   1  RESOLVE     C1@1024:8888
+ 2489- 2489 x   1  RESOLVE     C2@1536:8888
+ 2490- 2495 x   6  skip        predicate_skip
+ 2496- 2519 x  24  color_depth pitch=1280 msaa=2x 
+ 2520- 2521 x   2  skip        predicate_skip
+ 2522- 2522 x   1  depth       pitch=640 msaa=4x C0@0:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 2523- 3220 x 698  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 3221- 3221 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 3222- 3222 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 3223- 3223 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 3224- 3224 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 3225- 3225 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 Z@0:D24FS8
+ 3226- 3306 x  81  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 3307- 3308 x   2  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 3309- 3309 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 3310- 3310 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 3311- 3311 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 3312- 3319 x   8  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 3320- 3320 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C1@1024:8888 C2@1536:8888 Z@0:D24FS8
+ 3321- 3321 x   1  color_depth pitch=1280 msaa=2x C0@512:8888 C2@1536:8888 Z@0:D24FS8
+ 3322- 3345 x  24  color_depth pitch=1280 msaa=2x 
+ 3346- 3357 x  12  skip        predicate_skip
+ 3358- 3358 x   1  RESOLVE     Z@0:D24FS8
+ 3359- 3360 x   2  RESOLVE     C0@512:8888
+ 3361- 3361 x   1  color_depth pitch=1280 msaa=2x C2@1536:8888 Z@0:D24FS8
+ 3362- 3362 x   1  RESOLVE     C1@1024:8888
+ 3363- 3363 x   1  RESOLVE     C2@1536:8888
+ 3364- 3435 x  72  color_depth pitch=1280 msaa=2x 
+ 3436- 3436 x   1  color_depth pitch=1280 msaa=1x C0@0:8888
+ 3437- 3437 x   1  depth       pitch=640 msaa=4x Z@0:D24FS8
+ 3438- 3438 x   1  color_depth pitch=1280 msaa=1x C0@720:8888
+ 3439- 3444 x   6  color_depth pitch=1280 msaa=1x C0@720:8888 Z@0:D24FS8
+ 3445- 3445 x   1  RESOLVE     C0@720:8888
+ 3446- 3446 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F Z@0:D24FS8
+ 3447- 3447 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3448- 3448 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3449- 3449 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3450- 3450 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3451- 3451 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3452- 3452 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3453- 3453 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3454- 3454 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3455- 3455 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3456- 3456 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3457- 3457 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3458- 3458 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3459- 3459 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3460- 3460 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3461- 3461 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3462- 3462 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3463- 3463 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3464- 3464 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3465- 3465 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3466- 3466 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3467- 3467 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3468- 3468 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3469- 3469 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3470- 3470 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3471- 3471 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3472- 3472 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3473- 3473 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3474- 3474 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3475- 3475 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3476- 3476 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3477- 3477 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3478- 3478 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3479- 3479 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3480- 3480 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3481- 3481 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3482- 3482 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3483- 3483 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3484- 3484 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3485- 3485 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3486- 3486 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3487- 3487 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3488- 3488 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3489- 3489 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3490- 3490 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3491- 3491 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3492- 3492 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3493- 3493 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3494- 3494 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3495- 3495 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3496- 3496 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3497- 3497 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3498- 3498 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3499- 3499 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3500- 3500 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3501- 3501 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3502- 3502 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3503- 3503 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3504- 3504 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3505- 3505 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3506- 3506 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3507- 3507 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3508- 3508 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3509- 3509 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3510- 3510 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3511- 3511 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3512- 3512 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3513- 3513 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3514- 3514 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3515- 3515 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3516- 3516 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3517- 3517 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3518- 3518 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3519- 3519 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3520- 3520 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3521- 3521 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3522- 3522 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3523- 3523 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3524- 3524 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3525- 3525 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3526- 3526 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3527- 3527 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3528- 3528 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3529- 3529 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3530- 3530 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3531- 3531 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3532- 3532 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3533- 3533 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3534- 3534 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3535- 3535 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3536- 3536 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3537- 3537 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3538- 3538 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3539- 3539 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3540- 3540 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3541- 3541 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3542- 3542 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3543- 3543 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3544- 3544 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3545- 3545 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3546- 3546 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3547- 3547 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3548- 3548 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3549- 3549 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3550- 3550 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3551- 3551 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3552- 3552 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3553- 3576 x  24  color_depth pitch=1280 msaa=1x 
+ 3577- 3577 x   1  depth       pitch=1280 msaa=1x Z@0:D24FS8
+ 3578- 3580 x   3  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F Z@0:D24FS8
+ 3581- 3785 x 205  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3786- 3786 x   1  RESOLVE     Z@0:D24FS8
+ 3787- 3787 x   1  RESOLVE     C0@720:2_10_10_10_F_AS16
+ 3788- 3811 x  24  color_depth pitch=1280 msaa=1x 
+ 3812- 3812 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F
+ 3813- 3836 x  24  color_depth pitch=1280 msaa=1x 
+ 3837- 3905 x  69  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3906- 3907 x   2  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16
+ 3908- 3911 x   4  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16 Z@0:D24FS8
+ 3912- 3935 x  24  color_depth pitch=1280 msaa=1x 
+ 3936- 3949 x  14  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16
+ 3950- 3997 x  48  color_depth pitch=1280 msaa=1x 
+ 3998- 3999 x   2  RESOLVE     C0@720:2_10_10_10_F
+ 4000- 4000 x   1  color_depth pitch=320 msaa=1x C0@720:2_10_10_10_F
+ 4001- 4001 x   1  RESOLVE     C0@720:2_10_10_10_F
+ 4002- 4002 x   1  color_depth pitch=320 msaa=1x C0@720:32_F
+ 4003- 4004 x   2  RESOLVE     C0@720:32_F
+ 4005- 4005 x   1  color_depth pitch=80 msaa=1x C0@720:32_F
+ 4006- 4006 x   1  RESOLVE     C0@720:32_F
+ 4007- 4007 x   1  color_depth pitch=80 msaa=1x C0@720:32_F
+ 4008- 4009 x   2  RESOLVE     C0@720:32_F
+ 4010- 4010 x   1  color_depth pitch=80 msaa=1x C0@720:32_F
+ 4011- 4011 x   1  RESOLVE     C0@720:32_F
+ 4012- 4012 x   1  color_depth pitch=80 msaa=1x C0@720:32_F
+ 4013- 4013 x   1  RESOLVE     C0@720:32_F
+ 4014- 4014 x   1  color_depth pitch=80 msaa=1x C0@0:32_F
+ 4015- 4015 x   1  RESOLVE     C0@0:32_F
+ 4016- 4016 x   1  color_depth pitch=80 msaa=1x C0@0:32_F
+ 4017- 4017 x   1  RESOLVE     C0@0:32_F
+ 4018- 4018 x   1  color_depth pitch=320 msaa=1x C0@720:2_10_10_10_F
+ 4019- 4019 x   1  RESOLVE     C0@720:2_10_10_10_F
+ 4020- 4020 x   1  color_depth pitch=320 msaa=1x C0@720:2_10_10_10_F
+ 4021- 4021 x   1  RESOLVE     C0@720:2_10_10_10_F
+ 4022- 4022 x   1  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F
+ 4023- 4046 x  24  color_depth pitch=1280 msaa=1x 
+ 4047- 4047 x   1  color_depth pitch=1280 msaa=1x C0@0:8888
+ 4048- 4048 x   1  depth       pitch=640 msaa=4x Z@0:D24FS8
+ 4049- 4178 x 130  color_depth pitch=1280 msaa=1x C0@720:2_10_10_10_F_AS16
+ 4179- 4179 x   1  RESOLVE     C0@720:2_10_10_10_F_AS16
+--- resolves ---
+    1 src C0@184:2_10_10_10_F_AS16 msaa=4x pitch=320 dest=0x0640F000 dpitch=320 dheight=180 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x00B80140
+  470 src C0@184:2_10_10_10_F_AS16 msaa=4x pitch=320 dest=0x0640F000 dpitch=320 dheight=180 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x00B80140
+  472 src C0@0:8888 msaa=1x pitch=320 dest=0x03996000 dpitch=256 dheight=256 fmt=6 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x01000100
+  615 src C0@224:2_10_10_10_F_AS16 msaa=4x pitch=280 dest=0x06487000 dpitch=256 dheight=256 fmt=32 cmd=1 clear_c=1 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x01000100
+  617 src C0@224:2_10_10_10_F msaa=4x pitch=280 dest=0x06507000 dpitch=128 dheight=128 fmt=32 cmd=1 clear_c=1 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x01000100
+  619 src C0@224:2_10_10_10_F msaa=4x pitch=280 dest=0x06527000 dpitch=64 dheight=64 fmt=32 cmd=1 clear_c=1 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x01000100
+  621 src C0@224:2_10_10_10_F msaa=4x pitch=280 dest=0x0652F000 dpitch=32 dheight=32 fmt=32 cmd=1 clear_c=1 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x01000100
+  754 src Z@0:D24FS8 msaa=1x pitch=160 dest=0x03946000 dpitch=128 dheight=128 fmt=6 cmd=0 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00800080
+  756 src C0@0:8888 msaa=1x pitch=320 dest=0x03B13000 dpitch=256 dheight=256 fmt=6 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x01000100
+ 1610 src Z@0:D24FS8 msaa=2x pitch=1280 dest=0x049E8000 dpitch=1280 dheight=720 fmt=6 cmd=0 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x01000500
+ 1611 src C0@512:8888 msaa=2x pitch=1280 dest=0x04650000 dpitch=1280 dheight=720 fmt=6 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x01000500
+ 1612 src C0@512:8888 msaa=2x pitch=1280 dest=0x03F20000 dpitch=1280 dheight=720 fmt=6 cmd=1 clear_c=1 clear_z=1 sample_sel=4 window_offset=0x00000000 scissor=0x00000000/0x01000500
+ 1614 src C1@1024:8888 msaa=2x pitch=1280 dest=0x042B8000 dpitch=1280 dheight=720 fmt=6 cmd=1 clear_c=1 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x01000500
+ 1615 src C2@1536:8888 msaa=2x pitch=1280 dest=0x03F20000 dpitch=1280 dheight=720 fmt=6 cmd=1 clear_c=1 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x01000500
+ 2484 src Z@0:D24FS8 msaa=2x pitch=1280 dest=0x04B28000 dpitch=1280 dheight=464 fmt=6 cmd=0 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x7F000000 scissor=0x01000000/0x02000500
+ 2485 src C0@512:8888 msaa=2x pitch=1280 dest=0x04790000 dpitch=1280 dheight=464 fmt=6 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x7F000000 scissor=0x01000000/0x02000500
+ 2486 src C0@512:8888 msaa=2x pitch=1280 dest=0x04060000 dpitch=1280 dheight=464 fmt=6 cmd=1 clear_c=1 clear_z=1 sample_sel=4 window_offset=0x7F000000 scissor=0x01000000/0x02000500
+ 2488 src C1@1024:8888 msaa=2x pitch=1280 dest=0x043F8000 dpitch=1280 dheight=464 fmt=6 cmd=1 clear_c=1 clear_z=0 sample_sel=0 window_offset=0x7F000000 scissor=0x01000000/0x02000500
+ 2489 src C2@1536:8888 msaa=2x pitch=1280 dest=0x04060000 dpitch=1280 dheight=464 fmt=6 cmd=1 clear_c=1 clear_z=0 sample_sel=0 window_offset=0x7F000000 scissor=0x01000000/0x02000500
+ 3358 src Z@0:D24FS8 msaa=2x pitch=1280 dest=0x04C68000 dpitch=1280 dheight=208 fmt=6 cmd=0 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x7E000000 scissor=0x02000000/0x02D00500
+ 3359 src C0@512:8888 msaa=2x pitch=1280 dest=0x048D0000 dpitch=1280 dheight=208 fmt=6 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x7E000000 scissor=0x02000000/0x02D00500
+ 3360 src C0@512:8888 msaa=2x pitch=1280 dest=0x041A0000 dpitch=1280 dheight=208 fmt=6 cmd=1 clear_c=1 clear_z=1 sample_sel=4 window_offset=0x7E000000 scissor=0x02000000/0x02D00500
+ 3362 src C1@1024:8888 msaa=2x pitch=1280 dest=0x04538000 dpitch=1280 dheight=208 fmt=6 cmd=1 clear_c=1 clear_z=0 sample_sel=0 window_offset=0x7E000000 scissor=0x02000000/0x02D00500
+ 3363 src C2@1536:8888 msaa=2x pitch=1280 dest=0x041A0000 dpitch=1280 dheight=208 fmt=6 cmd=1 clear_c=1 clear_z=0 sample_sel=0 window_offset=0x7E000000 scissor=0x02000000/0x02D00500
+ 3445 src C0@720:8888 msaa=1x pitch=1280 dest=0x03F20000 dpitch=1280 dheight=720 fmt=6 cmd=1 clear_c=1 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x02D00500
+ 3786 src Z@0:D24FS8 msaa=1x pitch=1280 dest=0x06A70000 dpitch=1280 dheight=720 fmt=6 cmd=0 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x02D00500
+ 3787 src C0@720:2_10_10_10_F_AS16 msaa=1x pitch=1280 dest=0x06E08000 dpitch=1280 dheight=720 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x02D00500
+ 3998 src C0@720:2_10_10_10_F msaa=1x pitch=1280 dest=0x06E08000 dpitch=1280 dheight=720 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x02D00500
+ 3999 src C0@720:2_10_10_10_F msaa=4x pitch=640 dest=0x0640F000 dpitch=640 dheight=360 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x01680280
+ 4001 src C0@720:2_10_10_10_F msaa=1x pitch=320 dest=0x065EF000 dpitch=320 dheight=180 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00B80140
+ 4003 src C0@720:32_F msaa=1x pitch=320 dest=0x066DF000 dpitch=320 dheight=180 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00B80140
+ 4004 src C0@720:32_F msaa=4x pitch=160 dest=0x0671B000 dpitch=160 dheight=90 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x006000A0
+ 4006 src C0@720:32_F msaa=1x pitch=80 dest=0x0672A000 dpitch=96 dheight=45 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00300050
+ 4008 src C0@720:32_F msaa=1x pitch=80 dest=0x06730000 dpitch=64 dheight=40 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00280028
+ 4009 src C0@720:32_F msaa=4x pitch=40 dest=0x06734000 dpitch=32 dheight=20 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=6 window_offset=0x00000000 scissor=0x00000000/0x00180018
+ 4011 src C0@720:32_F msaa=1x pitch=80 dest=0x06735000 dpitch=32 dheight=10 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00100010
+ 4013 src C0@720:32_F msaa=1x pitch=80 dest=0x06736000 dpitch=32 dheight=5 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00080008
+ 4015 src C0@0:32_F msaa=1x pitch=80 dest=0x03F1F000 dpitch=32 dheight=1 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00080008
+ 4017 src C0@0:32_F msaa=1x pitch=80 dest=0x03F1D000 dpitch=32 dheight=1 fmt=36 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00080008
+ 4019 src C0@720:2_10_10_10_F msaa=1x pitch=320 dest=0x06667000 dpitch=320 dheight=180 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00B80140
+ 4021 src C0@720:2_10_10_10_F msaa=1x pitch=320 dest=0x06667000 dpitch=320 dheight=180 fmt=32 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x00B80140
+ 4179 src C0@720:2_10_10_10_F_AS16 msaa=1x pitch=1280 dest=0x078D0000 dpitch=1280 dheight=720 fmt=6 cmd=1 clear_c=0 clear_z=0 sample_sel=0 window_offset=0x00000000 scissor=0x00000000/0x02D00500

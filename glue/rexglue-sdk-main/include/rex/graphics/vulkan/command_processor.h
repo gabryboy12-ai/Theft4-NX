@@ -27,6 +27,7 @@
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
+#include <rex/graphics/vulkan/constant_descriptor_cache.h>
 #include <rex/graphics/vulkan/deferred_command_buffer.h>
 #include <rex/graphics/vulkan/graphics_system.h>
 #include <rex/graphics/vulkan/pipeline_cache.h>
@@ -213,6 +214,15 @@ class VulkanCommandProcessor : public CommandProcessor {
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
       VkImageView transfer_dest_view, bool transfer_dest_is_depth);
+  // The bounded variant preserves the unbounded overload's ABI for callers
+  // already compiled against the SDK's original declaration.
+  void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+      VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
+      VkImageView transfer_dest_view, bool transfer_dest_is_depth,
+      const VkRect2D* transfer_render_area);
+  void SubmitBarriersAndEnterRawDepthRenderPass(VkRenderPass render_pass,
+      const VulkanRenderTargetCache::Framebuffer* framebuffer,
+      const VkImageView* color_views, VkExtent2D written_extent, bool dynamic);
   // Must be called before doing anything outside the render pass scope,
   // including adding pipeline barriers that are not a part of the render pass
   // scope. Submission must be open.
@@ -594,6 +604,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Passive GPU-thread-local telemetry. These counters never submit work or
   // participate in rendering decisions.
   uint64_t frame_flow_swap_count_ = 0;
+  uint64_t frame_flow_last_timed_log_ns_ = 0;
   uint64_t frame_flow_draw_calls_ = 0;
   uint64_t frame_flow_draw_submitted_ = 0;
   uint64_t frame_flow_draw_placeholders_ = 0;
@@ -686,6 +697,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint64_t operation_timestamp_sampled_frames_ = 0;
   uint64_t uniform_device_upload_copies_ = 0;
   uint64_t uniform_device_upload_bytes_ = 0;
+  uint64_t uniform_descriptor_cache_hits_ = 0;
+  uint64_t uniform_descriptor_set_writes_ = 0;
+  uint64_t uniform_descriptor_cache_bypasses_ = 0;
+  uint64_t uniform_descriptor_cache_full_writes_ = 0;
 
   std::vector<VkSparseMemoryBind> sparse_memory_binds_;
   std::vector<SparseBufferBind> sparse_buffer_binds_;
@@ -721,10 +736,18 @@ class VulkanCommandProcessor : public CommandProcessor {
   // No specific reason for 32768, just the "too much" descriptor count from
   // Direct3D 12 PIX warnings.
   static constexpr uint32_t kLinkedTypeDescriptorPoolSetCount = 32768;
-  static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
+  static constexpr uint32_t kDescriptorPoolSizeUniformBufferCount =
+      REX_PLATFORM_NX ? 2 : 1;
+  static const VkDescriptorPoolSize
+      kDescriptorPoolSizeUniformBuffer[kDescriptorPoolSizeUniformBufferCount];
   static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
   static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_uniform_buffer_;
+  bool dynamic_uniform_constants_ = false;
+  VkDeviceSize uniform_descriptor_range_limit_ = 16384;
+  using ConstantDescriptorCache =
+      ImmutableDynamicUniformDescriptorCache<SpirvShaderTranslator::kConstantBufferCount>;
+  ConstantDescriptorCache constant_descriptor_cache_;
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_storage_buffer_;
   std::deque<UsedSingleTransientDescriptor> single_transient_descriptors_used_;
   std::array<std::vector<VkDescriptorSet>, size_t(SingleTransientDescriptorLayout::kCount)>

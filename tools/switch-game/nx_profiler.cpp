@@ -25,7 +25,9 @@ namespace {
 
 constexpr size_t kMaxBusy = 32;
 constexpr size_t kMaxSamples = 1 << 15;  // > 10 s at 1 kHz
-constexpr int kFrames = 4;               // lr, then the x29 chain
+constexpr int kFrames = 10;              // lr, then the x29 chain (C2: 4 -> 10)
+constexpr size_t kTopStacks = 5;         // C2: whole stacks per thread
+constexpr size_t kMinSamplesForStacks = 50;
 constexpr uint64_t kSampleIntervalNs = 1'000'000ull;
 constexpr uint64_t kReportNs = 10'000'000'000ull;
 constexpr uint64_t kCopyNs = 100'000'000ull;
@@ -112,6 +114,36 @@ void Report(const BusyThread* busy, size_t busy_count, double seconds) {
     line += "; lr:";
     AppendTop(&line, callers, kTopCallers);
     g_log(line.c_str());
+    // C2: the most frequent whole stacks, so a sample inside a lock or wait
+    // syscall says who took the lock (the pc and lr alone stop at libnx).
+    if (n >= kMinSamplesForStacks) {
+      std::unordered_map<uint64_t, std::pair<uint32_t, const Sample*>> stacks;
+      for (const Sample* s : by_thread[handle]) {
+        uint64_t key = s->pc * 0x9E3779B97F4A7C15ull;
+        for (int k = 0; k < kFrames; ++k) {
+          key = (key ^ s->frames[k]) * 0x100000001B3ull;
+        }
+        auto& slot = stacks[key];
+        if (!slot.first) slot.second = s;
+        ++slot.first;
+      }
+      std::vector<std::pair<uint32_t, const Sample*>> top;
+      top.reserve(stacks.size());
+      for (const auto& [key, value] : stacks) top.push_back(value);
+      std::sort(top.begin(), top.end(),
+                [](const auto& a, const auto& b) { return a.first > b.first; });
+      for (size_t i = 0; i < top.size() && i < kTopStacks; ++i) {
+        char stack_head[64];
+        std::snprintf(stack_head, sizeof(stack_head), "profile stack id %u x%u:",
+                      who ? who->id : 0, top[i].first);
+        std::string stack = stack_head;
+        stack += " " + Offset(top[i].second->pc);
+        for (int k = 0; k < kFrames && top[i].second->frames[k]; ++k) {
+          stack += " " + Offset(top[i].second->frames[k]);
+        }
+        g_log(stack.c_str());
+      }
+    }
   }
   g_sample_count = 0;
   g_paused_failures = 0;

@@ -22,12 +22,16 @@
 #include <rex/perf/counter.h>
 #include <rex/chrono/clock.h>
 #include <rex/graphics/command_processor.h>
+#if REX_PLATFORM_NX
+#include <rex/graphics/nx_guest_gpu_progress.h>
+#endif
 #include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/sampler_info.h>
 #include <rex/hash.h>
 #include <rex/graphics/nx_gpu_counters.h>
+#include <rex/graphics/nx_ab.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -38,6 +42,12 @@
 #include <rex/system/user_module.h>
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+
+#if REX_PLATFORM_NX
+REXCVAR_DEFINE_BOOL(nx_gpu_guest_progress_wait, true, "GPU",
+    "Use bounded host progress events for repeated guest GPU fence polling")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+#endif
 
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
@@ -85,6 +95,12 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
 REXCVAR_DEFINE_BOOL(native_renderer_oracle_capture, false, "GPU/Research",
                     "Capture one complete Xenos-emulated frame as an XTR plus bounded semantic "
                     "draw records for GTA IV native-renderer development")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload)
+    .debug_only();
+
+REXCVAR_DEFINE_BOOL(native_renderer_oracle_xtr, true, "GPU/Research",
+                    "With native_renderer_oracle_capture: also write the complete XTR trace "
+                    "(trace_gpu_prefix). false = only the semantic draw records in the log")
     .lifecycle(rex::cvar::Lifecycle::kHotReload)
     .debug_only();
 
@@ -171,8 +187,16 @@ void CommandProcessor::Shutdown() {
   EndTracing();
 
   worker_running_ = false;
+#if REX_PLATFORM_NX
+  nx_guest_gpu_progress::GlobalGate().SetEnabled(false);
+#endif
   write_ptr_index_event_->Set();
   worker_thread_->Wait(0, 0, 0, nullptr);
+#if REX_PLATFORM_NX
+  // SetupContext may have completed after the initial shutdown notification.
+  // The joined worker cannot re-enable this gate again.
+  nx_guest_gpu_progress::GlobalGate().SetEnabled(false);
+#endif
   worker_thread_.reset();
 }
 
@@ -297,6 +321,10 @@ void CommandProcessor::WorkerThreadMain() {
     return;
   }
 
+#if REX_PLATFORM_NX
+  nx_guest_gpu_progress::GlobalGate().SetEnabled(REXCVAR_GET(nx_gpu_guest_progress_wait));
+#endif
+
   while (worker_running_) {
     while (!pending_fns_.empty()) {
       auto fn = std::move(pending_fns_.front());
@@ -340,12 +368,19 @@ void CommandProcessor::WorkerThreadMain() {
     if (read_ptr_writeback_ptr_) {
       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
                                        read_ptr_index_);
+#if REX_PLATFORM_NX
+      nx_guest_gpu_progress::GlobalGate().Signal();
+#endif
     }
 
     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,
     // but no games seem to actually use it.
   }
 
+#if REX_PLATFORM_NX
+  // Also cover shutdown racing with SetupContext and the worker enable.
+  nx_guest_gpu_progress::GlobalGate().SetEnabled(false);
+#endif
   ShutdownContext();
 }
 
@@ -471,6 +506,9 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
+#if REX_PLATFORM_NX
+      nx_guest_gpu_progress::GlobalGate().Signal();
+#endif
     }
   } else {
     switch (index) {
@@ -725,7 +763,7 @@ void CommandProcessor::ArmNativeRendererOracleCapture() {
   }
 
   native_renderer_oracle_requested_ = true;
-  if (trace_state_ == TraceState::kDisabled) {
+  if (trace_state_ == TraceState::kDisabled && REXCVAR_GET(native_renderer_oracle_xtr)) {
     RequestFrameTrace(REXCVAR_GET(trace_gpu_prefix));
   }
   REXGPU_INFO(
@@ -809,6 +847,29 @@ void CommandProcessor::LogNativeRendererOracleDraw(
       uint32_t(mode.edram_mode), surface.value, program.value, scissor_tl.value,
       scissor_br.value, color0.value, color1.value, color2.value, color3.value, depth.value,
       bin_mask_, bin_select_);
+  // C1: the state that decides render passes, tiling and resolves.
+  const uint32_t* r = register_file_->values;
+  auto f = [&](uint32_t index) {
+    float value;
+    std::memcpy(&value, &r[index], sizeof(value));
+    return value;
+  };
+  REXGPU_INFO(
+      "[NativeOracleState] frame={} draw={} window_offset=0x{:08X} vte=0x{:08X} "
+      "vport={:.1f},{:.1f},{:.1f},{:.1f} color_mask=0x{:08X} depthcontrol=0x{:08X} "
+      "blend0=0x{:08X} colorcontrol=0x{:08X} sc_mode=0x{:08X} stencil=0x{:08X} "
+      "copy_control=0x{:08X} copy_dest=0x{:08X} copy_pitch=0x{:08X} copy_info=0x{:08X} "
+      "copy_slice=0x{:08X} depth_clear=0x{:08X} color_clear=0x{:08X}/0x{:08X}",
+      native_renderer_oracle_frame_, native_renderer_oracle_draws_,
+      r[XE_GPU_REG_PA_SC_WINDOW_OFFSET], r[XE_GPU_REG_PA_CL_VTE_CNTL],
+      f(XE_GPU_REG_PA_CL_VPORT_XSCALE), f(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+      f(XE_GPU_REG_PA_CL_VPORT_YSCALE), f(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
+      r[XE_GPU_REG_RB_COLOR_MASK], r[XE_GPU_REG_RB_DEPTHCONTROL], r[XE_GPU_REG_RB_BLENDCONTROL0],
+      r[XE_GPU_REG_RB_COLORCONTROL], r[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
+      r[XE_GPU_REG_RB_STENCILREFMASK], r[XE_GPU_REG_RB_COPY_CONTROL],
+      r[XE_GPU_REG_RB_COPY_DEST_BASE], r[XE_GPU_REG_RB_COPY_DEST_PITCH],
+      r[XE_GPU_REG_RB_COPY_DEST_INFO], r[XE_GPU_REG_RB_COPY_SURFACE_SLICE],
+      r[XE_GPU_REG_RB_DEPTH_CLEAR], r[XE_GPU_REG_RB_COLOR_CLEAR], r[XE_GPU_REG_RB_COLOR_CLEAR_LO]);
 }
 
 uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t write_index) {
@@ -1252,6 +1313,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
+  nx_ab::BumpSingleWriter(nx_ab::GuestSwaps());
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
 
   ++counter_;
@@ -1265,7 +1327,18 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
   uint32_t list_length = reader->ReadAndSwap<uint32_t>();
   assert_zero(list_length & ~0xFFFFF);
   list_length &= 0xFFFFF;
+  if (native_renderer_oracle_active_) {
+    // C2: which draws come from which indirect buffer, to tell whether the
+    // G-buffer tiles replay one recorded command buffer.
+    REXGPU_INFO("[NativeOracleIB] frame={} draw={} ptr=0x{:08X} dwords={}",
+                native_renderer_oracle_frame_, native_renderer_oracle_draws_, list_ptr,
+                list_length);
+  }
   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
+  if (native_renderer_oracle_active_) {
+    REXGPU_INFO("[NativeOracleIBEnd] frame={} draw={} ptr=0x{:08X}", native_renderer_oracle_frame_,
+                native_renderer_oracle_draws_, list_ptr);
+  }
   return true;
 }
 
@@ -1392,6 +1465,9 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader,
   memory::store(memory_->TranslatePhysical(mem_addr), reg_val);
   trace_writer_.WriteMemoryWrite(CpuToGpu(mem_addr), 4);
 
+#if REX_PLATFORM_NX
+  nx_guest_gpu_progress::GlobalGate().Signal();
+#endif
   return true;
 }
 
@@ -1409,6 +1485,9 @@ bool CommandProcessor::ExecutePacketType3_MEM_WRITE(memory::RingBuffer* reader, 
     write_addr += 4;
   }
 
+#if REX_PLATFORM_NX
+  nx_guest_gpu_progress::GlobalGate().Signal();
+#endif
   return true;
 }
 
@@ -1469,6 +1548,9 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader,
       write_data = GpuSwap(write_data, endianness);
       memory::store(memory_->TranslatePhysical(write_reg_addr), write_data);
       trace_writer_.WriteMemoryWrite(CpuToGpu(write_reg_addr), 4);
+#if REX_PLATFORM_NX
+      nx_guest_gpu_progress::GlobalGate().Signal();
+#endif
     } else {
       // Register.
       WriteRegister(write_reg_addr, write_data);
@@ -1515,6 +1597,9 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
   data_value = GpuSwap(data_value, endianness);
   memory::store(memory_->TranslatePhysical(address), data_value);
   trace_writer_.WriteMemoryWrite(CpuToGpu(address), 4);
+#if REX_PLATFORM_NX
+  nx_guest_gpu_progress::GlobalGate().Signal();
+#endif
   return true;
 }
 
@@ -1544,6 +1629,9 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
   memory::copy_and_swap_16_unaligned(memory_->TranslatePhysical(address), extents,
                                      rex::countof(extents));
   trace_writer_.WriteMemoryWrite(CpuToGpu(address), sizeof(extents));
+#if REX_PLATFORM_NX
+  nx_guest_gpu_progress::GlobalGate().Signal();
+#endif
   return true;
 }
 
@@ -1682,6 +1770,12 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
       LogNativeRendererOracleDraw(opcode_name, vgt_draw_initiator, viz_query_condition,
                                   is_indexed, index_buffer_info, major_mode_explicit,
                                   "pre_backend");
+      nx_ab::BumpSingleWriter(nx_ab::GuestDraws());
+      if (nx_ab::SkipGpuWork().load(std::memory_order_relaxed)) {
+        // A/B measurement window: parse everything, execute no GPU work.
+        nx_ab::BumpSingleWriter(nx_ab::SkippedDraws());
+        return true;
+      }
       draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
                                  is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
       if (!draw_succeeded) {

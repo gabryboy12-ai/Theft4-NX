@@ -24,6 +24,7 @@
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
+#include <rex/graphics/nx_ab.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -1332,7 +1333,15 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
         // Only perform the copying when actually changing the latest owner, not
         // just the latest host depth owner - the transfer source is expected to
         // be different than the destination.
-        if (!transfer_source.IsEmpty() && transfer_source != dest) {
+        // C4: optionally drop the copy (the range is still claimed below).
+        const int skip_mode = nx_ab::OwnershipTransferSkip().load(std::memory_order_relaxed);
+        const bool skip_transfer =
+            !transfer_source.IsEmpty() && transfer_source != dest &&
+            (skip_mode >= 2 || (skip_mode == 1 && transfer_source.is_depth != dest.is_depth));
+        if (skip_transfer) {
+          nx_ab::OwnershipTransfersSkipped().fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!skip_transfer && !transfer_source.IsEmpty() && transfer_source != dest) {
           uint32_t transfer_end_tiles = std::min(it->second.end_tiles, extent_end);
           if (!resolve_clear_cutout ||
               Transfer::GetRangeRectangles(it->first, transfer_end_tiles, dest.base_tiles,

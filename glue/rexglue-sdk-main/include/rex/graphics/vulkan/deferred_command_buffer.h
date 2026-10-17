@@ -32,10 +32,11 @@ class DeferredCommandBuffer {
   enum class GpuOperation : uint32_t {
     kRender, kTextureLoad, kTextureConvert, kResolveCopy, kResolveDirect,
     kEdramDump, kEdramClear, kPresent, kDownscale, kTransfer, kBarrier,
-    kOther, kCount
+    kOther, kOwnershipRender, kOwnershipColor, kOwnershipDepth, kOwnershipStencil,
+    kOwnershipStencilCopy, kCount
   };
   struct OperationTimestamps {
-    static constexpr uint32_t kMaxSegments = 512;
+    static constexpr uint32_t kMaxSegments = 4096;
     static constexpr uint32_t kQueryCount = kMaxSegments + 3;
     struct Segment {
       GpuOperation operation = GpuOperation::kOther;
@@ -49,6 +50,21 @@ class DeferredCommandBuffer {
   DeferredCommandBuffer(const VulkanCommandProcessor& command_processor,
                         size_t initial_size_bytes = 1024 * 1024);
 
+  // Mark only the completion-time classification. Replay emits no Vulkan
+  // command for this marker and never changes a render pass or its barriers.
+  void CmdSetRenderOperation(GpuOperation operation) {
+    const bool valid = operation == GpuOperation::kRender ||
+        (operation >= GpuOperation::kOwnershipRender &&
+         operation <= GpuOperation::kOwnershipStencil);
+    assert_true(valid);
+    if (!valid) return;
+    if (recorded_render_operation_ == operation) return;
+    auto& args = *reinterpret_cast<ArgsSetRenderOperation*>(
+        WriteCommand(Command::kSetRenderOperation, sizeof(ArgsSetRenderOperation)));
+    args.operation = operation;
+    recorded_render_operation_ = operation;
+  }
+
   void Reset();
   void Execute(VkCommandBuffer command_buffer, VkQueryPool timestamp_pool = VK_NULL_HANDLE,
                OperationTimestamps* timestamps = nullptr);
@@ -56,6 +72,12 @@ class DeferredCommandBuffer {
   // render_pass_begin->pNext of all barriers must be null.
   void CmdVkBeginRenderPass(const VkRenderPassBeginInfo* render_pass_begin,
                             VkSubpassContents contents) {
+    CmdVkBeginRenderPassWithIndex(render_pass_begin, contents);
+  }
+
+  size_t CmdVkBeginRenderPassWithIndex(const VkRenderPassBeginInfo* render_pass_begin,
+                                      VkSubpassContents contents) {
+    const size_t command_stream_index = command_stream_.size();
     assert_null(render_pass_begin->pNext);
     size_t arguments_size = sizeof(ArgsVkBeginRenderPass);
     uint32_t clear_value_count = render_pass_begin->clearValueCount;
@@ -77,6 +99,7 @@ class DeferredCommandBuffer {
       std::memcpy(args_ptr + clear_values_offset, render_pass_begin->pClearValues,
                   sizeof(VkClearValue) * clear_value_count);
     }
+    return command_stream_index;
   }
 
   void CmdVkBindDescriptorSets(VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
@@ -203,6 +226,21 @@ class DeferredCommandBuffer {
                 sizeof(VkBufferCopy) * region_count);
   }
 
+  void CmdVkCopyImage(VkImage source, VkImageLayout source_layout,
+                      VkImage destination, VkImageLayout destination_layout,
+                      uint32_t region_count, const VkImageCopy* regions) {
+    const size_t header_size = rex::align(sizeof(ArgsVkCopyImage), alignof(VkImageCopy));
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(WriteCommand(
+        Command::kVkCopyImage, header_size + sizeof(VkImageCopy) * region_count));
+    auto& args = *reinterpret_cast<ArgsVkCopyImage*>(args_ptr);
+    args.source = source;
+    args.source_layout = source_layout;
+    args.destination = destination;
+    args.destination_layout = destination_layout;
+    args.region_count = region_count;
+    std::memcpy(args_ptr + header_size, regions, sizeof(VkImageCopy) * region_count);
+  }
+
   void CmdVkBeginQuery(VkQueryPool query_pool, uint32_t query, VkQueryControlFlags flags) {
     auto& args = *reinterpret_cast<ArgsVkBeginQuery*>(
         WriteCommand(Command::kVkBeginQuery, sizeof(ArgsVkBeginQuery)));
@@ -291,6 +329,8 @@ class DeferredCommandBuffer {
   size_t CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
   void SetBeginRenderingRenderArea(size_t command_stream_index,
                                    const VkRect2D& render_area);
+  void SetBeginRenderPassRenderArea(size_t command_stream_index,
+                                    const VkRect2D& render_area);
   void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
 
   void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
@@ -390,6 +430,7 @@ class DeferredCommandBuffer {
     kVkClearAttachments,
     kVkClearColorImage,
     kVkCopyBuffer,
+    kVkCopyImage,
     kVkCopyBufferToImage,
     kVkCopyQueryPoolResults,
     kVkDispatch,
@@ -409,6 +450,7 @@ class DeferredCommandBuffer {
     kVkSetStencilReference,
     kVkSetStencilWriteMask,
     kVkSetViewport,
+    kSetRenderOperation,
   };
 
   struct CommandHeader {
@@ -417,6 +459,10 @@ class DeferredCommandBuffer {
   };
   static constexpr size_t kCommandHeaderSizeElements =
       (sizeof(CommandHeader) + sizeof(uintmax_t) - 1) / sizeof(uintmax_t);
+
+  struct ArgsSetRenderOperation {
+    GpuOperation operation;
+  };
 
   struct ArgsVkBeginRenderPass {
     VkRenderPass render_pass;
@@ -501,6 +547,15 @@ class DeferredCommandBuffer {
     uint32_t region_count;
     // Followed by aligned VkBufferCopy[].
     static_assert(alignof(VkBufferCopy) <= alignof(uintmax_t));
+  };
+
+  struct ArgsVkCopyImage {
+    VkImage source;
+    VkImageLayout source_layout;
+    VkImage destination;
+    VkImageLayout destination_layout;
+    uint32_t region_count;
+    static_assert(alignof(VkImageCopy) <= alignof(uintmax_t));
   };
 
   struct ArgsVkCopyBufferToImage {
@@ -612,6 +667,7 @@ class DeferredCommandBuffer {
 
   // uintmax_t to ensure uint64_t and pointer alignment of all structures.
   std::vector<uintmax_t> command_stream_;
+  GpuOperation recorded_render_operation_ = GpuOperation::kRender;
 };
 
 }  // namespace rex::graphics::vulkan

@@ -200,7 +200,14 @@ class VulkanDevice {
     // VK_EXT_robustness2
 
     bool nullDescriptor = false;
+
+    // Core feature, enabled only when advertised for guest GPU emulation.
+    bool variableMultisampleRate = false;
   };
+
+#if defined(REX_PLATFORM_NX) && REX_PLATFORM_NX
+  static_assert(sizeof(Properties) == 568 && alignof(Properties) == 8);
+#endif
 
   // Properties of the core API and enabled extensions, and enabled features.
   // Some supported functionality is enabled conditionally based on the

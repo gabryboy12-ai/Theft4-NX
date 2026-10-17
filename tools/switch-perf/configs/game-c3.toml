@@ -1,0 +1,56 @@
+# nx-claude-c3: C2 plus the guest interrupt lock (mfmsr/mtmsrd) per thread instead of on the global mutex.
+nx_xthread_stack_kib = 2048
+nx_direct_resolve = true
+nx_gpu_l2 = 0
+nx_perf_csv = true
+nx_audio_guest_priority = true
+
+# Retain CPU 1785 / GPU 768 / memory 1600 MHz defaults.
+vulkan_tight_render_area = true
+vulkan_transfer_in_draw_pass = false
+vulkan_reuse_texture_descriptors = true
+vulkan_dynamic_uniform_constants = true
+vulkan_specialize_alpha_coverage = true
+vulkan_device_uniform_buffers = true
+vulkan_image_copy_ownership = true
+vulkan_image_copy_depth_ownership = true
+vulkan_image_copy_float_depth_ownership = true
+vulkan_partial_image_copy_ownership = true
+vulkan_stencil_copy_ownership = true
+vulkan_ownership_transfer_diagnostics = true
+
+# Whole-submission GPU timing remains enabled. Detailed per-operation queries
+# are available for diagnosis but disabled for this performance measurement.
+vulkan_submission_timestamps = true
+vulkan_operation_timestamps = false
+
+# Reuse immutable constant sets with exact dynamic allocation offsets.
+vulkan_reuse_constant_descriptors = true
+# Integer-view color transfers can avoid high-amplification row copies.
+vulkan_shader_ownership_large_copies = true
+
+# Exact integer scratch route for large same-format float-depth copies.
+vulkan_raw_depth_ownership = true
+
+# R17 code: guest D3D GPU-progress polls sleep on a host event after 64 idle polls.
+nx_gpu_guest_progress_wait = true
+
+# C3 A/B test (phases alternate the per-thread interrupt lock off/on): once gameplay is detected the GPU work goes OFF (the picture
+# freezes) for 8 phases of 30 s; the phases alternate the new synchronisation
+# fast paths off/on. Then the GPU work comes back with the fast paths on.
+nx_ab_skip_cycles = 4
+nx_ab_phase_windows = 3
+nx_ab_trigger_draws = 1500
+nx_ab_sync_modes = true
+nx_sync_fast_lookup = true
+nx_sync_notify_one = true
+nx_sync_irq_lock_free = true
+
+# Stack sampling of the busy threads, now with whole call stacks.
+nx_profile = true
+
+# One gameplay frame's structure again, now with indirect-buffer boundaries
+# ([NativeOracleIB] lines), to see whether the G-buffer tiles replay one buffer.
+nx_frame_structure_capture = false
+native_renderer_oracle_xtr = false
+native_renderer_oracle_draw_limit = 12000

@@ -119,7 +119,11 @@
 #include "nx_threads.h"
 
 #if THEFT4_NX_VULKAN
+#include <rex/graphics/nx_ab.h>
+#include <rex/thread/nx_sync_tuning.h>
 #include <rex/graphics/nx_gpu_counters.h>
+#include <rex/graphics/nx_frame_budget.h>
+#include <rex/graphics/nx_guest_gpu_progress.h>
 #include <rex/graphics/vulkan/graphics_system.h>
 #include <rex/ui/vulkan/gpu_only_allocation.h>
 #include <rex/ui/vulkan/provider.h>
@@ -170,6 +174,8 @@ REXCVAR_DEFINE_BOOL(nx_apm_clock, true, "Switch",
                     "460.8 MHz, memory 1331.2, CPU 1020) through apm, at start and on every "
                     "dock/handheld change; docked is left alone. No boost, no overclock; the "
                     "clocks read back are in the heartbeat (nx_clocks.h)");
+REXCVAR_DEFINE_BOOL(nx_audio_guest_priority, true, "Switch",
+                    "Switch: deadline scheduling for the verified GTA IV guest audio mixer");
 REXCVAR_DEFINE_BOOL(nx_perf_csv, false, "Switch",
                     "Write a separate performance CSV for each run, once per Vulkan heartbeat; "
                     "records frames, draws, CPU time, fence waits and pipeline creation")
@@ -194,12 +200,9 @@ REXCVAR_DEFINE_BOOL(nx_shader_storage, true, "Switch",
                     "before the first draw of the next run (run 2 compiled ~290 pipelines at "
                     "0.3-1 s each, every run)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(nx_gpu_l2, 2, "Switch",
-                     "GPU L2 caching of NVK's mappings (__wrap_nvioctlNvhostAsGpu_MapBufferEx): "
-                     "0 = as NVK maps them, all uncached; 1 = block-linear images cached "
-                     "(textures, render targets); 2 = also all memory the renderer never maps "
-                     "(shared memory and EDRAM buffers, texture and render target memory). "
-                     "If the picture breaks or the GPU hangs, try 1, then 0")
+REXCVAR_DEFINE_INT32(nx_gpu_l2, 0, "Switch",
+                     "Legacy NVK mapping override; ignored by this Mesa 26.2.4 build, "
+                     "which preserves the driver's GPU cache and completion policy")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(nx_direct_resolve, true, "Switch",
                     "Resolve supported host render targets directly into guest memory, "
@@ -209,6 +212,56 @@ REXCVAR_DEFINE_BOOL(nx_log_debug, false, "Switch",
                     "true: the SDK's debug lines in game.log too. Run 2 wrote one per finished "
                     "file read and one per frame, ~10000 SD writes competing with the game's "
                     "own streaming; false: info and above")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// C1 (Claude): CPU ceiling measurement inside one session. Once the game has
+// shown gameplay-sized frames for two heartbeats, the GPU work is switched off
+// and on in phases of nx_ab_phase_windows heartbeats (10 s each). While off,
+// the command processor parses every packet but runs no draw or resolve, so
+// the swap rate is the rate the game's own threads can sustain.
+REXCVAR_DEFINE_INT32(nx_ab_skip_cycles, 0, "Switch",
+                     "A/B CPU ceiling test: number of (GPU off, GPU on) phase pairs once "
+                     "gameplay is detected; 0 = off")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nx_ab_phase_windows, 3, "Switch",
+                     "A/B CPU ceiling test: heartbeat windows (10 s) per phase")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nx_ab_trigger_draws, 1500, "Switch",
+                     "A/B CPU ceiling test: guest draws per frame that mean gameplay")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_frame_structure_capture, false, "Switch",
+                    "Log one gameplay frame's draw records ([NativeOracleDraw] and "
+                    "[NativeOracleState] lines, no XTR) when gameplay is first detected")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DECLARE(bool, native_renderer_oracle_capture);
+// C2: synchronisation fast paths (rex/thread/nx_sync_tuning.h).
+REXCVAR_DEFINE_BOOL(nx_sync_fast_lookup, true, "Switch",
+                    "Kernel object lookups (handles, dispatcher headers) without the global "
+                    "critical region")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_sync_notify_one, true, "Switch",
+                    "Wake one waiter for auto-reset events, mutants and single semaphore counts")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_sync_irq_lock_free, true, "Switch",
+                    "Guest mfmsr/mtmsrd interrupt lock per thread, not on the global mutex")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_ab_transfer_modes, false, "Switch",
+                    "A/B: GPU work on; phases cycle the ownership transfer skip 0, 1, 2")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nx_ownership_transfer_skip, 0, "Switch",
+                     "EDRAM ownership transfers skipped: 0 none, 1 depth<->color, 2 all")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_sync_lock_free_release, true, "Switch",
+                    "Semaphore releases and event signals without the object mutex when nobody waits")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_ab_stencil_modes, false, "Switch",
+                    "A/B: GPU work on; phases cycle the stencil transfer mode 0, 1, 2")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nx_stencil_transfer_mode, 0, "Switch",
+                     "Stencil of depth ownership transfers: 0 scratch copy, 1 bit passes, "
+                     "2 not copied (measurement only)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nx_ab_sync_modes, false, "Switch",
+                    "A/B: keep the GPU work off and alternate the sync fast paths instead")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(nx_profile, false, "Switch",
                     "Sample the busy threads once a millisecond (pause, read pc/lr/frames, "
@@ -875,7 +928,7 @@ void StartLogging() {
   g_logging_ready = true;
   rex::InitLogging(config);
   GAME_INFO("switch-game: log %s, crash log %s", kLogPath, kCrashPath);
-  GAME_INFO("build: nx-perf-20261012-r7 (GPU-only cached uniform buffers; native audio)");
+  GAME_INFO("build: nx-claude-c6 (C5 on the FBO path + stencil transfer A/B)");
   if (!policy_ok) {
     GAME_ERROR("diagnostics::Configure(logging): %s", policy_error.c_str());
   }
@@ -1492,6 +1545,7 @@ struct VulkanBeat {
   uint64_t presents = 0, draws = 0, submits = 0;
   uint64_t submit_ns = 0, present_ns = 0, fence_waits = 0, fence_wait_ns = 0;
   uint64_t nv_kickoffs = 0, nv_waits = 0, nv_wait_ns = 0, nv_queries = 0;
+  uint64_t nv_push_execs = 0, nv_push_batches = 0;
   uint64_t nv_wait_success = 0, nv_wait_timeout = 0, nv_wait_error = 0;
   uint64_t submit_failures = 0, present_failures = 0;
   uint64_t pipelines = 0, pipeline_ns = 0, pipelines_cp = 0, pipeline_ns_cp = 0;
@@ -1506,6 +1560,7 @@ VulkanBeat g_vk_beat;
 // (-Wl,--wrap in CMakeLists.txt, Vulkan build only; as sa2-nx's switch_perf).
 struct NvCalls {
   std::atomic<uint64_t> kickoffs{0};
+  std::atomic<uint64_t> push_execs{0}, push_batches{0};
   std::atomic<uint64_t> fence_waits{0}, fence_wait_ns{0};  // nvFenceWait with a timeout
   std::atomic<uint64_t> fence_queries{0};                  // nvFenceWait(…, 0)
   std::atomic<uint64_t> wait_success{0}, wait_timeout{0}, wait_error{0};
@@ -1524,6 +1579,58 @@ NvCalls g_nv;
 std::atomic<bool> g_nv_count{true};  // cvar nx_nv_wrap: false = pure passthrough
 std::atomic<int32_t> g_gpu_l2_level{0};  // cvar nx_gpu_l2
 
+// Bounded recent GPU mappings, captured after successful map calls. These
+// ranges help locate a fault without guessing which resource was responsible.
+// This is a history, not a live-allocation table (unmaps aren't intercepted).
+struct RecentGpuMapping {
+  uint64_t address = 0, bytes = 0, buffer_offset = 0;
+  uint32_t handle = 0, kind = 0, flags = 0;
+  bool gpu_only = false;
+};
+RecentGpuMapping g_recent_gpu_mappings[256]{};
+std::mutex g_gpu_mapping_mutex;
+uint64_t g_gpu_mapping_sequence = 0;
+void RecordGpuMapping(uint64_t address, uint64_t bytes, uint64_t buffer_offset,
+                      uint32_t handle, uint32_t kind, uint32_t flags, bool gpu_only) {
+  std::lock_guard<std::mutex> lock(g_gpu_mapping_mutex);
+  g_recent_gpu_mappings[g_gpu_mapping_sequence++ % 256] =
+      {address, bytes, buffer_offset, handle, kind, flags, gpu_only};
+}
+void ReportGpuMappingHistory(const NvError& error) {
+  RecentGpuMapping snapshot[256];
+  uint64_t sequence;
+  {
+    std::lock_guard<std::mutex> lock(g_gpu_mapping_mutex);
+    std::memcpy(snapshot, g_recent_gpu_mappings, sizeof(snapshot));
+    sequence = g_gpu_mapping_sequence;
+  }
+  // Preserve the entire driver error payload. The payload layout has not yet
+  // been established for this driver; label address-sized values as candidates.
+  for (uint32_t i = 0; i < 31; i += 4) {
+    Report(true, "GPU error payload[%u..%u]: %08X %08X %08X %08X", i,
+           std::min(i + 3, 30u), error.info[i], i+1<31 ? error.info[i+1] : 0,
+           i+2<31 ? error.info[i+2] : 0, i+3<31 ? error.info[i+3] : 0);
+  }
+  uint32_t matches = 0;
+  for (uint32_t word = 0; word + 1 < 31; ++word) {
+    const uint64_t candidate = uint64_t(error.info[word]) | (uint64_t(error.info[word+1]) << 32);
+    for (const auto& mapping : snapshot) {
+      if (!mapping.bytes || candidate < mapping.address ||
+          candidate - mapping.address >= mapping.bytes) continue;
+      if (matches++ >= 16) continue;
+      Report(true, "GPU payload candidate[%u] 0x%" PRIX64
+             " overlaps recent mapping 0x%" PRIX64 "+0x%" PRIX64
+             " handle %u kind 0x%X flags 0x%X buffer_offset 0x%" PRIX64
+             " gpu_only %s (history only; may since have been unmapped)",
+             word, candidate, mapping.address, mapping.bytes, mapping.handle,
+             mapping.kind, mapping.flags, mapping.buffer_offset,
+             mapping.gpu_only ? "true" : "false");
+    }
+  }
+  Report(true, "GPU mapping history: last 256 of %" PRIu64
+         " successful maps; %u payload/range overlaps (up to 16 shown)", sequence, matches);
+}
+
 // VkResults that mean memory or the device: a crash-log entry (D.2).
 const char* VkFailureName(int32_t result) {
   switch (result) {
@@ -1539,6 +1646,19 @@ const char* VkFailureName(int32_t result) {
 #if THEFT4_NX_VULKAN
 // nvdrv calls of NVK (see NvCalls): count, time inside, nvmap bytes.
 extern "C" {
+struct nouveau_horizon_channel;
+struct nouveau_horizon_exec;
+int __real_nouveau_horizon_channel_exec(nouveau_horizon_channel*, uint32_t,
+                                       const nouveau_horizon_exec*);
+int __wrap_nouveau_horizon_channel_exec(nouveau_horizon_channel* channel,
+                                        uint32_t count, const nouveau_horizon_exec* execs) {
+  const int result = __real_nouveau_horizon_channel_exec(channel, count, execs);
+  if (result == 0 && g_nv_count.load(std::memory_order_relaxed)) {
+    g_nv.push_execs.fetch_add(count, std::memory_order_relaxed);
+    g_nv.push_batches.fetch_add(1, std::memory_order_relaxed);
+  }
+  return result;
+}
 Result __real_nvFenceWait(NvFence* f, s32 timeout_us);
 Result __real_nvGpuChannelKickoff(NvGpuChannel* c);
 Result __real_nvMapCreate(NvMap* m, void* cpu_addr, u32 size, u32 align, NvKind kind,
@@ -1623,21 +1743,16 @@ Result __real_nvioctlNvhostAsGpu_MapBufferEx(u32 fd, u32 flags, u32 kind, u32 nv
 Result __wrap_nvioctlNvhostAsGpu_MapBufferEx(u32 fd, u32 flags, u32 kind, u32 nvmap_handle,
                                              u32 page_size, u64 buffer_offset,
                                              u64 mapping_size, u64 input_offset, u64* offset) {
-  const int32_t level = g_gpu_l2_level.load(std::memory_order_relaxed);
-  const bool block_linear = kind != 0;
-  // Run 4: marked by the SDK around vkAllocateMemory/vmaCreateImage for
-  // memory it never maps (gpu_only_allocation.h): the shared memory and EDRAM
-  // buffers, render target and texture memory. Run 3 matched only the 512 MiB
-  // buffer by its size and left the EDRAM buffer that 42 resolves a frame
-  // read and write uncached.
+  // Mesa 26.2.4 Horizon owns GPU cache policy and completion cache maintenance.
+  // Preserve its flags, including intentionally GPU-uncached event/query memory.
+  // R8's forced IsCacheable override was specific to the old NVK 25.0.7 port.
   const bool gpu_only = rex::ui::vulkan::GpuOnlyAllocation();
-  const bool cached = (level >= 1 && block_linear) || (level >= 2 && gpu_only);
-  if (cached) {
-    flags |= NvMapBufferFlags_IsCacheable;
-  }
+  const bool cached = (flags & NvMapBufferFlags_IsCacheable) != 0;
   const Result rc = __real_nvioctlNvhostAsGpu_MapBufferEx(
       fd, flags, kind, nvmap_handle, page_size, buffer_offset, mapping_size, input_offset, offset);
   if (R_SUCCEEDED(rc)) {
+    if (offset) RecordGpuMapping(*offset, mapping_size, buffer_offset,
+                                nvmap_handle, kind, flags, gpu_only);
     g_nv.gpu_maps.fetch_add(1, std::memory_order_relaxed);
     if (cached) {
       g_nv.gpu_maps_cached.fetch_add(1, std::memory_order_relaxed);
@@ -1677,6 +1792,7 @@ Result __wrap_nvGpuChannelGetErrorNotification(NvGpuChannel* c, NvNotification* 
            name, notif->info32, notif->info16, notif->status, notif->timestamp, info_rc,
            error.type, error.info[0], error.info[1], error.info[2], error.info[3], error.info[4],
            error.info[5], int(g_gpu_l2_level.load(std::memory_order_relaxed)));
+    if (R_SUCCEEDED(info_rc)) ReportGpuMappingHistory(error);
   }
   return rc;
 }
@@ -1689,6 +1805,11 @@ void LogVulkan(double window_s) {
   if (!g_vulkan_graphics) {
     return;
   }
+  const auto cadence = rex::graphics::nx_frame_budget::GuestOutput().Take();
+  GAME_INFO("guest output cadence: %" PRIu64 " intervals, %" PRIu64
+            " over 33.34 ms, max %.3f ms; FSI sample-rate pass splits avoided %" PRIu64,
+            cadence.intervals, cadence.over_budget, double(cadence.maximum_ns) / 1e6,
+            rex::graphics::nx_frame_budget::AvoidedPassSplits().exchange(0, std::memory_order_relaxed));
   auto& c = rex::graphics::nx_gpu_counters();
   const uint64_t presents = c.presents.load(std::memory_order_relaxed);
   const uint64_t draws = c.draws.load(std::memory_order_relaxed);
@@ -1729,6 +1850,21 @@ void LogVulkan(double window_s) {
                 c.last_present_failure.load(std::memory_order_relaxed), heaps.c_str());
   GAME_INFO("%s", line);
   g_beat_vulkan = line;
+  {
+    auto& progress = rex::graphics::nx_guest_gpu_progress::GlobalGate();
+    static uint64_t previous_signals = 0, previous_waits = 0;
+    static uint64_t previous_wakes = 0, previous_timeouts = 0;
+    const uint64_t signals = progress.signals(), waits = progress.waits();
+    const uint64_t wakes = progress.wakes(), timeouts = progress.timeouts();
+    GAME_INFO("GPU guest progress: enabled %d; window signals %" PRIu64
+              ", waits %" PRIu64 ", wakes %" PRIu64 ", timeouts %" PRIu64
+              "; total waits %" PRIu64,
+              int(progress.enabled()), signals - previous_signals,
+              waits - previous_waits, wakes - previous_wakes,
+              timeouts - previous_timeouts, waits);
+    previous_signals = signals; previous_waits = waits;
+    previous_wakes = wakes; previous_timeouts = timeouts;
+  }
   // Run 21 (B.1): where the command processor's and the presenter's time goes.
   const uint64_t new_draws = draws - g_vk_beat.draws;
   const uint64_t new_submits = submits - g_vk_beat.submits;
@@ -1767,6 +1903,14 @@ void LogVulkan(double window_s) {
             g_nv.gpu_maps_cached.load(std::memory_order_relaxed),
             g_nv.gpu_cached_bytes.load(std::memory_order_relaxed) >> 20,
             int(g_gpu_l2_level.load(std::memory_order_relaxed)));
+  const uint64_t push_execs = g_nv.push_execs.load(std::memory_order_relaxed);
+  const uint64_t push_batches = g_nv.push_batches.load(std::memory_order_relaxed);
+  GAME_INFO("GPU push fragments: accepted %" PRIu64 " in %" PRIu64
+            " batches in window; %" PRIu64 " total fragments",
+            push_execs - g_vk_beat.nv_push_execs, push_batches - g_vk_beat.nv_push_batches,
+            push_execs);
+  g_vk_beat.nv_push_execs = push_execs;
+  g_vk_beat.nv_push_batches = push_batches;
   const uint64_t nv_success = g_nv.wait_success.load(std::memory_order_relaxed);
   const uint64_t nv_timeout = g_nv.wait_timeout.load(std::memory_order_relaxed);
   const uint64_t nv_error = g_nv.wait_error.load(std::memory_order_relaxed);
@@ -1982,6 +2126,181 @@ void CheckVulkanStall() {
     LogThreadSnapshot(when);
   }
 }
+
+// C1: the A/B CPU ceiling schedule (cvars nx_ab_*), one step per heartbeat.
+// Writes sdmc:/switch/theft4/ab-NNNN.csv: one row per heartbeat window with the
+// mode that was in effect for the whole window (toggles happen only here).
+struct AbSchedule {
+  uint64_t last_swaps = 0, last_draws = 0, last_skipped = 0, last_transfers_skipped = 0;
+  uint64_t last_stencil_skipped = 0;
+  int gameplay_windows = 0;
+  bool started = false, finished = false, frame_structure_armed = false;
+  int phase = 0;  // even = GPU work off, odd = on
+  int windows_in_phase = 0;
+  double elapsed_s = 0;
+  std::FILE* csv = nullptr;
+  bool csv_failed = false;
+
+  void OpenCsv() {
+    if (csv || csv_failed) return;
+    char path[256];
+    for (unsigned i = 1; i <= 9999 && !csv; ++i) {
+      std::snprintf(path, sizeof(path), "%s/ab-%04u.csv", kRootDir, i);
+      const int fd = ::open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+      if (fd < 0) {
+        if (errno == EEXIST) continue;
+        break;
+      }
+      csv = ::fdopen(fd, "w");
+      if (!csv) ::close(fd);
+    }
+    if (!csv) {
+      csv_failed = true;
+      return;
+    }
+    std::fputs("elapsed_s,window_s,gpu_off,lock_free_release,transfer_skip,transfers_skipped,swaps,guest_draws,skipped_draws,cp_cpu_ms,stencil_mode,stencil_skipped\n",
+               csv);
+    std::fflush(csv);
+  }
+
+  // C2: with nx_ab_sync_modes every phase keeps the GPU work off and the
+  // phases alternate the synchronisation fast paths (even = off, odd = on), so
+  // the swap rate compares the CPU ceiling with and without them. Without it,
+  // the phases alternate the GPU work as in C1.
+  static int PhaseCount(int cycles) {
+    return REXCVAR_GET(nx_ab_transfer_modes) || REXCVAR_GET(nx_ab_stencil_modes)
+               ? 3 * cycles
+               : 2 * cycles;
+  }
+
+  static void ApplyPhase(int phase) {
+    namespace ab = rex::graphics::nx_ab;
+    if (REXCVAR_GET(nx_ab_stencil_modes)) {
+      // C6: GPU work on; the phases cycle the stencil transfer mode 0, 1, 2.
+      const int mode = phase % 3;
+      ab::SkipGpuWork().store(false, std::memory_order_relaxed);
+      ab::StencilTransferMode().store(mode, std::memory_order_relaxed);
+      GAME_INFO("[ab] phase %d: GPU work on, stencil transfer mode %d (%s)", phase, mode,
+                mode == 0 ? "scratch copy" : mode == 1 ? "bit passes" : "not copied");
+      return;
+    }
+    if (REXCVAR_GET(nx_ab_transfer_modes)) {
+      // C4: GPU work on; the phases cycle the transfer skip 0, 1, 2.
+      const int mode = phase % 3;
+      ab::SkipGpuWork().store(false, std::memory_order_relaxed);
+      ab::OwnershipTransferSkip().store(mode, std::memory_order_relaxed);
+      GAME_INFO("[ab] phase %d: GPU work on, ownership transfer skip %d (%s)", phase, mode,
+                mode == 0 ? "all copied" : mode == 1 ? "depth<->color skipped" : "all skipped");
+      return;
+    }
+    const bool sync_modes = REXCVAR_GET(nx_ab_sync_modes);
+    const bool gpu_off = sync_modes ? true : (phase % 2) == 0;
+    const bool sync_on = sync_modes ? (phase % 2) == 1 : true;
+    ab::SkipGpuWork().store(gpu_off, std::memory_order_relaxed);
+    SetSyncFastPaths(sync_on);
+    GAME_INFO("[ab] phase %d: GPU work %s, lock-free release %s", phase, gpu_off ? "OFF" : "on",
+              sync_on ? "on" : "OFF");
+  }
+
+  // C5: the A/B toggles only the lock-free release path; the earlier sync
+  // fixes (C2 lookups and wake-one, C3 interrupt lock) stay as configured.
+  static void SetSyncFastPaths(bool on) {
+    rex::thread::nx_sync::FastObjectLookup().store(REXCVAR_GET(nx_sync_fast_lookup),
+                                                   std::memory_order_relaxed);
+    rex::thread::nx_sync::NotifyOne().store(REXCVAR_GET(nx_sync_notify_one),
+                                            std::memory_order_relaxed);
+    rex::thread::nx_sync::GuestInterruptLockFree().store(REXCVAR_GET(nx_sync_irq_lock_free),
+                                                         std::memory_order_relaxed);
+    rex::thread::nx_sync::LockFreeRelease().store(on && REXCVAR_GET(nx_sync_lock_free_release),
+                                                  std::memory_order_relaxed);
+  }
+
+  void Step(double window_s) {
+    namespace ab = rex::graphics::nx_ab;
+    const uint64_t swaps = ab::GuestSwaps().load(std::memory_order_relaxed);
+    const uint64_t draws = ab::GuestDraws().load(std::memory_order_relaxed);
+    const uint64_t skipped = ab::SkippedDraws().load(std::memory_order_relaxed);
+    const uint64_t d_swaps = swaps - last_swaps, d_draws = draws - last_draws;
+    const uint64_t d_skipped = skipped - last_skipped;
+    const uint64_t transfers_skipped =
+        ab::OwnershipTransfersSkipped().load(std::memory_order_relaxed);
+    const uint64_t d_transfers_skipped = transfers_skipped - last_transfers_skipped;
+    const uint64_t stencil_skipped = ab::StencilTransfersSkipped().load(std::memory_order_relaxed);
+    const uint64_t d_stencil_skipped = stencil_skipped - last_stencil_skipped;
+    last_stencil_skipped = stencil_skipped;
+    const int stencil_mode = ab::StencilTransferMode().load(std::memory_order_relaxed);
+    last_transfers_skipped = transfers_skipped;
+    last_swaps = swaps;
+    last_draws = draws;
+    last_skipped = skipped;
+    elapsed_s += window_s;
+    const bool off = ab::SkipGpuWork().load(std::memory_order_relaxed);
+    const bool sync_fast =
+        rex::thread::nx_sync::LockFreeRelease().load(std::memory_order_relaxed);
+    const double per_frame = d_swaps ? double(d_draws) / double(d_swaps) : 0.0;
+    GAME_INFO("[ab] window %.0f s: GPU work %s, lock-free release %s, %" PRIu64
+              " guest swaps (%.2f/s), %" PRIu64
+              " guest draws (%.0f per frame), %" PRIu64 " skipped, GPU Commands CPU %.0f ms; "
+              "phase %d/%d%s; transfer skip %d; stencil mode %d (%" PRIu64 " not copied)",
+              elapsed_s, off ? "OFF" : "on", sync_fast ? "on" : "OFF", d_swaps,
+              window_s > 0 ? double(d_swaps) / window_s : 0.0, d_draws, per_frame, d_skipped,
+              double(g_cp_window_ns) / 1e6, phase, PhaseCount(int(REXCVAR_GET(nx_ab_skip_cycles))),
+              started ? (finished ? " (done)" : "") : " (waiting for gameplay)",
+              ab::OwnershipTransferSkip().load(std::memory_order_relaxed), stencil_mode,
+              d_stencil_skipped);
+    const int cycles = REXCVAR_GET(nx_ab_skip_cycles);
+    if (cycles > 0) {
+      OpenCsv();
+      if (csv) {
+        std::fprintf(csv, "%.3f,%.3f,%d,%d,%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+                     ",%.3f,%d,%" PRIu64 "\n",
+                     elapsed_s, window_s, int(off), int(sync_fast),
+                     ab::OwnershipTransferSkip().load(std::memory_order_relaxed),
+                     d_transfers_skipped, d_swaps, d_draws, d_skipped,
+                     double(g_cp_window_ns) / 1e6, stencil_mode, d_stencil_skipped);
+        std::fflush(csv);
+      }
+    }
+    if (cycles <= 0 || finished) return;
+    if (!started) {
+      const bool gameplay = d_swaps > 0 && per_frame >= double(REXCVAR_GET(nx_ab_trigger_draws));
+      gameplay_windows = gameplay ? gameplay_windows + 1 : 0;
+      if (gameplay_windows == 1 && !frame_structure_armed &&
+          REXCVAR_GET(nx_frame_structure_capture)) {
+        // One frame with the GPU work still on, before the A/B phases start.
+        frame_structure_armed = true;
+        REXCVAR_SET(native_renderer_oracle_capture, true);
+        GAME_INFO("[ab] frame structure capture armed for the next frame");
+      }
+      if (gameplay_windows >= 2) {
+        started = true;
+        phase = 0;
+        windows_in_phase = 0;
+        GAME_INFO("[ab] gameplay detected (phases of %d windows; the image freezes while the "
+                  "GPU work is off)",
+                  int(REXCVAR_GET(nx_ab_phase_windows)));
+        ApplyPhase(phase);
+      }
+      return;
+    }
+    if (++windows_in_phase < REXCVAR_GET(nx_ab_phase_windows)) return;
+    windows_in_phase = 0;
+    if (++phase >= PhaseCount(cycles)) {
+      finished = true;
+      ab::SkipGpuWork().store(false, std::memory_order_relaxed);
+      SetSyncFastPaths(true);
+      ab::OwnershipTransferSkip().store(REXCVAR_GET(nx_ownership_transfer_skip),
+                                        std::memory_order_relaxed);
+      ab::StencilTransferMode().store(REXCVAR_GET(nx_stencil_transfer_mode),
+                                      std::memory_order_relaxed);
+      GAME_INFO("[ab] schedule finished: GPU work on, transfer skip %d as configured",
+                int(REXCVAR_GET(nx_ownership_transfer_skip)));
+      return;
+    }
+    ApplyPhase(phase);
+  }
+};
+AbSchedule g_ab;
 #endif  // THEFT4_NX_VULKAN
 
 // Every 10 s: one line; every 60 s: the call count of each export; at 5, 20,
@@ -2102,6 +2421,7 @@ struct Heartbeat {
       LogLogCost(&last_log_lines, &last_log_writes, &last_log_ns);
 #if THEFT4_NX_VULKAN
       LogVulkan(window_s);
+      g_ab.Step(window_s);
 #endif
       {
         char when[64];
@@ -2446,7 +2766,7 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   padInitializeDefault(&g_pad);
   svcGetThreadId(&g_host_main_thread_id, CUR_THREAD_HANDLE);
   g_start_tick = armGetSystemTick();
-  ConsolePrint("Theft4 Switch nx-perf-20261012-r7\n\n");
+  ConsolePrint("Theft4 Switch nx-claude-c6\n\n");
 
   StartLogging();
   CaptureTerminations();
@@ -2456,12 +2776,27 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   rex::arch::ExceptionHandler::Install(CrashLogHandler, nullptr);
 #if THEFT4_NX_VULKAN
   g_nv_count.store(REXCVAR_GET(nx_nv_wrap), std::memory_order_relaxed);
-  g_gpu_l2_level.store(std::clamp<int32_t>(REXCVAR_GET(nx_gpu_l2), 0, 2),
-                       std::memory_order_relaxed);
-  GAME_INFO("GPU L2: level %d (cvar nx_gpu_l2: 0 = NVK's uncached mappings, 1 = block-linear "
-            "images cached, 2 = and all memory the renderer never maps)",
-            int(g_gpu_l2_level.load(std::memory_order_relaxed)));
+  g_gpu_l2_level.store(0, std::memory_order_relaxed);
+  GAME_INFO("GPU cache: Mesa 26.2.4 Horizon manages mappings; legacy nx_gpu_l2 override disabled");
+  GAME_INFO("driver build: mesa-switch 606441c90e459028a50fca352daebfc20211f890; native present fences");
 #endif
+  // C2: the sync fast paths follow the configuration from the start.
+  rex::thread::nx_sync::FastObjectLookup().store(REXCVAR_GET(nx_sync_fast_lookup));
+  rex::thread::nx_sync::NotifyOne().store(REXCVAR_GET(nx_sync_notify_one));
+  rex::thread::nx_sync::GuestInterruptLockFree().store(REXCVAR_GET(nx_sync_irq_lock_free));
+  GAME_INFO("C3 guest interrupt lock per thread: %d", int(REXCVAR_GET(nx_sync_irq_lock_free)));
+  rex::thread::nx_sync::LockFreeRelease().store(REXCVAR_GET(nx_sync_lock_free_release));
+  GAME_INFO("C5 lock-free semaphore/event release: %d",
+            int(REXCVAR_GET(nx_sync_lock_free_release)));
+  rex::graphics::nx_ab::OwnershipTransferSkip().store(REXCVAR_GET(nx_ownership_transfer_skip));
+  rex::graphics::nx_ab::StencilTransferMode().store(REXCVAR_GET(nx_stencil_transfer_mode));
+  GAME_INFO("C6 stencil transfer mode %d; A/B stencil modes %d",
+            int(REXCVAR_GET(nx_stencil_transfer_mode)), int(REXCVAR_GET(nx_ab_stencil_modes)));
+  GAME_INFO("C4 ownership transfer skip %d; A/B transfer modes %d",
+            int(REXCVAR_GET(nx_ownership_transfer_skip)), int(REXCVAR_GET(nx_ab_transfer_modes)));
+  GAME_INFO("C2 sync fast paths: object lookup %d, notify one %d; A/B sync modes %d",
+            int(REXCVAR_GET(nx_sync_fast_lookup)), int(REXCVAR_GET(nx_sync_notify_one)),
+            int(REXCVAR_GET(nx_ab_sync_modes)));
   GAME_INFO("run 21 pieces: nx_apm_clock %d, nx_nv_wrap %d, nx_fault_count_handler %d, "
             "nx_crash_log_after_setup %d, nx_profile %d, nx_vk_mesa_messenger (in the SDK) on "
             "unless set false; nx_mount_cache %d",
@@ -2494,6 +2829,12 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
   if (!CheckGameFiles()) {
     WaitForPlusAndExit(&g_pad);
   }
+  // This entry belongs only to the EU/Asia base XEX verified above. Its
+  // dedicated mixer blocks on a processing event between 256-sample updates.
+  rex::thread::nx_set_audio_guest_entry(
+      REXCVAR_GET(nx_audio_guest_priority) ? 0x82169400u : 0);
+  GAME_INFO("guest audio scheduling: %s (verified entry 82169400)",
+            REXCVAR_GET(nx_audio_guest_priority) ? "deadline priority" : "normal priority");
   // Run 19: what the heartbeat's thread lines need, auto-sleep, and the cost
   // of the export trace (C.3 of the run 19 list).
   g_main_thread_handle = threadGetCurHandle();
@@ -2686,11 +3027,13 @@ void ProfileLog(const char* text) { GAME_INFO("%s", text); }
     mkdir(cache_dir.c_str(), 0777);
     mkdir((cache_dir + "/shaders").c_str(), 0777);
     mkdir((cache_dir + "/shaders/shareable").c_str(), 0777);
-    GAME_INFO("shader storage: %s/shaders, title %08X; loaded by the GPU thread before its "
-              "first command (cvar nx_shader_storage)",
+    GAME_INFO("shader storage: %s/shaders, title %08X; prepared before guest startup; "
+              "(cvar nx_shader_storage)",
               cache_dir.c_str(), module->title_id());
+    GAME_INFO("Preparing cached graphics before starting the guest; first preparation may take several minutes");
     runtime->graphics_system()->InitializeShaderStorage(runtime->cache_root(),
-                                                        module->title_id(), false);
+                                                        module->title_id(), true);
+    GAME_INFO("Cached graphics preparation completed before guest startup");
   } else {
     GAME_INFO("shader storage: off (cvar nx_shader_storage = false or no Vulkan)");
   }

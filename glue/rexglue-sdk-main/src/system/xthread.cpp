@@ -505,7 +505,13 @@ X_STATUS XThread::Create() {
 #if REX_PLATFORM_NX
   // Horizon bands by role, not the guest's own priority: only 0x3B is
   // time-sliced (docs/switch-port/04-threads-exit.md section 7).
-  thread_->set_nx_priority(rex::thread::nx_priority_for_thread(is_guest_thread(), thread_name_));
+  const auto nx_priority = rex::thread::nx_priority_for_thread(
+      is_guest_thread(), thread_name_, creation_params_.start_address);
+  thread_->set_nx_priority(nx_priority);
+  if (is_guest_thread() && nx_priority == rex::thread::kNxPriorityAudio) {
+    REXSYS_INFO("NX audio scheduling: guest entry {:08X}, thread {:08X}, requested priority 0x{:X}",
+                creation_params_.start_address, handle(), nx_priority);
+  }
 #else
   if (creation_params_.creation_flags & 0x60) {
     thread_->set_priority(creation_params_.creation_flags & 0x20 ? 1 : 0);
@@ -883,8 +889,8 @@ void XThread::RundownAPCs() {
 
 int32_t XThread::QueryPriority() {
 #if REX_PLATFORM_NX
-  // The host thread stays at its Horizon band (SetPriority), so its priority
-  // (0x3B) is not what the guest asked for. Return the level the PC reports
+  // The host thread stays at its Horizon role band (SetPriority), so its
+  // priority is not what the guest asked for. Return the level the PC reports
   // for the last increment, on its scale (Win32, -2..2): run 13 got 0x3B from
   // KeSetBasePriorityThread where the PC got 0.
   if (priority_ > 0x22) return 2;
@@ -917,8 +923,9 @@ void XThread::SetPriority(int32_t increment) {
     target_priority = rex::thread::ThreadPriority::kNormal;
   }
 #if REX_PLATFORM_NX
-  // Guest threads stay at 0x3B whatever the guest asks: any other band stops
-  // time-slicing, and a spinning guest thread would starve its core.
+  // Keep the assigned host role band whatever the guest asks. Ordinary
+  // guests remain time-sliced at 0x3B; the audited audio mixer retains its
+  // deadline band and blocks between packets.
   (void)target_priority;
 #else
   if (!REXCVAR_GET(ignore_thread_priorities)) {

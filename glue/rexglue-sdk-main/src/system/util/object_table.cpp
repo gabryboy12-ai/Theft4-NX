@@ -18,6 +18,7 @@
 #include <rex/system/util/object_table.h>
 #include <rex/system/xobject.h>
 #include <rex/system/xthread.h>
+#include <rex/thread/nx_sync_tuning.h>
 
 namespace rex::system::util {
 
@@ -79,9 +80,15 @@ X_STATUS ObjectTable::FindFreeSlot(uint32_t* out_slot) {
 bool ObjectTable::Resize(uint32_t new_capacity) {
   uint32_t new_size = new_capacity * sizeof(ObjectTableEntry);
   uint32_t old_size = table_capacity_ * sizeof(ObjectTableEntry);
-  auto new_table = reinterpret_cast<ObjectTableEntry*>(realloc(table_, new_size));
+  // C2: never move the table under a lock-free reader. The new table is a
+  // copy; the old one is retired, not freed (a few hundred KiB at most), so a
+  // reader that loaded the old pointer still reads valid memory.
+  auto new_table = reinterpret_cast<ObjectTableEntry*>(malloc(new_size));
   if (!new_table) {
     return false;
+  }
+  if (table_ && old_size) {
+    std::memcpy(new_table, table_, std::min(old_size, new_size));
   }
 
   // Zero out new entries.
@@ -90,8 +97,10 @@ bool ObjectTable::Resize(uint32_t new_capacity) {
   }
 
   last_free_entry_ = table_capacity_;
-  table_capacity_ = new_capacity;
-  table_ = new_table;
+  // Table first, capacity second: a reader that sees the new capacity sees the
+  // new table (it loads the capacity with acquire, then the table).
+  __atomic_store_n(&table_, new_table, __ATOMIC_RELEASE);
+  __atomic_store_n(&table_capacity_, new_capacity, __ATOMIC_RELEASE);
 
   return true;
 }
@@ -110,13 +119,15 @@ X_STATUS ObjectTable::AddHandle(XObject* object, X_HANDLE* out_handle) {
     // Stash.
     if (XSUCCEEDED(result)) {
       ObjectTableEntry& entry = table_[slot];
-      entry.object = object;
       entry.handle_ref_count = 1;
+      // Retain before publishing: a lock-free lookup that finds the pointer
+      // must find a live reference count (TryRetain).
+      object->Retain();
+      __atomic_store_n(&entry.object, object, __ATOMIC_RELEASE);
       handle = XObject::kHandleBase + (slot << 2);
       object->handles().push_back(handle);
 
-      // Retain so long as the object is in the table.
-      object->Retain();
+      // (The table's reference was taken above, before publishing.)
 
       REXSYS_NOISY_DEBUG("Added handle:{:08X} for {}", handle, typeid(*object).name());
     }
@@ -184,15 +195,20 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
     return X_STATUS_INVALID_HANDLE;
   }
 
+  // Lock before finding the entry, so a resize cannot retire the table
+  // between the lookup and the update.
+  auto global_lock = global_critical_region_.Acquire();
   ObjectTableEntry* entry = LookupTable(handle);
   if (!entry) {
     return X_STATUS_INVALID_HANDLE;
   }
 
-  auto global_lock = global_critical_region_.Acquire();
   if (entry->object) {
     auto object = entry->object;
-    entry->object = nullptr;
+    // Unpublish first; lock-free lookups that already read the pointer can
+    // only TryRetain it, and the object's memory outlives them (deferred
+    // delete in XObject::Release).
+    __atomic_store_n(&entry->object, static_cast<XObject*>(nullptr), __ATOMIC_RELEASE);
     assert_zero(entry->handle_ref_count);
     entry->handle_ref_count = 0;
 
@@ -236,9 +252,9 @@ void ObjectTable::PurgeAllObjects() {
     auto& entry = table_[slot];
     if (entry.object && !entry.object->is_host_object()) {
       entry.handle_ref_count = 0;
-      entry.object->Release();
-
-      entry.object = nullptr;
+      XObject* object = entry.object;
+      __atomic_store_n(&entry.object, static_cast<XObject*>(nullptr), __ATOMIC_RELEASE);
+      object->Release();
     }
   }
 }
@@ -271,6 +287,25 @@ object_ref<XObject> ObjectTable::LookupObject<XObject>(X_HANDLE handle) {
 XObject* ObjectTable::LookupObject(X_HANDLE handle, bool already_locked) {
   handle = TranslateHandle(handle);
   if (!handle) {
+    return nullptr;
+  }
+
+  // C2 fast path: no global lock for a plain lookup. The capacity is loaded
+  // before the table (Resize publishes them in the opposite order), retired
+  // tables are never freed, and TryRetain refuses an object whose last
+  // reference is gone (its memory is kept by the deferred delete).
+  if (!already_locked &&
+      rex::thread::nx_sync::FastObjectLookup().load(std::memory_order_relaxed)) {
+    const uint32_t capacity = __atomic_load_n(&table_capacity_, __ATOMIC_ACQUIRE);
+    ObjectTableEntry* table = __atomic_load_n(&table_, __ATOMIC_ACQUIRE);
+    const uint32_t fast_slot = GetHandleSlot(handle);
+    if (!table || fast_slot >= capacity) {
+      return nullptr;
+    }
+    XObject* found = __atomic_load_n(&table[fast_slot].object, __ATOMIC_ACQUIRE);
+    if (found && found->TryRetain()) {
+      return found;
+    }
     return nullptr;
   }
 

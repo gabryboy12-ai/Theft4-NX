@@ -65,6 +65,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       xenos::ColorRenderTargetFormat color_3_view_format
           : xenos::kColorRenderTargetFormatBits;    // 24
       uint32_t color_rts_use_transfer_formats : 1;  // 25
+      uint32_t stencil_color_transfer : 1;  // private R8_UINT attachment, bit26
     };
     uint32_t key = 0;
     struct Hasher {
@@ -370,7 +371,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
                        VkImage image, VkDeviceMemory memory, VkImageView view_depth_color,
                        VkImageView view_depth_stencil, VkImageView view_stencil,
                        VkImageView view_srgb, VkImageView view_color_transfer_separate,
-                       size_t descriptor_set_index_transfer_source)
+                       size_t descriptor_set_index_transfer_source, bool image_copy_supported,
+                       bool stencil_copy_destination_supported)
         : RenderTarget(key),
           render_target_cache_(render_target_cache),
           image_(image),
@@ -380,10 +382,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
           view_stencil_(view_stencil),
           view_srgb_(view_srgb),
           view_color_transfer_separate_(view_color_transfer_separate),
-          descriptor_set_index_transfer_source_(descriptor_set_index_transfer_source) {}
+          descriptor_set_index_transfer_source_(descriptor_set_index_transfer_source),
+          image_copy_supported_(image_copy_supported),
+          stencil_copy_destination_supported_(stencil_copy_destination_supported) {}
     ~VulkanRenderTarget();
 
     VkImage image() const { return image_; }
+    bool image_copy_supported() const { return image_copy_supported_; }
+    bool stencil_copy_destination_supported() const {
+      return stencil_copy_destination_supported_;
+    }
 
     VkImageView view_depth_color() const { return view_depth_color_; }
     VkImageView view_depth_stencil() const { return view_depth_stencil_; }
@@ -433,6 +441,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
     VkImage image_;
     VkDeviceMemory memory_;
+    bool image_copy_supported_ = false;
+    bool stencil_copy_destination_supported_ = false;
 
     // TODO(Triang3l): Per-format drawing views for mutable formats with EDRAM
     // aliasing without transfers.
@@ -603,6 +613,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       // additional stencil texture.
       static_assert(size_t(TransferMode::kCount) <= (size_t(1) << 4));
       TransferMode mode : 4;
+      uint32_t stencil_copy_output : 1;
     };
 
     TransferShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
@@ -620,9 +631,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   struct TransferPipelineKey {
     RenderPassKey render_pass_key;
     TransferShaderKey shader_key;
+    // Pitch specialization is pipeline state, not shader-module state. Keep
+    // the host-depth pitch zero for modes that read a buffer or no host depth
+    // so these modes do not create variants for an unused value.
+    std::array<uint32_t, 3> pitch_tiles;
 
-    TransferPipelineKey(RenderPassKey render_pass_key, TransferShaderKey shader_key)
-        : render_pass_key(render_pass_key), shader_key(shader_key) {}
+    TransferPipelineKey(RenderPassKey render_pass_key, TransferShaderKey shader_key,
+                        uint32_t dest_pitch_tiles, uint32_t source_pitch_tiles,
+                        uint32_t host_depth_source_pitch_tiles = 0)
+        : render_pass_key(render_pass_key),
+          shader_key(shader_key),
+          pitch_tiles{dest_pitch_tiles, source_pitch_tiles, host_depth_source_pitch_tiles} {}
 
     struct Hasher {
       size_t operator()(const TransferPipelineKey& key) const {
@@ -630,19 +649,33 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
         XXH3_64bits_reset(&hash_state);
         XXH3_64bits_update(&hash_state, &key.render_pass_key, sizeof(key.render_pass_key));
         XXH3_64bits_update(&hash_state, &key.shader_key, sizeof(key.shader_key));
+        XXH3_64bits_update(&hash_state, key.pitch_tiles.data(), sizeof(key.pitch_tiles));
         return static_cast<size_t>(XXH3_64bits_digest(&hash_state));
       }
     };
     bool operator==(const TransferPipelineKey& other_key) const {
-      return render_pass_key == other_key.render_pass_key && shader_key == other_key.shader_key;
+      return render_pass_key == other_key.render_pass_key && shader_key == other_key.shader_key &&
+             pitch_tiles == other_key.pitch_tiles;
     }
     bool operator!=(const TransferPipelineKey& other_key) const { return !(*this == other_key); }
     bool operator<(const TransferPipelineKey& other_key) const {
       if (render_pass_key != other_key.render_pass_key) {
         return render_pass_key < other_key.render_pass_key;
       }
-      return shader_key < other_key.shader_key;
+      if (shader_key != other_key.shader_key) {
+        return shader_key < other_key.shader_key;
+      }
+      return pitch_tiles < other_key.pitch_tiles;
     }
+  };
+
+  // ID 0 is the existing masked-sample selector. These IDs also match the
+  // specialization data in GetTransferPipelines.
+  enum : uint32_t {
+    kTransferSpecIdSample = 0,
+    kTransferSpecIdDestPitch = 1,
+    kTransferSpecIdSourcePitch = 2,
+    kTransferSpecIdHostDepthSourcePitch = 3,
   };
 
   union TransferAddressConstant {
@@ -923,6 +956,51 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipelineLayout host_depth_store_pipeline_layout_ = VK_NULL_HANDLE;
   VkPipeline host_depth_store_pipelines_[size_t(xenos::MsaaSamples::k4X) + 1] = {};
 
+  struct RawDepthScratch {
+    VkImage images[2]{};
+    VkDeviceMemory memory[2]{};
+    VkImageView views[2]{};
+    Framebuffer framebuffer;
+    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkAccessFlags access = 0;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkDeviceSize bytes = 0;
+  };
+  RawDepthScratch* GetRawDepthScratch(VkExtent2D extent, VkSampleCountFlagBits samples,
+      const std::vector<RawDepthScratch*>& reserved);
+  const VkPipeline* GetRawDepthPipelines(uint32_t destination_pitch,
+      uint32_t source_pitch, xenos::MsaaSamples guest_samples, bool dynamic);
+  bool TryRawDepthOwnershipTransfers(VulkanRenderTarget& destination,
+      const std::vector<Transfer>& transfers);
+  void DestroyRawDepthScratch(RawDepthScratch& scratch);
+  std::vector<std::unique_ptr<RawDepthScratch>> raw_depth_scratch_;
+  VkDeviceSize raw_depth_scratch_bytes_ = 0;
+  VkPipelineLayout raw_depth_pipeline_layout_ = VK_NULL_HANDLE;
+  VkRenderPass raw_depth_render_passes_[3]{};
+  std::unordered_map<uint64_t, std::array<VkPipeline, 4>> raw_depth_pipelines_;
+  uint64_t raw_depth_objects_ = 0, raw_depth_old_regions_ = 0;
+
+  struct StencilScratch {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    Framebuffer framebuffer;
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkAccessFlags access = 0;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkDeviceSize allocation_bytes = 0;
+  };
+  StencilScratch* GetStencilScratch(VkExtent2D extent, xenos::MsaaSamples samples,
+                                     RenderPassKey pass_key);
+  std::vector<std::unique_ptr<StencilScratch>> stencil_scratch_;
+  VkDeviceSize stencil_scratch_bytes_ = 0;
+  uint64_t stencil_copy_draws_ = 0;
+  uint64_t stencil_copy_regions_ = 0;
+
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> transfer_vertex_buffer_pool_;
   VkShaderModule transfer_passthrough_vertex_shader_ = VK_NULL_HANDLE;
   VkPipelineLayout transfer_pipeline_layouts_[size_t(TransferPipelineLayoutIndex::kCount)] = {};
@@ -986,6 +1064,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   uint64_t dump_failure_count_ = 0;
   uint64_t dump_rectangle_count_ = 0;
   uint64_t dump_dispatch_count_ = 0;
+  bool TryImageCopyOwnershipTransfers(VulkanRenderTarget& destination,
+                                     const std::vector<Transfer>& transfers,
+                                     const std::vector<Transfer>* shader_fallback_transfers = nullptr);
+  bool PreflightShaderOwnershipTransfers(VulkanRenderTarget& destination,
+                                         const std::vector<Transfer>& transfers);
+  uint64_t ownership_image_copy_objects_ = 0;
+  uint64_t ownership_image_copy_regions_ = 0;
+  uint64_t ownership_image_copy_pixels_ = 0;
+  uint64_t ownership_shader_route_objects_ = 0;
+  uint64_t ownership_shader_route_regions_ = 0;
+
   uint64_t ownership_transfer_call_count_ = 0;
   uint64_t ownership_transfer_standalone_pass_count_ = 0;
   uint64_t ownership_transfer_object_count_ = 0;

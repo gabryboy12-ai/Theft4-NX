@@ -26,6 +26,8 @@ namespace rex::graphics {
 
 class SpirvShaderTranslator : public ShaderTranslator {
  public:
+  static constexpr uint32_t kFsiMsaaSpecializationId = 0;
+
   union Modification {
     // If anything in this is structure is changed in a way not compatible with
     // the previous layout, invalidate the pipeline storages by increasing this
@@ -33,7 +35,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
     // prototyping stage (easier to do small granular updates with an
     // incremental counter).
-    static constexpr uint32_t kVersion = 13;
+    // This date exceeds PipelineDescription::kVersion (0x20260228), so
+    // max(the two versions) invalidates old stored pipeline modifications.
+    // Guest ucode storage remains compatible; driver caching keys the new
+    // SPIR-V module bytes independently.
+    static constexpr uint32_t kVersion = 0x20261012;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -88,6 +94,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
       uint32_t param_gen_point : 1;
       // For host render targets - depth / stencil output mode.
       DepthStencilMode depth_stencil_mode : 3;
+      // Host render targets only. Selected per draw when alpha testing is
+      // disabled or Always and alpha-to-mask is disabled. Guest shader kill,
+      // depth and memexport instructions are independent and remain active.
+      uint32_t omit_alpha_coverage : 1;
     } pixel;
     uint64_t value = 0;
 
@@ -532,6 +542,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
   bool IsSpirvRectangleListVertexLoopEnabled() const {
     return IsSpirvVertexShader() && GetSpirvShaderModification().vertex.host_vertex_shader_type ==
                                         Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+  }
+
+  bool IsAlphaCoverageSpecializedAway() const {
+    // Interlock's emulated coverage rules always retain the original path.
+    return is_pixel_shader() && !edram_fragment_shader_interlock_ &&
+           GetSpirvShaderModification().pixel.omit_alpha_coverage;
   }
 
   bool IsExecutionModeEarlyFragmentTests() const {
@@ -1025,6 +1041,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // Early depth / stencil rejection of the pixel is possible when both 0:3 and
   // 4:7 are zero.
   spv::Id main_fsi_sample_mask_;
+  // Passing coverage survives all control-flow merges for host occlusion queries.
+  spv::Id var_main_fsi_passing_sample_mask_;
   // Loaded by FSI_LoadEdramOffsets.
   // Including the depth render target base.
   spv::Id main_fsi_address_depth_;
@@ -1074,6 +1092,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // the exec-level predicate value, and can't merge two execs with the same
   // predicate condition anymore.
   bool cf_exec_predicate_written_;
+  // One module-scoped specialization constant, reset for each translation.
+  spv::Id fsi_msaa_specialization_ = spv::NoResult;
+
 };
 
 }  // namespace rex::graphics

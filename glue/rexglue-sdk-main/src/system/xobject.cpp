@@ -26,8 +26,61 @@
 #include <rex/system/xsemaphore.h>
 #include <rex/system/xsymboliclink.h>
 #include <rex/system/xthread.h>
+#include <rex/thread/nx_sync_tuning.h>
+
+#include <atomic>
+#include <chrono>
+#include <mutex>
 
 namespace rex::system {
+
+namespace {
+
+// Objects whose last reference went away, deleted after a grace period so a
+// lock-free lookup that read the pointer just before it was removed can still
+// try (and fail) to take a reference on valid memory.
+struct DeferredDeletes {
+  std::mutex mutex;
+  std::vector<std::pair<XObject*, uint64_t>> objects;
+};
+
+DeferredDeletes& Graveyard() {
+  static DeferredDeletes graveyard;
+  return graveyard;
+}
+
+uint64_t SteadyNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+constexpr uint64_t kDeleteGraceNs = 2'000'000'000ull;
+
+void DeferDelete(XObject* object) {
+  std::vector<XObject*> expired;
+  const uint64_t now = SteadyNs();
+  {
+    auto& graveyard = Graveyard();
+    std::lock_guard<std::mutex> lock(graveyard.mutex);
+    size_t kept = 0;
+    for (auto& entry : graveyard.objects) {
+      if (now - entry.second >= kDeleteGraceNs) {
+        expired.push_back(entry.first);
+      } else {
+        graveyard.objects[kept++] = entry;
+      }
+    }
+    graveyard.objects.resize(kept);
+    graveyard.objects.emplace_back(object, now);
+  }
+  // Outside the lock: destructors may release other objects.
+  for (XObject* dead : expired) {
+    delete dead;
+  }
+}
+
+}  // namespace
 
 XObject::XObject(Type type) : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
   handles_.reserve(10);
@@ -92,9 +145,20 @@ void XObject::Retain() {
   ++pointer_ref_count_;
 }
 
+bool XObject::TryRetain() {
+  int32_t count = pointer_ref_count_.load(std::memory_order_relaxed);
+  while (count > 0) {
+    if (pointer_ref_count_.compare_exchange_weak(count, count + 1, std::memory_order_acq_rel,
+                                                 std::memory_order_relaxed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void XObject::Release() {
   if (--pointer_ref_count_ == 0) {
-    delete this;
+    DeferDelete(this);
   }
 }
 
@@ -379,6 +443,23 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state, void* na
   // each time.
   // We identify this by setting wait_list_flink to a magic value. When set,
   // wait_list_blink will hold a handle to our object.
+
+  // C2 fast path: an already initialized header needs only a table lookup,
+  // which is lock-free when FastObjectLookup is on. Every KeSetEvent,
+  // KeWaitForSingleObject, KeReleaseSemaphore and contended critical section
+  // used to serialise on the global critical region here.
+  if (rex::thread::nx_sync::FastObjectLookup().load(std::memory_order_relaxed)) {
+    auto fast_header = reinterpret_cast<X_DISPATCH_HEADER*>(native_ptr);
+    if (fast_header->wait_list_flink == kXObjSignature) {
+      std::atomic_thread_fence(std::memory_order_acquire);
+      uint32_t handle = fast_header->wait_list_blink;
+      auto object = kernel_state->object_table()->LookupObject<XObject>(handle);
+      if (object) {
+        return object;
+      }
+      // Stale handle or a concurrent first use: the locked path decides.
+    }
+  }
 
   auto global_lock = rex::thread::global_critical_region::AcquireDirect();
 

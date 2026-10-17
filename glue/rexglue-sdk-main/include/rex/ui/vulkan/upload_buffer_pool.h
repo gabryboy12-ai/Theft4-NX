@@ -34,6 +34,9 @@ class VulkanUploadBufferPool : public GraphicsUploadBufferPool {
   DeviceUploadStats RecordDeviceUploads(VkCommandBuffer command_buffer,
                                        VkPipelineStageFlags consumer_stages);
   void ClearCache();
+  // Every page, including an optional device mirror, has this buffer size.
+  // The first successful allocation fixes any allocation-padding expansion.
+  VkDeviceSize GetPageSizeForBindings() const { return VkDeviceSize(page_size_); }
 
   uint8_t* Request(uint64_t submission_index, size_t size, size_t alignment, VkBuffer& buffer_out,
                    VkDeviceSize& offset_out);

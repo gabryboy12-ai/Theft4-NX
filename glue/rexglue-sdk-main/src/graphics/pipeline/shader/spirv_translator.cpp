@@ -107,6 +107,7 @@ std::vector<uint8_t> SpirvShaderTranslator::CreateDepthOnlyFragmentShader(
 
 void SpirvShaderTranslator::Reset() {
   ShaderTranslator::Reset();
+  fsi_msaa_specialization_ = spv::NoResult;
 
   builder_.reset();
 
@@ -131,6 +132,7 @@ void SpirvShaderTranslator::Reset() {
   output_per_vertex_ = spv::NoResult;
   output_fragment_depth_ = spv::NoResult;
   output_fragment_sample_mask_ = spv::NoResult;
+  var_main_fsi_passing_sample_mask_ = spv::NoResult;
 
   sampler_bindings_.clear();
   texture_bindings_.clear();
@@ -2912,7 +2914,8 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
       float24_depth_conversion && !current_shader().writes_depth();
   bool alpha_to_coverage_possible = !is_depth_only_fragment_shader_ &&
                                     current_shader().writes_color_target(0) &&
-                                    !IsExecutionModeEarlyFragmentTests();
+                                    !IsExecutionModeEarlyFragmentTests() &&
+                                    !IsAlphaCoverageSpecializedAway();
 
   // Fragment coordinates.
   // TODO(Triang3l): More conditions - alpha to coverage (if RT 0 is written,
@@ -2958,6 +2961,17 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     builder_->addDecoration(input_sample_mask_, spv::DecorationFlat);
     builder_->addDecoration(input_sample_mask_, spv::DecorationBuiltIn, spv::BuiltInSampleMask);
     main_interface_.push_back(input_sample_mask_);
+  }
+
+  if (edram_fragment_shader_interlock_) {
+    // Fixed-function depth/stencil is disabled for FSI. Export software test
+    // coverage so native occlusion queries count only surviving guest samples.
+    output_fragment_sample_mask_ = builder_->createVariable(
+        spv::NoPrecision, spv::StorageClassOutput,
+        builder_->makeArrayType(type_int_, builder_->makeUintConstant(1), 0), "gl_SampleMask");
+    builder_->addDecoration(output_fragment_sample_mask_, spv::DecorationBuiltIn,
+                            spv::BuiltInSampleMask);
+    main_interface_.push_back(output_fragment_sample_mask_);
   }
 
   if (!edram_fragment_shader_interlock_) {
@@ -3029,6 +3043,9 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
   }
 
   if (edram_fragment_shader_interlock_) {
+    var_main_fsi_passing_sample_mask_ = builder_->createVariable(
+        spv::NoPrecision, spv::StorageClassFunction, type_uint_,
+        "xe_var_fsi_passing_sample_mask", const_uint_0_);
     // Initialize color output variables with fragment shader interlock.
     std::fill(output_or_var_fragment_data_.begin(), output_or_var_fragment_data_.end(),
               spv::NoResult);

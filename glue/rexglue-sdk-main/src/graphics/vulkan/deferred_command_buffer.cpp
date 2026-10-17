@@ -30,6 +30,7 @@ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& comma
 
 void DeferredCommandBuffer::Reset() {
   command_stream_.clear();
+  recorded_render_operation_ = GpuOperation::kRender;
 }
 
 void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer, VkQueryPool timestamp_pool,
@@ -48,6 +49,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer, VkQueryPool 
     timestamps->overflow_commands = 0;
   }
   bool in_render_pass = false;
+  GpuOperation render_operation = GpuOperation::kRender;
   bool profile_exhausted = false;
   auto profile_operation = [&](GpuOperation operation, uint64_t work_items) {
     if (!profile) return;
@@ -77,8 +79,13 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer, VkQueryPool 
     stream += kCommandHeaderSizeElements;
     stream_remaining -= kCommandHeaderSizeElements;
 
-    // Keep all commands in a render pass together, including allowed
-    // in-pass barriers and clears. Never create a diagnostic render pass.
+    if (header.command == Command::kSetRenderOperation) {
+      render_operation = reinterpret_cast<const ArgsSetRenderOperation*>(stream)->operation;
+    }
+
+    // Keep the active diagnostic category through allowed in-pass barriers
+    // and clears. Ownership markers partition completion timestamps only;
+    // they never end, split or create a Vulkan render pass.
     if (header.command == Command::kVkBeginRenderPass ||
         header.command == Command::kVkBeginRendering) {
       in_render_pass = true;
@@ -96,7 +103,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer, VkQueryPool 
           header.command == Command::kVkBeginRenderPass ||
           header.command == Command::kVkBeginRendering ||
           header.command == Command::kVkClearAttachments) {
-        profile_operation(GpuOperation::kRender, vertices);
+        profile_operation(render_operation, vertices);
       }
     } else {
       switch (header.command) {
@@ -106,10 +113,15 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer, VkQueryPool 
                             uint64_t(args.group_count_x) * args.group_count_y * args.group_count_z);
         } break;
         case Command::kVkCopyBuffer:
+        case Command::kVkCopyImage:
         case Command::kVkCopyBufferToImage:
         case Command::kVkCopyQueryPoolResults:
         case Command::kVkClearColorImage:
-          profile_operation(GpuOperation::kTransfer, 0);
+          // C6: the stencil scratch copy of an ownership transfer separately.
+          profile_operation(render_operation == GpuOperation::kOwnershipStencil
+                                ? GpuOperation::kOwnershipStencilCopy
+                                : GpuOperation::kTransfer,
+                            0);
           break;
         case Command::kVkPipelineBarrier:
           profile_operation(GpuOperation::kBarrier, 0);
@@ -120,6 +132,9 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer, VkQueryPool 
     }
 
     switch (header.command) {
+      case Command::kSetRenderOperation:
+        // A telemetry-only marker, including when sampling is disabled.
+        break;
       case Command::kVkBeginRenderPass: {
         auto& args = *reinterpret_cast<const ArgsVkBeginRenderPass*>(stream);
         size_t offset_bytes = sizeof(ArgsVkBeginRenderPass);
@@ -217,6 +232,15 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer, VkQueryPool 
                             reinterpret_cast<const VkBufferCopy*>(
                                 reinterpret_cast<const uint8_t*>(stream) +
                                 rex::align(sizeof(ArgsVkCopyBuffer), alignof(VkBufferCopy))));
+      } break;
+
+      case Command::kVkCopyImage: {
+        const auto& args = *reinterpret_cast<const ArgsVkCopyImage*>(stream);
+        dfn.vkCmdCopyImage(command_buffer, args.source, args.source_layout,
+                         args.destination, args.destination_layout, args.region_count,
+                         reinterpret_cast<const VkImageCopy*>(
+                             reinterpret_cast<const uint8_t*>(stream) +
+                             rex::align(sizeof(ArgsVkCopyImage), alignof(VkImageCopy))));
       } break;
 
       case Command::kVkCopyBufferToImage: {
@@ -508,6 +532,17 @@ void DeferredCommandBuffer::SetBeginRenderingRenderArea(
   auto& args = *reinterpret_cast<ArgsVkBeginRendering*>(
       command_stream_.data() + command_stream_index +
       kCommandHeaderSizeElements);
+  args.render_area = render_area;
+}
+
+void DeferredCommandBuffer::SetBeginRenderPassRenderArea(
+    size_t command_stream_index, const VkRect2D& render_area) {
+  assert_true(command_stream_index + kCommandHeaderSizeElements < command_stream_.size());
+  const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(
+      command_stream_.data() + command_stream_index);
+  assert_true(header.command == Command::kVkBeginRenderPass);
+  auto& args = *reinterpret_cast<ArgsVkBeginRenderPass*>(
+      command_stream_.data() + command_stream_index + kCommandHeaderSizeElements);
   args.render_area = render_area;
 }
 

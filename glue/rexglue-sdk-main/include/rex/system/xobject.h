@@ -174,6 +174,10 @@ class XObject {
   void RetainHandle();
   bool ReleaseHandle();
   void Retain();
+  // Takes a reference only while the object is alive (count above zero).
+  // Lock-free lookups use it: a dead object is reported as not found, and the
+  // memory stays valid because the last Release defers the delete.
+  bool TryRetain();
   void Release();
   X_STATUS Delete();
 
@@ -220,10 +224,13 @@ class XObject {
     return reinterpret_cast<T*>(CreateNative(sizeof(T)));
   }
 
-  // Stash native pointer into X_DISPATCH_HEADER
+  // Stash native pointer into X_DISPATCH_HEADER. The handle is published
+  // before the signature: a lock-free reader that sees the signature (and
+  // then fences) also sees the handle (GetNativeObject fast path).
   static void StashHandle(X_DISPATCH_HEADER* header, uint32_t handle) {
-    header->wait_list_flink = kXObjSignature;
     header->wait_list_blink = handle;
+    std::atomic_thread_fence(std::memory_order_release);
+    header->wait_list_flink = kXObjSignature;
   }
 
   static uint32_t TimeoutTicksToMs(int64_t timeout_ticks);

@@ -1,3 +1,5 @@
+#include <rex/graphics/nx_frame_budget.h>
+#include <rex/graphics/nx_ab.h>
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -34,15 +36,23 @@
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/graphics/vulkan/deferred_command_buffer.h>
 #include <rex/graphics/vulkan/render_target_cache.h>
+#include <rex/graphics/vulkan/ownership_copy.h>
+#include <rex/graphics/vulkan/ownership_partial_copy.h>
+#include <rex/graphics/vulkan/ownership_strategy.h>
+#include <rex/graphics/vulkan/transfer_render_area.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/ui/vulkan/util.h>
+#include <rex/ui/vulkan/stencil_copy.h>
+
+REXCVAR_DECLARE(bool, vulkan_stencil_copy_ownership);
 
 REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
                       "Vulkan render target implementation path")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(bool, vulkan_device_uniform_buffers);
+REXCVAR_DECLARE(bool, vulkan_tight_render_area);
 REXCVAR_DEFINE_BOOL(
     vulkan_ownership_transfer_diagnostics, false, "GPU/Vulkan",
     "Count standalone render-target ownership-transfer work for bounded "
@@ -51,6 +61,51 @@ REXCVAR_DEFINE_BOOL(
     vulkan_transfer_in_draw_pass, false, "GPU/Vulkan",
     "Encode compatible render-target ownership transfers in the following "
     "guest draw pass (experimental on tile-based GPUs)");
+
+REXCVAR_DEFINE_BOOL(
+    vulkan_image_copy_ownership,
+#if defined(REX_PLATFORM_NX) && REX_PLATFORM_NX
+    true,
+#else
+    false,
+#endif
+    "GPU/Vulkan",
+    "Use bit-preserving image copies for matching render-target ownership transfers")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Mesa's saved hierarchical depth metadata is available only when a depth
+// image is never written through transfer commands. Keep depth ownership on
+// the established attachment-draw path on Switch, while retaining direct
+// same-format color copies. This policy is chosen when the image is created.
+REXCVAR_DEFINE_BOOL(
+    vulkan_image_copy_depth_ownership,
+#if defined(REX_PLATFORM_NX) && REX_PLATFORM_NX
+    false,
+#else
+    true,
+#endif
+    "GPU/Vulkan",
+    "Allow direct depth ownership copies (disables saved depth culling on Mesa Switch)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Float24 emulation writes fragment depth, and ownership conversions include
+// eight stencil passes on NVK. Allow matching float-depth copies independently
+// of the D24_UNORM saved-depth-metadata policy. This is an init-only experiment;
+// hardware timings decide its cost, including any loss of driver metadata.
+REXCVAR_DEFINE_BOOL(
+    vulkan_image_copy_float_depth_ownership, REX_PLATFORM_NX != 0, "GPU/Vulkan",
+    "Allow matching float-depth ownership copies independently of UNORM depth")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(
+    vulkan_partial_image_copy_ownership, REX_PLATFORM_NX != 0, "GPU/Vulkan",
+    "Copy independent matching-format regions in mixed ownership batches");
+REXCVAR_DEFINE_BOOL(vulkan_raw_depth_ownership, REX_PLATFORM_NX != 0, "GPU/Vulkan",
+                    "Use bounded integer scratch for large exact D32 depth ownership copies.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(
+    vulkan_shader_ownership_large_copies, REX_PLATFORM_NX != 0, "GPU/Vulkan",
+    "Use preflighted transfer shaders for ownership copies with many mapped row strips")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // DEFINE_string(
 //     render_target_path_vulkan, "",
@@ -72,6 +127,9 @@ REXCVAR_DEFINE_BOOL(
 //     "  Choose what is considered the most optimal for the system (currently "
 //     "always FB because the FSI path is much slower now).",
 //     "GPU");
+
+#include <rex/graphics/vulkan/raw_depth_shader.h>
+#include <rex/graphics/vulkan/raw_depth_plan.h>
 
 namespace rex::graphics::vulkan {
 
@@ -1116,6 +1174,14 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   ResetTraceDownload();
+  for (auto& scratch : stencil_scratch_) {
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyFramebuffer, device, scratch->framebuffer.framebuffer);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImageView, device, scratch->view);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImage, device, scratch->image);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, scratch->memory);
+  }
+  stencil_scratch_.clear();
+  stencil_scratch_bytes_ = 0;
 
   // Destroy all render targets before the descriptor set pool is destroyed -
   // may happen if shutting down the VulkanRenderTargetCache by destroying it,
@@ -1173,6 +1239,17 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
                                          dump_pipeline_layout_depth_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                          dump_pipeline_layout_color_);
+
+  for (auto& scratch : raw_depth_scratch_) DestroyRawDepthScratch(*scratch);
+  raw_depth_scratch_.clear();
+  raw_depth_scratch_bytes_ = 0;
+  for (const auto& pair : raw_depth_pipelines_)
+    for (VkPipeline pipeline : pair.second)
+      if (pipeline) dfn.vkDestroyPipeline(device, pipeline, nullptr);
+  raw_depth_pipelines_.clear();
+  for (auto& pass : raw_depth_render_passes_)
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyRenderPass, device, pass);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device, raw_depth_pipeline_layout_);
 
   for (const auto& transfer_pipeline_array_pair : transfer_pipelines_) {
     for (VkPipeline transfer_pipeline : transfer_pipeline_array_pair.second) {
@@ -1957,6 +2034,18 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
     } break;
 
     case Path::kPixelShaderInterlock: {
+      // Vulkan permits mixed sample rates in an attachmentless subpass when
+      // variableMultisampleRate is enabled. Preserve the conservative split on
+      // devices without that feature; keep all EDRAM hazards/barriers below.
+      const uint32_t previous_samples = uint32_t(last_update_render_pass_key_.msaa_samples);
+      const uint32_t next_samples = uint32_t(render_pass_key.msaa_samples);
+      const bool variable_rate = command_processor_.GetVulkanDevice()->properties().variableMultisampleRate;
+      if (rex::graphics::nx_frame_budget::SplitFsiSampleRatePass(
+              previous_samples, next_samples, variable_rate)) {
+        command_processor_.EndRenderPass();
+      } else if (previous_samples != next_samples) {
+        rex::graphics::nx_frame_budget::AvoidedPassSplits().fetch_add(1, std::memory_order_relaxed);
+      }
       // For FSI, only the barrier is needed - already scheduled if required.
       // But the buffer will be used for FSI drawing now.
       UseEdramBuffer(EdramBufferUsage::kFragmentReadWrite);
@@ -2168,7 +2257,12 @@ bool VulkanRenderTargetCache::PreflightPendingDrawPassTransfers(
             host_depth_source_vulkan_rt != nullptr,
             host_depth_source_is_copy);
         if (!GetTransferPipelines(
-                TransferPipelineKey(render_pass_key, shader_key))) {
+                TransferPipelineKey(
+                    render_pass_key, shader_key, dest_key.GetPitchTiles(),
+                    source_vulkan_rt->key().GetPitchTiles(),
+                    host_depth_source_vulkan_rt && !host_depth_source_is_copy
+                        ? host_depth_source_vulkan_rt->key().GetPitchTiles()
+                        : 0))) {
           return false;
         }
       }
@@ -2355,9 +2449,10 @@ VkRenderPass VulkanRenderTargetCache::GetHostRenderTargetsRenderPass(RenderPassK
     VkAttachmentDescription& attachment = attachments[attachment_index];
     attachment.flags = 0;
     xenos::ColorRenderTargetFormat color_format = color_formats[i];
-    attachment.format = key.color_rts_use_transfer_formats
+    attachment.format = key.stencil_color_transfer ? VK_FORMAT_R8_UINT
+                        : (key.color_rts_use_transfer_formats
                             ? GetColorOwnershipTransferVulkanFormat(color_format, key.msaa_samples)
-                            : GetColorVulkanFormat(color_format);
+                            : GetColorVulkanFormat(color_format));
     attachment.samples = samples;
     attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2645,11 +2740,54 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
                  key.is_depth ? "depth" : "color", static_cast<uint32_t>(key.resource_format));
     return nullptr;
   }
+  // Direct ownership copies and stencil-only copy destinations are separate
+  // capabilities. A destination-only stencil path must not opt UNORM depth
+  // targets into source copies against the explicit depth-copy policy.
+  const bool want_direct_copy = REXCVAR_GET(vulkan_image_copy_ownership) &&
+      (!key.is_depth || REXCVAR_GET(vulkan_image_copy_depth_ownership) ||
+       (key.GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8 &&
+        REXCVAR_GET(vulkan_image_copy_float_depth_ownership)));
+  const bool want_stencil_destination = key.is_depth &&
+      rex::ui::vulkan::StencilCopyEnabled(vulkan_device->device());
+  bool image_copy_supported = false;
+  bool stencil_copy_destination_supported = false;
+  if (want_direct_copy || want_stencil_destination) {
+    VkFormatProperties properties;
+    vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(
+        vulkan_device->physical_device(), image_create_info.format, &properties);
+    constexpr VkFormatFeatureFlags transfer_features =
+        VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    image_copy_supported = want_direct_copy &&
+        (properties.optimalTilingFeatures & transfer_features) == transfer_features;
+    stencil_copy_destination_supported = want_stencil_destination &&
+        (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0;
+    if (image_copy_supported)
+      image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    else if (stencil_copy_destination_supported)
+      image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  }
   VkImage image;
   VkDeviceMemory memory;
-  if (!ui::vulkan::util::CreateDedicatedAllocationImage(
-          vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image,
-          memory)) {
+  bool image_created = ui::vulkan::util::CreateDedicatedAllocationImage(
+      vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image, memory);
+  if (!image_created && image_copy_supported) {
+    // Rejecting Src+Dst need not reject a destination-only stencil path.
+    image_copy_supported = false;
+    image_create_info.usage &= ~VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!stencil_copy_destination_supported)
+      image_create_info.usage &= ~VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_created = ui::vulkan::util::CreateDedicatedAllocationImage(
+        vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image, memory);
+  }
+  if (!image_created && stencil_copy_destination_supported) {
+    // A format can advertise transfers but reject this usage/MSAA combination.
+    // The final retry retains the established attachment-only configuration.
+    stencil_copy_destination_supported = false;
+    image_create_info.usage &= ~VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_created = ui::vulkan::util::CreateDedicatedAllocationImage(
+        vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image, memory);
+  }
+  if (!image_created) {
     REXGPU_ERROR(
         "VulkanRenderTarget: Failed to create a {}x{} {}xMSAA {} render target "
         "image",
@@ -2813,7 +2951,8 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
 
   return new VulkanRenderTarget(key, *this, image, memory, view_depth_color, view_depth_stencil,
                                 view_stencil, view_srgb, view_color_transfer_separate,
-                                descriptor_set_index_transfer_source);
+                                descriptor_set_index_transfer_source, image_copy_supported,
+                                stencil_copy_destination_supported);
 }
 
 bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(
@@ -3167,6 +3306,15 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
         main_interface.push_back(output_fragment_stencil_ref);
       }
       break;
+    case TransferOutput::kStencilBit:
+      if (key.stencil_copy_output) {
+        type_fragment_data = type_uint;
+        output_fragment_data = builder.createVariable(spv::NoPrecision, spv::StorageClassOutput,
+                                                       type_uint, "xe_stencil_byte");
+        builder.addDecoration(output_fragment_data, spv::DecorationLocation, 0);
+        main_interface.push_back(output_fragment_data);
+      }
+      break;
     default:
       break;
   }
@@ -3338,8 +3486,29 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
       // One sample per draw, with different sample masks.
       spec_const_sample_id = builder.makeUintConstant(0, true);
       builder.addName(spec_const_sample_id, "xe_transfer_sample_id");
-      builder.addDecoration(spec_const_sample_id, spv::DecorationSpecId, 0);
+      builder.addDecoration(spec_const_sample_id, spv::DecorationSpecId, kTransferSpecIdSample);
     }
+  }
+
+  // Constant pitches let the driver strength-reduce the per-fragment source
+  // tile divisions. Base offsets stay in the existing packed push constants.
+  // Share shader modules across pitches and specialize only the pipelines.
+  spv::Id spec_const_dest_pitch_tiles = builder.makeUintConstant(1, true);
+  builder.addName(spec_const_dest_pitch_tiles, "xe_transfer_dest_pitch_tiles");
+  builder.addDecoration(spec_const_dest_pitch_tiles, spv::DecorationSpecId,
+                        kTransferSpecIdDestPitch);
+  spv::Id spec_const_source_pitch_tiles = builder.makeUintConstant(1, true);
+  builder.addName(spec_const_source_pitch_tiles, "xe_transfer_source_pitch_tiles");
+  builder.addDecoration(spec_const_source_pitch_tiles, spv::DecorationSpecId,
+                        kTransferSpecIdSourcePitch);
+  spv::Id spec_const_host_depth_source_pitch_tiles = spv::NoResult;
+  if (pipeline_layout_info.used_descriptor_sets &
+      kTransferUsedDescriptorSetHostDepthStencilTexturesBit) {
+    spec_const_host_depth_source_pitch_tiles = builder.makeUintConstant(1, true);
+    builder.addName(spec_const_host_depth_source_pitch_tiles,
+                    "xe_transfer_host_depth_source_pitch_tiles");
+    builder.addDecoration(spec_const_host_depth_source_pitch_tiles, spv::DecorationSpecId,
+                          kTransferSpecIdHostDepthSourcePitch);
   }
 
   // Begin the main function.
@@ -3397,12 +3566,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
   // Calculate the 32bpp tile index from its X and Y parts.
   spv::Id dest_tile_index = builder.createBinOp(
       spv::OpIAdd, type_uint,
-      builder.createBinOp(
-          spv::OpIMul, type_uint,
-          builder.createTriOp(spv::OpBitFieldUExtract, type_uint, address_constant,
-                              builder.makeUintConstant(0),
-                              builder.makeUintConstant(xenos::kEdramPitchTilesBits)),
-          dest_tile_index_y),
+      builder.createBinOp(spv::OpIMul, type_uint, spec_const_dest_pitch_tiles,
+                          dest_tile_index_y),
       dest_tile_index_x);
 
   // Load the destination sample index.
@@ -3743,10 +3908,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
       builder.makeUintConstant(xenos::kEdramTileCount - 1));
   // Split the source 32bpp tile index into X and Y tile index within the source
   // image.
-  spv::Id source_pitch_tiles =
-      builder.createTriOp(spv::OpBitFieldUExtract, type_uint, address_constant,
-                          builder.makeUintConstant(xenos::kEdramPitchTilesBits),
-                          builder.makeUintConstant(xenos::kEdramPitchTilesBits));
+  spv::Id source_pitch_tiles = spec_const_source_pitch_tiles;
   spv::Id source_tile_index_y =
       builder.createBinOp(spv::OpUDiv, type_uint, source_tile_index, source_pitch_tiles);
   spv::Id source_tile_index_x =
@@ -4473,6 +4635,14 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
         }
       }
     }
+    if (mode.output == TransferOutput::kStencilBit && !source_is_color) {
+      // Stencil-only modes intentionally never load the depth texture. Use
+      // the fetched stencil byte directly rather than testing an unset packed
+      // value (the previous bit path consequently set every bit).
+      assert_true(source_stencil[0] != spv::NoResult);
+      packed = source_stencil[0];
+    }
+
     switch (mode.output) {
       case TransferOutput::kColor: {
         // Unless a special path was taken, unpack the raw 32bpp value into the
@@ -4748,10 +4918,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
                 builder.makeUintConstant(xenos::kEdramTileCount - 1));
             // Split the host depth source tile index into X and Y tile index
             // within the source image.
-            spv::Id host_depth_source_pitch_tiles =
-                builder.createTriOp(spv::OpBitFieldUExtract, type_uint, host_depth_address_constant,
-                                    builder.makeUintConstant(xenos::kEdramPitchTilesBits),
-                                    builder.makeUintConstant(xenos::kEdramPitchTilesBits));
+            assert_true(spec_const_host_depth_source_pitch_tiles != spv::NoResult);
+            spv::Id host_depth_source_pitch_tiles = spec_const_host_depth_source_pitch_tiles;
             spv::Id host_depth_source_tile_index_y =
                 builder.createBinOp(spv::OpUDiv, type_uint, host_depth_source_tile_index,
                                     host_depth_source_pitch_tiles);
@@ -4949,7 +5117,12 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
         }
       } break;
       case TransferOutput::kStencilBit: {
-        if (packed) {
+        if (key.stencil_copy_output) {
+          assert_true(packed != spv::NoResult);
+          builder.createStore(builder.createBinOp(spv::OpBitwiseAnd, type_uint, packed,
+                                                  builder.makeUintConstant(UINT8_MAX)),
+                              output_fragment_data);
+        } else if (packed) {
           // Kill the sample if the needed stencil bit is not set.
           assert_true(push_constants_member_stencil_mask != UINT32_MAX);
           id_vector_temp.clear();
@@ -5055,20 +5228,29 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
   shader_stages[1].module = fragment_shader_module;
   shader_stages[1].pName = "main";
   shader_stages[1].pSpecializationInfo = nullptr;
-  VkSpecializationMapEntry sample_id_specialization_map_entry;
-  uint32_t sample_id_specialization_constant;
-  VkSpecializationInfo sample_id_specialization_info;
-  if (dest_is_masked_sample) {
-    sample_id_specialization_map_entry.constantID = 0;
-    sample_id_specialization_map_entry.offset = 0;
-    sample_id_specialization_map_entry.size = sizeof(uint32_t);
-    sample_id_specialization_constant = 0;
-    sample_id_specialization_info.mapEntryCount = 1;
-    sample_id_specialization_info.pMapEntries = &sample_id_specialization_map_entry;
-    sample_id_specialization_info.dataSize = sizeof(sample_id_specialization_constant);
-    sample_id_specialization_info.pData = &sample_id_specialization_constant;
-    shader_stages[1].pSpecializationInfo = &sample_id_specialization_info;
-  }
+  // Keep masked sample ID 0 and pitch IDs 1..3 in one specialization block.
+  // Derivative pipelines only change the sample value below, preserving all
+  // pitch values for each destination sample.
+  std::array<uint32_t, 4> specialization_constants = {
+      0, key.pitch_tiles[0], key.pitch_tiles[1], key.pitch_tiles[2]};
+  const std::array<VkSpecializationMapEntry, 4> specialization_map_entries = {{
+      {kTransferSpecIdSample, 0, sizeof(uint32_t)},
+      {kTransferSpecIdDestPitch, sizeof(uint32_t), sizeof(uint32_t)},
+      {kTransferSpecIdSourcePitch, sizeof(uint32_t) * 2, sizeof(uint32_t)},
+      {kTransferSpecIdHostDepthSourcePitch, sizeof(uint32_t) * 3, sizeof(uint32_t)},
+  }};
+  const bool host_depth_source_is_texture =
+      (kTransferPipelineLayoutInfos[size_t(mode.pipeline_layout)].used_descriptor_sets &
+       kTransferUsedDescriptorSetHostDepthStencilTexturesBit) != 0;
+  const uint32_t specialization_first_entry = dest_is_masked_sample ? 0 : 1;
+  VkSpecializationInfo specialization_info = {};
+  specialization_info.mapEntryCount =
+      (host_depth_source_is_texture ? 4 : 3) - specialization_first_entry;
+  specialization_info.pMapEntries =
+      specialization_map_entries.data() + specialization_first_entry;
+  specialization_info.dataSize = sizeof(specialization_constants);
+  specialization_info.pData = specialization_constants.data();
+  shader_stages[1].pSpecializationInfo = &specialization_info;
 
   VkVertexInputBindingDescription vertex_input_binding;
   vertex_input_binding.binding = 0;
@@ -5154,7 +5336,7 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
   }
   if ((mode.output == TransferOutput::kDepth &&
        vulkan_device->extensions().ext_EXT_shader_stencil_export) ||
-      mode.output == TransferOutput::kStencilBit) {
+      (mode.output == TransferOutput::kStencilBit && !key.shader_key.stencil_copy_output)) {
     depth_stencil_state.stencilTestEnable = VK_TRUE;
     depth_stencil_state.front.failOp = VK_STENCIL_OP_KEEP;
     depth_stencil_state.front.passOp = VK_STENCIL_OP_REPLACE;
@@ -5178,7 +5360,9 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
   color_blend_state.attachmentCount =
       32 - rex::lzcnt(key.render_pass_key.depth_and_color_used >> 1);
   color_blend_state.pAttachments = color_blend_attachments;
-  if (mode.output == TransferOutput::kColor) {
+  if (key.shader_key.stencil_copy_output) {
+    color_blend_attachments[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+  } else if (mode.output == TransferOutput::kColor) {
     assert_true(device_properties.independentBlend);
     color_blend_attachments[key.shader_key.dest_color_rt_index].colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
@@ -5208,11 +5392,11 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
       if (!(key.render_pass_key.depth_and_color_used & (1 << (1 + i)))) {
         continue;
       }
-      color_attachment_formats[i] =
-          key.render_pass_key.color_rts_use_transfer_formats
+      color_attachment_formats[i] = key.render_pass_key.stencil_color_transfer ? VK_FORMAT_R8_UINT
+          : (key.render_pass_key.color_rts_use_transfer_formats
               ? GetColorOwnershipTransferVulkanFormat(
                     color_formats[i], key.render_pass_key.msaa_samples)
-              : GetColorVulkanFormat(color_formats[i]);
+              : GetColorVulkanFormat(color_formats[i]));
       color_attachment_count = i + 1;
     }
     pipeline_rendering_create_info.colorAttachmentCount =
@@ -5232,7 +5416,7 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
   dynamic_state.pDynamicStates = dynamic_states.data();
   dynamic_states[dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_VIEWPORT;
   dynamic_states[dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_SCISSOR;
-  if (mode.output == TransferOutput::kStencilBit) {
+  if (mode.output == TransferOutput::kStencilBit && !key.shader_key.stencil_copy_output) {
     dynamic_states[dynamic_state.dynamicStateCount++] = VK_DYNAMIC_STATE_STENCIL_WRITE_MASK;
   }
 
@@ -5280,7 +5464,7 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
       // supported.
       uint32_t host_sample_index =
           (dest_sample_count == 2 && !msaa_2x_attachments_supported_ && i == 1) ? 3 : i;
-      sample_id_specialization_constant = host_sample_index;
+      specialization_constants[0] = host_sample_index;
       sample_mask = uint32_t(1) << host_sample_index;
       if (dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info, nullptr,
                                         &pipelines[i]) != VK_SUCCESS) {
@@ -5298,6 +5482,366 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
     }
   }
   return transfer_pipelines_.emplace(key, pipelines).first->second.data();
+}
+
+VulkanRenderTargetCache::StencilScratch* VulkanRenderTargetCache::GetStencilScratch(
+    VkExtent2D extent, xenos::MsaaSamples guest_samples, RenderPassKey pass_key) {
+  const auto* device = command_processor_.GetVulkanDevice();
+  if (!rex::ui::vulkan::StencilCopyEnabled(device->device()) || !extent.width || !extent.height)
+    return nullptr;
+  const auto samples = guest_samples == xenos::MsaaSamples::k2X && !msaa_2x_attachments_supported_
+      ? VK_SAMPLE_COUNT_4_BIT : VkSampleCountFlagBits(uint32_t(1) << uint32_t(guest_samples));
+  for (auto& scratch : stencil_scratch_) {
+    if (scratch->samples == samples && scratch->framebuffer.host_extent.width >= extent.width &&
+        scratch->framebuffer.host_extent.height >= extent.height) return scratch.get();
+  }
+  constexpr VkDeviceSize kBudget = 32 * 1024 * 1024;
+  if (stencil_scratch_.size() >= 8 ||
+      uint64_t(extent.width) * extent.height * uint32_t(samples) > kBudget - stencil_scratch_bytes_)
+    return nullptr;
+  VkImageFormatProperties props{};
+  constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  if (device->vulkan_instance()->functions().vkGetPhysicalDeviceImageFormatProperties(
+          device->physical_device(), VK_FORMAT_R8_UINT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+          usage, 0, &props) != VK_SUCCESS || !(props.sampleCounts & samples) ||
+      props.maxExtent.width < extent.width || props.maxExtent.height < extent.height) return nullptr;
+  const auto& dfn = device->functions();
+  const VkDevice handle = device->device();
+  auto scratch = std::make_unique<StencilScratch>();
+  auto cleanup = [&]() {
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyFramebuffer, handle, scratch->framebuffer.framebuffer);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImageView, handle, scratch->view);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyImage, handle, scratch->image);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, handle, scratch->memory);
+  };
+  VkImageCreateInfo image{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  image.imageType = VK_IMAGE_TYPE_2D;
+  image.format = VK_FORMAT_R8_UINT;
+  image.extent = {extent.width, extent.height, 1};
+  image.mipLevels = image.arrayLayers = 1;
+  image.samples = samples;
+  image.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image.usage = usage;
+  image.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (!ui::vulkan::util::CreateDedicatedAllocationImage(device, image,
+          ui::vulkan::util::MemoryPurpose::kDeviceLocal, scratch->image, scratch->memory,
+          nullptr, &scratch->allocation_bytes)) { cleanup(); return nullptr; }
+  if (scratch->allocation_bytes > kBudget - stencil_scratch_bytes_) { cleanup(); return nullptr; }
+  VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  view.image = scratch->image;
+  view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view.format = VK_FORMAT_R8_UINT;
+  view.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                     VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+  view.subresourceRange = ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+  if (dfn.vkCreateImageView(handle, &view, nullptr, &scratch->view) != VK_SUCCESS) {
+    cleanup(); return nullptr;
+  }
+  const VkRenderPass pass = GetHostRenderTargetsRenderPass(pass_key);
+  if (pass == VK_NULL_HANDLE) { cleanup(); return nullptr; }
+  VkFramebufferCreateInfo framebuffer{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+  framebuffer.renderPass = pass;
+  framebuffer.attachmentCount = 1;
+  framebuffer.pAttachments = &scratch->view;
+  framebuffer.width = extent.width;
+  framebuffer.height = extent.height;
+  framebuffer.layers = 1;
+  if (dfn.vkCreateFramebuffer(handle, &framebuffer, nullptr,
+          &scratch->framebuffer.framebuffer) != VK_SUCCESS) { cleanup(); return nullptr; }
+  scratch->framebuffer.host_extent = extent;
+  scratch->samples = samples;
+  stencil_scratch_bytes_ += scratch->allocation_bytes;
+  REXGPU_INFO("[StencilByteScratch] {}x{} samples={} bytes={} pool_bytes={}",
+              extent.width, extent.height, uint32_t(samples), scratch->allocation_bytes,
+              stencil_scratch_bytes_);
+  stencil_scratch_.push_back(std::move(scratch));
+  return stencil_scratch_.back().get();
+}
+
+bool VulkanRenderTargetCache::PreflightShaderOwnershipTransfers(
+    VulkanRenderTarget& destination, const std::vector<Transfer>& transfers) {
+  // Preflight the complete eventual fallback, including incompatible objects
+  // left in a partial-copy batch. Never replace a cheap copy with eight stencil
+  // bit passes merely because the scratch pool or a pipeline is unavailable.
+  if (transfers.empty() || transfers.size() > 64) return false;
+  const auto* device = command_processor_.GetVulkanDevice();
+  const auto destination_key = destination.key();
+  const bool needs_stencil_byte = destination_key.is_depth &&
+      !device->extensions().ext_EXT_shader_stencil_export;
+  if (needs_stencil_byte && (!destination.stencil_copy_destination_supported() ||
+      !rex::ui::vulkan::StencilCopyEnabled(device->device()))) return false;
+
+  RenderPassKey pass_key;
+  pass_key.msaa_samples = destination_key.msaa_samples;
+  if (destination_key.is_depth) {
+    pass_key.depth_and_color_used = 0b1;
+    pass_key.depth_format = destination_key.GetDepthFormat();
+  } else {
+    pass_key.depth_and_color_used = 0b10;
+    pass_key.color_0_view_format = destination_key.GetColorFormat();
+    pass_key.color_rts_use_transfer_formats = 1;
+  }
+  if (GetHostRenderTargetsRenderPass(pass_key) == VK_NULL_HANDLE) return false;
+  const RenderTarget* targets[1 + xenos::kMaxColorRenderTargets]{};
+  targets[destination_key.is_depth ? 0 : 1] = &destination;
+  const auto* framebuffer = GetHostRenderTargetsFramebuffer(
+      pass_key, destination_key.pitch_tiles_at_32bpp, targets);
+  if (!framebuffer) return false;
+
+  ownership_strategy::ScratchBounds bounds(framebuffer->host_extent.width,
+                                            framebuffer->host_extent.height);
+  std::vector<std::vector<ownership_copy::Rectangle>> rectangles(transfers.size());
+  for (size_t index = 0; index < transfers.size(); ++index) {
+    const auto& transfer = transfers[index];
+    if (!transfer.source || transfer.source == &destination ||
+        static_cast<VulkanRenderTarget*>(transfer.source)->image() == destination.image()) return false;
+    Transfer::Rectangle spans[Transfer::kMaxRectanglesWithCutout];
+    const auto count = transfer.GetRectangles(destination_key.base_tiles,
+        destination_key.GetPitchTiles(), destination_key.msaa_samples,
+        destination_key.Is64bpp(), spans);
+    for (uint32_t rectangle = 0; rectangle < count; ++rectangle) {
+      const auto& span = spans[rectangle];
+      if (!bounds.Include(span.x_pixels, span.y_pixels, span.width_pixels,
+                          span.height_pixels, draw_resolution_scale_x(),
+                          draw_resolution_scale_y())) return false;
+      rectangles[index].push_back({span.x_pixels, span.y_pixels,
+                                   span.width_pixels, span.height_pixels});
+    }
+  }
+  if (!bounds.valid() || !ownership_copy::PairwiseDisjoint(rectangles)) return false;
+
+  RenderPassKey byte_pass_key;
+  byte_pass_key.msaa_samples = destination_key.msaa_samples;
+  byte_pass_key.depth_and_color_used = 0b10;
+  byte_pass_key.stencil_color_transfer = 1;
+  if (needs_stencil_byte) {
+    const auto area = bounds.Get();
+    if (!GetStencilScratch({area.image_width, area.image_height},
+                            destination_key.msaa_samples, byte_pass_key)) return false;
+  }
+  const uint32_t pipeline_count = device->properties().sampleRateShading
+      ? 1 : uint32_t(1) << uint32_t(destination_key.msaa_samples);
+  for (const auto& transfer : transfers) {
+    auto& source = *static_cast<VulkanRenderTarget*>(transfer.source);
+    const auto source_key = source.key();
+    auto* host_depth = static_cast<VulkanRenderTarget*>(transfer.host_depth_source);
+    const bool host_depth_copy = host_depth == &destination;
+    if (source.GetDescriptorSetTransferSource() == VK_NULL_HANDLE) return false;
+    if (host_depth && !host_depth_copy &&
+        host_depth->GetDescriptorSetTransferSource() == VK_NULL_HANDLE) return false;
+    TransferShaderKey shader_key;
+    shader_key.dest_msaa_samples = destination_key.msaa_samples;
+    shader_key.dest_resource_format = destination_key.resource_format;
+    shader_key.source_msaa_samples = source_key.msaa_samples;
+    shader_key.source_resource_format = source_key.resource_format;
+    shader_key.host_depth_source_msaa_samples = host_depth && !host_depth_copy
+        ? host_depth->key().msaa_samples : xenos::MsaaSamples::k1X;
+    shader_key.mode = GetTransferMode(false, destination_key.is_depth, source_key.is_depth,
+                                     host_depth != nullptr, host_depth_copy);
+    const auto& mode = kTransferModes[size_t(shader_key.mode)];
+    const bool host_depth_texture =
+        (kTransferPipelineLayoutInfos[size_t(mode.pipeline_layout)].used_descriptor_sets &
+         kTransferUsedDescriptorSetHostDepthStencilTexturesBit) != 0;
+    if (host_depth_texture && !host_depth) return false;
+    const auto* pipelines = GetTransferPipelines(TransferPipelineKey(pass_key, shader_key,
+        destination_key.GetPitchTiles(), source_key.GetPitchTiles(),
+        host_depth_texture ? host_depth->key().GetPitchTiles() : 0));
+    if (!pipelines) return false;
+    for (uint32_t pipeline = 0; pipeline < pipeline_count; ++pipeline)
+      if (pipelines[pipeline] == VK_NULL_HANDLE) return false;
+    if (needs_stencil_byte) {
+      shader_key.host_depth_source_msaa_samples = xenos::MsaaSamples::k1X;
+      shader_key.mode = GetTransferMode(true, true, source_key.is_depth, false, false);
+      shader_key.stencil_copy_output = 1;
+      pipelines = GetTransferPipelines(TransferPipelineKey(byte_pass_key, shader_key,
+          destination_key.GetPitchTiles(), source_key.GetPitchTiles()));
+      if (!pipelines) return false;
+      for (uint32_t pipeline = 0; pipeline < pipeline_count; ++pipeline)
+        if (pipelines[pipeline] == VK_NULL_HANDLE) return false;
+    }
+  }
+  return true;
+}
+
+#include <rex/graphics/vulkan/raw_depth_runtime.h>
+
+bool VulkanRenderTargetCache::TryImageCopyOwnershipTransfers(
+    VulkanRenderTarget& destination, const std::vector<Transfer>& transfers,
+    const std::vector<Transfer>* shader_fallback_transfers) {
+  if (transfers.empty() || !destination.image_copy_supported()) return false;
+  const RenderTargetKey destination_key = destination.key();
+  if (TryRawDepthOwnershipTransfers(destination, transfers)) return true;
+  bool shader_copy_is_bit_exact = false;
+  if (!destination_key.is_depth) {
+    const auto format = destination_key.GetColorFormat();
+    GetColorOwnershipTransferVulkanFormat(format, destination_key.msaa_samples,
+                                          &shader_copy_is_bit_exact);
+    // Preserve R12's canonicalization guard for 16-bit fallback formats.
+    // Their float/SNORM host views can hold encodings that the guest transfer
+    // renderer must normalize before writing another target.
+    if ((format == xenos::ColorRenderTargetFormat::k_16_16 ||
+         format == xenos::ColorRenderTargetFormat::k_16_16_16_16 ||
+         format == xenos::ColorRenderTargetFormat::k_16_16_FLOAT ||
+         format == xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT) &&
+        !shader_copy_is_bit_exact) return false;
+  }
+  const uint32_t scale_x = draw_resolution_scale_x();
+  const uint32_t scale_y = draw_resolution_scale_y();
+  const uint32_t tile_width =
+      (xenos::kEdramTileWidthSamples * scale_x) >>
+      (uint32_t(destination_key.Is64bpp()) +
+       uint32_t(destination_key.msaa_samples >= xenos::MsaaSamples::k4X));
+  const uint32_t tile_height =
+      (xenos::kEdramTileHeightSamples * scale_y) >>
+      uint32_t(destination_key.msaa_samples >= xenos::MsaaSamples::k2X);
+  const ownership_copy::Surface destination_surface{
+      destination_key.base_tiles, destination_key.GetPitchTiles(),
+      destination_key.GetWidth() * scale_x,
+      GetRenderTargetHeight(destination_key.pitch_tiles_at_32bpp,
+                            destination_key.msaa_samples) * scale_y};
+  struct Plan {
+    VulkanRenderTarget* source;
+    std::vector<VkImageCopy> regions;
+  };
+  std::vector<Plan> plans;
+  plans.reserve(transfers.size());
+  std::vector<std::vector<ownership_copy::Rectangle>> copy_destinations;
+  copy_destinations.reserve(transfers.size());
+  uint64_t pixels = 0;
+  uint64_t regions_total = 0;
+  uint64_t rectangle_total = 0;
+  for (const Transfer& transfer : transfers) {
+    if (!transfer.source || transfer.source == &destination) return false;
+    auto& source = *static_cast<VulkanRenderTarget*>(transfer.source);
+    const RenderTargetKey source_key = source.key();
+    if (!source.image_copy_supported() || source.image() == destination.image() ||
+        source_key.is_depth != destination_key.is_depth ||
+        source_key.resource_format != destination_key.resource_format ||
+        source_key.msaa_samples != destination_key.msaa_samples) return false;
+    // Same-format depth->depth transfer shaders store source depth directly;
+    // the auxiliary host-depth source is used only for format conversions.
+    const ownership_copy::Surface source_surface{
+        source_key.base_tiles, source_key.GetPitchTiles(), source_key.GetWidth() * scale_x,
+        GetRenderTargetHeight(source_key.pitch_tiles_at_32bpp, source_key.msaa_samples) * scale_y};
+    Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
+    const uint32_t rectangle_count = transfer.GetRectangles(
+        destination_key.base_tiles, destination_key.GetPitchTiles(),
+        destination_key.msaa_samples, destination_key.Is64bpp(), rectangles);
+    rectangle_total += rectangle_count;
+    ownership_copy::Rectangle copy_rectangles[Transfer::kMaxRectanglesWithCutout];
+    for (uint32_t j = 0; j < rectangle_count; ++j) {
+      copy_rectangles[j] = {rectangles[j].x_pixels * scale_x,
+                           rectangles[j].y_pixels * scale_y,
+                           rectangles[j].width_pixels * scale_x,
+                           rectangles[j].height_pixels * scale_y};
+    }
+    copy_destinations.emplace_back(copy_rectangles, copy_rectangles + rectangle_count);
+    // The shader wraps EDRAM tile addresses. Direct copies may only use the
+    // unwrapped address domain; padded host rows beyond tile 2047 must fall
+    // back to the shader rather than copying a different source row.
+    for (uint32_t rectangle = 0; rectangle < rectangle_count; ++rectangle) {
+      if (!raw_depth::UnwrappedTiles(source_surface, destination_surface,
+              tile_width, tile_height, copy_rectangles[rectangle])) return false;
+    }
+    std::vector<ownership_copy::Region> mapped_regions;
+    if (!ownership_copy::BuildRegions(source_surface, destination_surface,
+                                      tile_width, tile_height, copy_rectangles,
+                                      rectangle_count, mapped_regions)) return false;
+    Plan plan{&source, {}};
+    plan.regions.reserve(mapped_regions.size());
+    for (const auto& region : mapped_regions) {
+      VkImageCopy copy = {};
+      copy.srcSubresource.aspectMask = destination_key.is_depth
+          ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
+          : VK_IMAGE_ASPECT_COLOR_BIT;
+      copy.srcSubresource.layerCount = 1;
+      copy.dstSubresource = copy.srcSubresource;
+      copy.srcOffset = {int32_t(region.source_x), int32_t(region.source_y), 0};
+      copy.dstOffset = {int32_t(region.destination_x), int32_t(region.destination_y), 0};
+      copy.extent = {region.width, region.height, 1};
+      plan.regions.push_back(copy);
+      // Copy both aspects together. Switch NVK stores packed depth/stencil and
+      // one combined region uses one copy-engine launch; separate aspect copies
+      // each perform a component-masked write to the same packed texels.
+      pixels += uint64_t(region.width) * region.height;
+    }
+    regions_total += plan.regions.size();
+    if (regions_total > 8192) return false;
+    plans.push_back(std::move(plan));
+  }
+  // No commands or usage changes have been emitted yet. Preserve the fallback
+  // for dependent writes rather than inserting per-object WAW synchronization.
+  if (!ownership_copy::PairwiseDisjoint(copy_destinations)) return false;
+  const uint32_t sample_pipelines = command_processor_.GetVulkanDevice()->properties().sampleRateShading
+      ? 1 : uint32_t(1) << uint32_t(destination_key.msaa_samples);
+  if (shader_copy_is_bit_exact && REXCVAR_GET(vulkan_shader_ownership_large_copies) &&
+      ownership_strategy::HighAmplification(regions_total, rectangle_total,
+                                            sample_pipelines, destination_key.is_depth) &&
+      PreflightShaderOwnershipTransfers(destination,
+          shader_fallback_transfers ? *shader_fallback_transfers : transfers)) {
+    ownership_shader_route_objects_ += transfers.size();
+    ownership_shader_route_regions_ += regions_total;
+    if (ownership_shader_route_objects_ == transfers.size() ||
+        ownership_shader_route_objects_ / 256 !=
+            (ownership_shader_route_objects_ - transfers.size()) / 256) {
+      REXGPU_INFO("[OwnershipShaderRoute] objects={} avoided_regions={}",
+                  ownership_shader_route_objects_, ownership_shader_route_regions_);
+    }
+    // No GPU commands or image-usage changes have been emitted. The caller
+    // retains its complete transfer list for the existing shader renderer.
+    return false;
+  }
+  auto& commands = command_processor_.deferred_command_buffer();
+  const VkImageAspectFlags aspects = destination_key.is_depth
+      ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+  for (const Plan& plan : plans) {
+    auto& source = *plan.source;
+    command_processor_.PushImageMemoryBarrier(
+        source.image(), ui::vulkan::util::InitializeSubresourceRange(aspects),
+        source.current_stage_mask(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+        source.current_access_mask(), VK_ACCESS_TRANSFER_READ_BIT,
+        source.current_layout(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    source.SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  }
+  command_processor_.PushImageMemoryBarrier(
+      destination.image(), ui::vulkan::util::InitializeSubresourceRange(aspects),
+      destination.current_stage_mask(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+      destination.current_access_mask(), VK_ACCESS_TRANSFER_WRITE_BIT,
+      destination.current_layout(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  destination.SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  // All source reads and destination writes are independent, so transition them
+  // together and keep the destination in transfer usage for the entire batch.
+  command_processor_.SubmitBarriers(true);
+  for (const Plan& plan : plans) {
+    auto& source = *plan.source;
+    commands.CmdVkCopyImage(source.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           destination.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           uint32_t(plan.regions.size()), plan.regions.data());
+  }
+  // Restore draw usage, including standalone callers outside Update().
+  VkPipelineStageFlags stage;
+  VkAccessFlags access;
+  VkImageLayout layout;
+  destination.GetDrawUsage(&stage, &access, &layout);
+  command_processor_.PushImageMemoryBarrier(
+      destination.image(), ui::vulkan::util::InitializeSubresourceRange(aspects),
+      destination.current_stage_mask(), stage, destination.current_access_mask(), access,
+      destination.current_layout(), layout);
+  destination.SetUsage(stage, access, layout);
+  ownership_image_copy_objects_ += transfers.size();
+  ownership_image_copy_regions_ += regions_total;
+  ownership_image_copy_pixels_ += pixels;
+  if (ownership_image_copy_objects_ == transfers.size() ||
+      (ownership_image_copy_objects_ / 256 !=
+       (ownership_image_copy_objects_ - transfers.size()) / 256)) {
+    REXGPU_INFO("[OwnershipImageCopy] objects={} regions={} pixels={}",
+                ownership_image_copy_objects_, ownership_image_copy_regions_,
+                ownership_image_copy_pixels_);
+  }
+  return true;
 }
 
 void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
@@ -5535,20 +6079,20 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       continue;
     }
 
-    const std::vector<Transfer>& current_transfers = render_target_transfers[i];
-    if (current_transfers.empty() && !resolve_clear_needed) {
+    const std::vector<Transfer>& input_transfers = render_target_transfers[i];
+    if (input_transfers.empty() && !resolve_clear_needed) {
       continue;
     }
 
     auto& dest_vulkan_rt = *static_cast<VulkanRenderTarget*>(dest_rt);
     RenderTargetKey dest_rt_key = dest_vulkan_rt.key();
 
-    if (collect_ownership_transfer_diagnostics && !current_transfers.empty()) {
+    if (collect_ownership_transfer_diagnostics && !input_transfers.empty()) {
       uint64_t rectangle_total = 0;
       uint64_t pixel_total = 0;
       const uint32_t dest_pitch_tiles = dest_rt_key.GetPitchTiles();
       const bool dest_is_64bpp = dest_rt_key.Is64bpp();
-      for (const Transfer& transfer : current_transfers) {
+      for (const Transfer& transfer : input_transfers) {
         Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
         const uint32_t rectangle_count = transfer.GetRectangles(
             dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples,
@@ -5614,16 +6158,83 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       }
       if (in_current_render_pass) {
         ++ownership_transfer_merged_pass_count_;
-        ownership_transfer_merged_object_count_ += current_transfers.size();
+        ownership_transfer_merged_object_count_ += input_transfers.size();
         ownership_transfer_merged_rectangle_count_ += rectangle_total;
         ownership_transfer_merged_pixel_count_ += pixel_total;
       } else {
         ++ownership_transfer_standalone_pass_count_;
-        ownership_transfer_object_count_ += current_transfers.size();
+        ownership_transfer_object_count_ += input_transfers.size();
         ownership_transfer_rectangle_count_ += rectangle_total;
         ownership_transfer_pixel_count_ += pixel_total;
       }
     }
+
+    if (!in_current_render_pass && !resolve_clear_needed &&
+        REXCVAR_GET(vulkan_image_copy_ownership) &&
+        TryImageCopyOwnershipTransfers(dest_vulkan_rt, input_transfers)) {
+      continue;
+    }
+
+    std::vector<Transfer> remaining_transfers;
+    bool partial_copy_performed = false;
+    if (!in_current_render_pass && !resolve_clear_needed &&
+        REXCVAR_GET(vulkan_image_copy_ownership) &&
+        REXCVAR_GET(vulkan_partial_image_copy_ownership) &&
+        dest_vulkan_rt.image_copy_supported() && input_transfers.size() > 1 &&
+        input_transfers.size() <= 64) {
+      // Dedicated images have distinct storage. Reject all feedback aliases:
+      // a reordered write must not change a later source or host-depth read.
+      bool independent_sources = true;
+      for (const Transfer& transfer : input_transfers) {
+        if (!transfer.source || transfer.source == dest_rt ||
+            transfer.host_depth_source == dest_rt ||
+            static_cast<VulkanRenderTarget*>(transfer.source)->image() == dest_vulkan_rt.image()) {
+          independent_sources = false;
+          break;
+        }
+      }
+      if (independent_sources) {
+        std::vector<std::vector<ownership_copy::Rectangle>> rectangles(input_transfers.size());
+        for (size_t index = 0; index < input_transfers.size(); ++index) {
+          Transfer::Rectangle spans[Transfer::kMaxRectanglesWithCutout];
+          const uint32_t count = input_transfers[index].GetRectangles(
+              dest_rt_key.base_tiles, dest_rt_key.GetPitchTiles(), dest_rt_key.msaa_samples,
+              dest_rt_key.Is64bpp(), spans);
+          for (uint32_t rectangle = 0; rectangle < count; ++rectangle) {
+            const auto& span = spans[rectangle];
+            rectangles[index].push_back({span.x_pixels, span.y_pixels,
+                                         span.width_pixels, span.height_pixels});
+          }
+        }
+        remaining_transfers.reserve(input_transfers.size());
+        std::vector<Transfer> compatible_transfers;
+        compatible_transfers.reserve(input_transfers.size());
+        for (size_t index = 0; index < input_transfers.size(); ++index) {
+          const Transfer& transfer = input_transfers[index];
+          const auto& source = *static_cast<VulkanRenderTarget*>(transfer.source);
+          const auto source_key = source.key();
+          const bool matching = source.image_copy_supported() &&
+              source_key.is_depth == dest_rt_key.is_depth &&
+              source_key.resource_format == dest_rt_key.resource_format &&
+              source_key.msaa_samples == dest_rt_key.msaa_samples;
+          if (matching && ownership_copy::DisjointFromOthers(rectangles, index)) {
+            compatible_transfers.push_back(transfer);
+          } else {
+            remaining_transfers.push_back(transfer);
+          }
+        }
+        // Try preflights the whole selection before emitting any command. One
+        // batch avoids transfer->draw->transfer layout round trips per object.
+        // The full matching list was already attempted above. Retrying it
+        // would duplicate policy preflight and route diagnostics.
+        partial_copy_performed = !compatible_transfers.empty() &&
+            compatible_transfers.size() != input_transfers.size() &&
+            TryImageCopyOwnershipTransfers(dest_vulkan_rt, compatible_transfers, &input_transfers);
+      }
+    }
+    if (partial_copy_performed && remaining_transfers.empty()) continue;
+    const std::vector<Transfer>& current_transfers =
+        partial_copy_performed ? remaining_transfers : input_transfers;
 
     // Late barriers in case there was cross-copying that prevented merging of
     // barriers.
@@ -5691,6 +6302,114 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
                                : dest_vulkan_rt.view_color_transfer();
     }
 
+    // Every ownership/stencil draw writes the same rectangles, and a resolve
+    // clear has a known destination rectangle. Use their union for attachment
+    // load/store work, preserving the full-area fallback when no bounds exist.
+    VkRect2D bounded_transfer_render_area = {};
+    const VkRect2D* transfer_render_area_ptr = nullptr;
+    if (!in_current_render_pass && REXCVAR_GET(vulkan_tight_render_area)) {
+      transfer_render_area::Bounds bounds(transfer_framebuffer->host_extent.width,
+                                         transfer_framebuffer->host_extent.height);
+      for (const Transfer& transfer : current_transfers) {
+        Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
+        const uint32_t rectangle_count = transfer.GetRectangles(
+            dest_rt_key.base_tiles, dest_rt_key.GetPitchTiles(), dest_rt_key.msaa_samples,
+            dest_rt_key.Is64bpp(), rectangles, resolve_clear_rectangle);
+        for (uint32_t rectangle_index = 0; rectangle_index < rectangle_count;
+             ++rectangle_index) {
+          const Transfer::Rectangle& rectangle = rectangles[rectangle_index];
+          bounds.IncludeScaled({rectangle.x_pixels, rectangle.y_pixels,
+                                rectangle.width_pixels, rectangle.height_pixels},
+                               draw_resolution_scale_x(), draw_resolution_scale_y());
+        }
+      }
+      if (resolve_clear_needed) {
+        // This VkClearRect was already scaled and validated by the common cache.
+        bounds.Include({uint32_t(resolve_clear_rect.rect.offset.x),
+                        uint32_t(resolve_clear_rect.rect.offset.y),
+                        resolve_clear_rect.rect.extent.width,
+                        resolve_clear_rect.rect.extent.height});
+      }
+      const auto rectangle = bounds.Get();
+      bounded_transfer_render_area.offset = {int32_t(rectangle.x), int32_t(rectangle.y)};
+      bounded_transfer_render_area.extent = {rectangle.width, rectangle.height};
+      transfer_render_area_ptr = &bounded_transfer_render_area;
+    }
+
+    StencilScratch* stencil_scratch = nullptr;
+    RenderPassKey stencil_pass_key;
+    stencil_pass_key.msaa_samples = dest_rt_key.msaa_samples;
+    stencil_pass_key.depth_and_color_used = 0b10;
+    stencil_pass_key.stencil_color_transfer = 1;
+    VkRenderPass stencil_pass = VK_NULL_HANDLE;
+    VkRect2D stencil_render_area{};
+    const VkRect2D* stencil_render_area_ptr = nullptr;
+    std::vector<VkImageCopy> recorded_stencil_regions;
+    bool stencil_pass_interrupted = false;
+    // C6: the A/B stencil transfer mode (nx_ab.h); 0 keeps the scratch copy.
+    const int stencil_transfer_mode =
+        nx_ab::StencilTransferMode().load(std::memory_order_relaxed);
+    if (stencil_transfer_mode == 0 && !in_current_render_pass && dest_rt_key.is_depth &&
+        dest_vulkan_rt.stencil_copy_destination_supported() &&
+        !vulkan_device->extensions().ext_EXT_shader_stencil_export &&
+        rex::ui::vulkan::StencilCopyEnabled(vulkan_device->device()) &&
+        current_transfers.size() <= 64 && !current_transfers.empty()) {
+      // The old stencil renderer clears then ORs individual bits. Full-byte
+      // replacement is equivalent only when all destinations are disjoint.
+      std::vector<std::vector<ownership_copy::Rectangle>> regions(current_transfers.size());
+      ownership_strategy::ScratchBounds stencil_bounds(transfer_framebuffer->host_extent.width,
+                                                        transfer_framebuffer->host_extent.height);
+      bool eligible = true;
+      for (size_t index = 0; index < current_transfers.size() && eligible; ++index) {
+        const auto& transfer = current_transfers[index];
+        if (!transfer.source || transfer.source == dest_rt ||
+            static_cast<VulkanRenderTarget*>(transfer.source)->image() == dest_vulkan_rt.image()) {
+          eligible = false; break;
+        }
+        Transfer::Rectangle spans[Transfer::kMaxRectanglesWithCutout];
+        const uint32_t count = transfer.GetRectangles(dest_rt_key.base_tiles,
+            dest_rt_key.GetPitchTiles(), dest_rt_key.msaa_samples, false, spans, resolve_clear_rectangle);
+        for (uint32_t rectangle = 0; rectangle < count; ++rectangle) {
+          const auto& span = spans[rectangle];
+          if (!stencil_bounds.Include(span.x_pixels, span.y_pixels, span.width_pixels,
+                                       span.height_pixels, draw_resolution_scale_x(),
+                                       draw_resolution_scale_y())) { eligible = false; break; }
+          regions[index].push_back({span.x_pixels, span.y_pixels, span.width_pixels, span.height_pixels});
+        }
+      }
+      eligible = eligible && ownership_copy::PairwiseDisjoint(regions);
+      if (eligible) {
+        const auto stencil_bounds_result = stencil_bounds.Get();
+        stencil_render_area.offset = {int32_t(stencil_bounds_result.x), int32_t(stencil_bounds_result.y)};
+        stencil_render_area.extent = {stencil_bounds_result.width, stencil_bounds_result.height};
+        stencil_render_area_ptr = &stencil_render_area;
+        stencil_scratch = GetStencilScratch(
+            {stencil_bounds_result.image_width, stencil_bounds_result.image_height}, dest_rt_key.msaa_samples,
+                                            stencil_pass_key);
+        if (stencil_scratch) {
+          const uint32_t pipeline_count = vulkan_device->properties().sampleRateShading
+              ? 1 : (uint32_t(1) << uint32_t(dest_rt_key.msaa_samples));
+          for (const auto& transfer : current_transfers) {
+            const auto source_key = transfer.source->key();
+            TransferShaderKey shader_key;
+            shader_key.dest_msaa_samples = dest_rt_key.msaa_samples;
+            shader_key.dest_resource_format = dest_rt_key.resource_format;
+            shader_key.source_msaa_samples = source_key.msaa_samples;
+            shader_key.source_resource_format = source_key.resource_format;
+            shader_key.mode = GetTransferMode(true, true, source_key.is_depth, false, false);
+            shader_key.stencil_copy_output = 1;
+            const VkPipeline* pipelines = GetTransferPipelines(TransferPipelineKey(
+                stencil_pass_key, shader_key, dest_rt_key.GetPitchTiles(), source_key.GetPitchTiles()));
+            if (!pipelines) { stencil_scratch = nullptr; break; }
+            for (uint32_t pipeline = 0; pipeline < pipeline_count; ++pipeline)
+              if (pipelines[pipeline] == VK_NULL_HANDLE) { stencil_scratch = nullptr; break; }
+            if (!stencil_scratch) break;
+          }
+          if (stencil_scratch) stencil_pass = GetHostRenderTargetsRenderPass(stencil_pass_key);
+        }
+      }
+    }
+
     if (!current_transfers.empty()) {
       uint32_t dest_pitch_tiles = dest_rt_key.GetPitchTiles();
       bool dest_is_64bpp = dest_rt_key.Is64bpp();
@@ -5699,6 +6418,10 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       // switches. Also gather stencil rectangles to clear if needed.
       bool need_stencil_bit_draws =
           dest_rt_key.is_depth && !vulkan_device->extensions().ext_EXT_shader_stencil_export;
+      if (need_stencil_bit_draws && stencil_transfer_mode == 2) {
+        need_stencil_bit_draws = false;
+        nx_ab::BumpSingleWriter(nx_ab::StencilTransfersSkipped());
+      }
       current_transfer_invocations_.clear();
       current_transfer_invocations_.reserve(current_transfers.size()
                                             << uint32_t(need_stencil_bit_draws));
@@ -5750,7 +6473,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
               j != 0, dest_rt_key.is_depth, source_rt_key.is_depth,
               host_depth_source_vulkan_rt != nullptr,
               host_depth_source_is_copy);
-          if (j) {
+          new_transfer_shader_key.stencil_copy_output = j && stencil_scratch != nullptr;
+          if (j && !stencil_scratch) {
             stencil_clear_rectangle_count += transfer.GetRectangles(
                 dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
                 nullptr, resolve_clear_rectangle);
@@ -5809,12 +6533,17 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
         }
       }
 
+      // Classify only the fallback transfer draws, including stencil-bit
+      // draws, independently from the guest geometry. No Vulkan commands,
+      // barriers, render-pass boundaries or draw payloads are changed.
+      command_buffer.CmdSetRenderOperation(
+          DeferredCommandBuffer::GpuOperation::kOwnershipRender);
       // Perform the transfers for the render target.
 
       if (!in_current_render_pass) {
         command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
             transfer_render_pass, transfer_framebuffer, transfer_dest_view,
-            dest_rt_key.is_depth);
+            dest_rt_key.is_depth, transfer_render_area_ptr);
       }
 
       if (stencil_clear_rectangle_count) {
@@ -5912,6 +6641,29 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
         bool transfer_is_stencil_bit = (transfer_pipeline_layout_info.used_push_constant_dwords &
                                         kTransferUsedPushConstantDwordStencilMaskBit) != 0;
 
+        command_buffer.CmdSetRenderOperation(
+            transfer_is_stencil_bit ? DeferredCommandBuffer::GpuOperation::kOwnershipStencil
+            : (transfer_mode_info.output == TransferOutput::kDepth
+                ? DeferredCommandBuffer::GpuOperation::kOwnershipDepth
+                : DeferredCommandBuffer::GpuOperation::kOwnershipColor));
+
+        if (transfer_shader_key.stencil_copy_output) {
+          assert_not_null(stencil_scratch);
+          command_processor_.PushImageMemoryBarrier(stencil_scratch->image,
+              ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT),
+              stencil_scratch->stage, VulkanRenderTarget::kColorDrawStageMask,
+              stencil_scratch->access, VulkanRenderTarget::kColorDrawAccessMask,
+              stencil_scratch->layout, VulkanRenderTarget::kColorDrawLayout,
+              VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, !stencil_pass_interrupted);
+          stencil_scratch->stage = VulkanRenderTarget::kColorDrawStageMask;
+          stencil_scratch->access = VulkanRenderTarget::kColorDrawAccessMask;
+          stencil_scratch->layout = VulkanRenderTarget::kColorDrawLayout;
+          command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+              stencil_pass, &stencil_scratch->framebuffer, stencil_scratch->view, false,
+              stencil_render_area_ptr);
+          stencil_pass_interrupted = false;
+        }
+
         uint32_t transfer_vertex_count = 6 * transfer_rectangle_count;
         VkBuffer transfer_vertex_buffer;
         VkDeviceSize transfer_vertex_buffer_offset;
@@ -5920,6 +6672,47 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
                 current_submission, sizeof(float) * 2 * transfer_vertex_count, sizeof(float),
                 transfer_vertex_buffer, transfer_vertex_buffer_offset));
         if (!transfer_rectangle_write_ptr) {
+          if (transfer_shader_key.stencil_copy_output) {
+            // Match the old clear+bit-pass path on upload allocation failure.
+            // Successful disjoint rectangles stay in scratch; failed ones are
+            // zeroed on the destination and never copied from unwritten data.
+            // Dynamic rendering has no implicit external dependencies. LOAD
+            // must see prior destination stores when re-entering its pass.
+            command_processor_.PushImageMemoryBarrier(dest_vulkan_rt.image(),
+                ui::vulkan::util::InitializeSubresourceRange(
+                    VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
+                dest_vulkan_rt.current_stage_mask(), VulkanRenderTarget::kDepthDrawStageMask,
+                dest_vulkan_rt.current_access_mask(), VulkanRenderTarget::kDepthDrawAccessMask,
+                dest_vulkan_rt.current_layout(), VulkanRenderTarget::kDepthDrawLayout,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
+            command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+                transfer_render_pass, transfer_framebuffer, transfer_dest_view, true,
+                transfer_render_area_ptr);
+            // Force the same-usage scratch dependency only on the next entry,
+            // preserving one scratch pass for an uninterrupted successful batch.
+            stencil_pass_interrupted = true;
+            VkClearAttachment* attachment;
+            VkClearRect* rectangles;
+            command_buffer.CmdClearAttachmentsEmplace(1, attachment, transfer_rectangle_count, rectangles);
+            *attachment = {};
+            attachment->aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+            uint32_t written = 0;
+            for (auto merged = it_merged_first; merged <= it_merged_last; ++merged) {
+              Transfer::Rectangle spans[Transfer::kMaxRectanglesWithCutout];
+              const uint32_t count = merged->transfer.GetRectangles(dest_rt_key.base_tiles,
+                  dest_pitch_tiles, dest_rt_key.msaa_samples, false, spans, resolve_clear_rectangle);
+              for (uint32_t rectangle = 0; rectangle < count; ++rectangle) {
+                const auto& span = spans[rectangle];
+                VkClearRect& clear = rectangles[written++];
+                clear.rect.offset = {int32_t(span.x_pixels * draw_resolution_scale_x()),
+                                     int32_t(span.y_pixels * draw_resolution_scale_y())};
+                clear.rect.extent = {span.width_pixels * draw_resolution_scale_x(),
+                                     span.height_pixels * draw_resolution_scale_y()};
+                clear.baseArrayLayer = 0;
+                clear.layerCount = 1;
+              }
+            }
+          }
           continue;
         }
         for (auto it_merged = it_merged_first; it_merged <= it_merged_last; ++it_merged) {
@@ -5972,7 +6765,13 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
                                               &transfer_vertex_buffer_offset);
 
         const VkPipeline* transfer_pipelines = GetTransferPipelines(
-            TransferPipelineKey(transfer_render_pass_key, transfer_shader_key));
+            TransferPipelineKey(
+                transfer_shader_key.stencil_copy_output ? stencil_pass_key : transfer_render_pass_key,
+                transfer_shader_key, dest_pitch_tiles, source_vulkan_rt.key().GetPitchTiles(),
+                (transfer_pipeline_layout_info.used_descriptor_sets &
+                 kTransferUsedDescriptorSetHostDepthStencilTexturesBit)
+                    ? host_depth_source_vulkan_rt->key().GetPitchTiles()
+                    : 0));
         if (!transfer_pipelines) {
           continue;
         }
@@ -6107,8 +6906,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
           if (j) {
             command_processor_.BindExternalGraphicsPipeline(transfer_pipelines[j]);
           }
-          for (uint32_t k = 0; k < uint32_t(transfer_is_stencil_bit ? 8 : 1); ++k) {
-            if (transfer_is_stencil_bit) {
+          for (uint32_t k = 0; k < uint32_t(transfer_is_stencil_bit && !transfer_shader_key.stencil_copy_output ? 8 : 1); ++k) {
+            if (transfer_is_stencil_bit && !transfer_shader_key.stencil_copy_output) {
               uint32_t transfer_stencil_bit = uint32_t(1) << k;
               command_buffer.CmdVkPushConstants(
                   transfer_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -6122,13 +6921,68 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             command_buffer.CmdVkDraw(transfer_vertex_count, 1, 0, 0);
           }
         }
+        if (transfer_shader_key.stencil_copy_output) {
+          ++stencil_copy_draws_;
+          for (auto merged = it_merged_first; merged <= it_merged_last; ++merged) {
+            Transfer::Rectangle spans[Transfer::kMaxRectanglesWithCutout];
+            const uint32_t count = merged->transfer.GetRectangles(dest_rt_key.base_tiles,
+                dest_pitch_tiles, dest_rt_key.msaa_samples, false, spans, resolve_clear_rectangle);
+            for (uint32_t rectangle = 0; rectangle < count; ++rectangle) {
+              const auto& span = spans[rectangle];
+              VkImageCopy copy{};
+              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+              copy.dstSubresource = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1};
+              copy.srcOffset = {int32_t(span.x_pixels * draw_resolution_scale_x()),
+                                int32_t(span.y_pixels * draw_resolution_scale_y()), 0};
+              copy.dstOffset = copy.srcOffset;
+              copy.extent = {span.width_pixels * draw_resolution_scale_x(),
+                             span.height_pixels * draw_resolution_scale_y(), 1};
+              recorded_stencil_regions.push_back(copy);
+            }
+          }
+        }
       }
+      if (!recorded_stencil_regions.empty()) {
+        command_processor_.PushImageMemoryBarrier(stencil_scratch->image,
+            ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT),
+            stencil_scratch->stage, VK_PIPELINE_STAGE_TRANSFER_BIT, stencil_scratch->access,
+            VK_ACCESS_TRANSFER_READ_BIT, stencil_scratch->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        stencil_scratch->stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        stencil_scratch->access = VK_ACCESS_TRANSFER_READ_BIT;
+        stencil_scratch->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        command_processor_.PushImageMemoryBarrier(dest_vulkan_rt.image(),
+            ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
+            dest_vulkan_rt.current_stage_mask(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+            dest_vulkan_rt.current_access_mask(), VK_ACCESS_TRANSFER_WRITE_BIT,
+            dest_vulkan_rt.current_layout(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        dest_vulkan_rt.SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        command_processor_.SubmitBarriers(true);
+        command_buffer.CmdVkCopyImage(stencil_scratch->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            dest_vulkan_rt.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            uint32_t(recorded_stencil_regions.size()), recorded_stencil_regions.data());
+        VkPipelineStageFlags stage; VkAccessFlags access; VkImageLayout layout;
+        dest_vulkan_rt.GetDrawUsage(&stage, &access, &layout);
+        command_processor_.PushImageMemoryBarrier(dest_vulkan_rt.image(),
+            ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
+            dest_vulkan_rt.current_stage_mask(), stage, dest_vulkan_rt.current_access_mask(), access,
+            dest_vulkan_rt.current_layout(), layout);
+        dest_vulkan_rt.SetUsage(stage, access, layout);
+        const auto previous_regions = stencil_copy_regions_;
+        stencil_copy_regions_ += recorded_stencil_regions.size();
+        if (!previous_regions || previous_regions / 256 != stencil_copy_regions_ / 256)
+          REXGPU_INFO("[StencilByteCopy] draws={} regions={} pool_bytes={}",
+              stencil_copy_draws_, stencil_copy_regions_, stencil_scratch_bytes_);
+      }
+      command_buffer.CmdSetRenderOperation(
+          DeferredCommandBuffer::GpuOperation::kRender);
     }
 
     // Perform the clear.
     if (resolve_clear_needed) {
       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth,
+          transfer_render_area_ptr);
       VkClearAttachment resolve_clear_attachment;
       resolve_clear_attachment.colorAttachment = 0;
       std::memset(&resolve_clear_attachment.clearValue, 0,
